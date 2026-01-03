@@ -142,6 +142,10 @@ SYNC_INTERRUPTED="false"
 # Gum availability
 GUM_AVAILABLE="false"
 
+# Network timeout configuration (abort if transfer rate drops below threshold)
+GIT_TIMEOUT="${GIT_TIMEOUT:-30}"  # Seconds before aborting slow operations
+GIT_LOW_SPEED_LIMIT="${GIT_LOW_SPEED_LIMIT:-1000}"  # Bytes/second threshold
+
 #==============================================================================
 # SECTION 4: CORE UTILITIES
 #==============================================================================
@@ -309,6 +313,7 @@ SYNC OPTIONS:
     --dir PATH           Override projects directory
     --resume             Resume an interrupted sync from where it left off
     --restart            Discard interrupted sync state and start fresh
+    --timeout SECONDS    Network timeout for slow operations (default: 30)
 
 STATUS OPTIONS:
     --fetch              Fetch remotes first (default)
@@ -1038,6 +1043,23 @@ check_remote_mismatch() {
     [[ "$expected_normalized" != "$actual_normalized" ]]
 }
 
+# Set up git environment for network timeouts
+# These variables cause git to abort if transfer rate drops too low for too long
+setup_git_timeout() {
+    export GIT_HTTP_LOW_SPEED_LIMIT="$GIT_LOW_SPEED_LIMIT"
+    export GIT_HTTP_LOW_SPEED_TIME="$GIT_TIMEOUT"
+}
+
+# Check if a git error indicates a timeout
+is_timeout_error() {
+    local output="$1"
+    # Check for common timeout-related error messages
+    [[ "$output" == *"RPC failed"* ]] ||
+    [[ "$output" == *"timed out"* ]] ||
+    [[ "$output" == *"The remote end hung up unexpectedly"* ]] ||
+    [[ "$output" == *"transfer rate"* ]]
+}
+
 # Clone repository using gh
 do_clone() {
     local url="$1"
@@ -1059,6 +1081,9 @@ do_clone() {
     # Create parent directory if needed
     mkdir -p "$(dirname "$target_dir")"
 
+    # Set up timeout environment
+    setup_git_timeout
+
     local output
     if output=$(gh repo clone "$clone_target" "$target_dir" -- --quiet 2>&1); then
         local duration=$(($(date +%s) - start_time))
@@ -1067,9 +1092,14 @@ do_clone() {
         return 0
     else
         local exit_code=$?
-        log_error "Failed to clone: $repo_name"
-        log_verbose "  $output"
-        write_result "$repo_name" "clone" "failed" "0" "$output"
+        if is_timeout_error "$output"; then
+            log_error "Timeout: $repo_name (network too slow)"
+            write_result "$repo_name" "clone" "timeout" "0" "$output"
+        else
+            log_error "Failed to clone: $repo_name"
+            log_verbose "  $output"
+            write_result "$repo_name" "clone" "failed" "0" "$output"
+        fi
         return $exit_code
     fi
 }
@@ -1090,6 +1120,9 @@ do_pull() {
 
     local start_time
     start_time=$(date +%s)
+
+    # Set up timeout environment
+    setup_git_timeout
 
     # Build pull arguments based on strategy
     local pull_args=()
@@ -1125,7 +1158,10 @@ do_pull() {
         local reason="failed"
 
         # Categorize the failure
-        if [[ "$output" =~ (divergent|cannot\ be\ fast-forwarded) ]]; then
+        if is_timeout_error "$output"; then
+            reason="timeout"
+            log_error "Timeout: $repo_name (network too slow)"
+        elif [[ "$output" =~ (divergent|cannot\ be\ fast-forwarded) ]]; then
             reason="diverged"
             log_warn "Diverged: $repo_name (needs manual merge or --rebase)"
         elif [[ "$output" =~ (conflict|CONFLICT) ]]; then
@@ -1362,6 +1398,10 @@ parse_args() {
             --restart)
                 RESTART="true"
                 shift
+                ;;
+            --timeout)
+                GIT_TIMEOUT="$2"
+                shift 2
                 ;;
             sync|status|init|add|remove|list|doctor|self-update|config)
                 COMMAND="$1"
@@ -2201,7 +2241,15 @@ process_single_repo() {
         if [[ "$action" == "sync" ]] && [[ "$PULL_ONLY" != "true" ]]; then
             do_clone "$url" "$local_path" "$repo_name"
             if [[ -n "$branch" ]] && [[ -d "$local_path" ]]; then
-                git -C "$local_path" checkout "$branch" 2>/dev/null || true
+                # Check if branch exists on remote
+                if git -C "$local_path" rev-parse --verify "origin/$branch" &>/dev/null; then
+                    if ! git -C "$local_path" checkout "$branch" --quiet 2>/dev/null; then
+                        log_warn "Failed to checkout branch '$branch' for $repo_name"
+                    fi
+                else
+                    log_warn "Branch '$branch' not found for $repo_name, using default branch"
+                    write_result "$repo_name" "clone" "branch_not_found" "0" "Branch: $branch"
+                fi
             fi
         else
             log_info "Not cloned: $repo_name"

@@ -78,10 +78,10 @@ XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
 XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
 
-# ru-specific directories
+# ru-specific directories (can be overridden via env vars)
 RU_CONFIG_DIR="${RU_CONFIG_DIR:-$XDG_CONFIG_HOME/ru}"
-RU_STATE_DIR="${RU_STATE_HOME:-$XDG_STATE_HOME/ru}"
-RU_CACHE_DIR="${RU_CACHE_HOME:-$XDG_CACHE_HOME/ru}"
+RU_STATE_DIR="${RU_STATE_DIR:-$XDG_STATE_HOME/ru}"
+RU_CACHE_DIR="${RU_CACHE_DIR:-$XDG_CACHE_HOME/ru}"
 RU_LOG_DIR="$RU_STATE_DIR/logs"
 
 # Default configuration values
@@ -258,50 +258,6 @@ output_json() {
     fi
 }
 
-# Generate per-repo log file path
-# Args: repo_name (e.g., "owner/repo" or "github.com/owner/repo")
-# Returns: Full path to the log file (e.g., ~/.local/state/ru/logs/2026-01-03/repos/owner_repo.log)
-get_repo_log_path() {
-    local repo_name="$1"
-    local date_dir
-    date_dir=$(date +%Y-%m-%d)
-
-    # Replace / with _ for filesystem safety
-    local safe_name="${repo_name//\//_}"
-
-    # Ensure log directory exists
-    local log_dir="${RU_LOG_DIR}/${date_dir}/repos"
-    ensure_dir "$log_dir"
-
-    echo "${log_dir}/${safe_name}.log"
-}
-
-# Get the run log path for today's run
-get_run_log_path() {
-    local date_dir
-    date_dir=$(date +%Y-%m-%d)
-
-    local log_dir="${RU_LOG_DIR}/${date_dir}"
-    ensure_dir "$log_dir"
-
-    echo "${log_dir}/run.log"
-}
-
-# Update the 'latest' symlink to point to today's log directory
-update_latest_symlink() {
-    local date_dir
-    date_dir=$(date +%Y-%m-%d)
-    local latest_link="${RU_LOG_DIR}/latest"
-
-    # Remove old symlink if it exists
-    if [[ -L "$latest_link" ]]; then
-        rm -f "$latest_link"
-    fi
-
-    # Create new symlink
-    ln -s "${RU_LOG_DIR}/${date_dir}" "$latest_link" 2>/dev/null || true
-}
-
 #==============================================================================
 # SECTION 6: HELP AND VERSION
 #==============================================================================
@@ -440,7 +396,12 @@ EOF
     # Check if key already exists
     if grep -q "^${key}=" "$config_file" 2>/dev/null; then
         # Update existing key (use sed with different delimiter for paths with /)
-        sed -i "s|^${key}=.*|${key}=${value}|" "$config_file"
+        # macOS sed requires -i '' while GNU sed uses -i
+        if [[ "$OSTYPE" == "darwin"* ]]; then
+            sed -i '' "s|^${key}=.*|${key}=${value}|" "$config_file"
+        else
+            sed -i "s|^${key}=.*|${key}=${value}|" "$config_file"
+        fi
     else
         # Append new key
         echo "${key}=${value}" >> "$config_file"
@@ -1638,11 +1599,12 @@ process_single_repo() {
                 fi
             fi
 
-            if [[ "$behind" -gt 0 ]]; then
-                do_pull "$local_path" "$repo_name" "$UPDATE_STRATEGY" "$AUTOSTASH"
-            elif [[ "$status" == "diverged" ]]; then
-                log_warn "Diverged: $repo_name"
+            # Check diverged FIRST (diverged has both ahead>0 AND behind>0)
+            if [[ "$status" == "diverged" ]]; then
+                log_warn "Diverged: $repo_name (ahead=$ahead, behind=$behind)"
                 write_result "$repo_name" "skip" "diverged" "0" ""
+            elif [[ "$behind" -gt 0 ]]; then
+                do_pull "$local_path" "$repo_name" "$UPDATE_STRATEGY" "$AUTOSTASH"
             elif [[ "$ahead" -gt 0 ]]; then
                 log_info "Ahead: $repo_name ($ahead unpushed)"
                 write_result "$repo_name" "status" "ahead" "0" ""
@@ -1707,3 +1669,9 @@ process_all_repos() {
 
     return 0
 }
+
+#==============================================================================
+# RUN MAIN
+#==============================================================================
+
+main "$@"

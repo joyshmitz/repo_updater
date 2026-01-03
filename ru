@@ -133,6 +133,12 @@ FETCH_REMOTES="true"
 # Results tracking (NDJSON temp file)
 RESULTS_FILE=""
 
+# Resume support
+RESUME="false"
+RESTART="false"
+SYNC_STATE_FILE=""
+SYNC_INTERRUPTED="false"
+
 # Gum availability
 GUM_AVAILABLE="false"
 
@@ -300,6 +306,8 @@ SYNC OPTIONS:
     --rebase             Use git pull --rebase
     --dry-run            Show what would happen without making changes
     --dir PATH           Override projects directory
+    --resume             Resume an interrupted sync from where it left off
+    --restart            Discard interrupted sync state and start fresh
 
 STATUS OPTIONS:
     --fetch              Fetch remotes first (default)
@@ -321,8 +329,9 @@ EXIT CODES:
     0  Success
     1  Partial failure (some repos failed)
     2  Conflicts exist (need manual resolution)
-    3  Dependency error (gh missing, auth failed)
+    3  Interrupted sync detected (use --resume or --restart)
     4  Invalid arguments
+    5  Dependency error (gh missing, auth failed)
 
 More info: https://github.com/Dicklesworthstone/repo_updater
 EOF
@@ -1076,10 +1085,141 @@ do_fetch() {
 }
 
 #==============================================================================
+# SECTION 10.5: SYNC STATE MANAGEMENT (for resume support)
+#==============================================================================
+
+# Get path to sync state file
+get_sync_state_file() {
+    echo "$RU_STATE_DIR/sync_state.json"
+}
+
+# Generate a hash of the current repo configuration (for detecting changes)
+get_config_hash() {
+    get_all_repos 2>/dev/null | sort | md5sum | cut -d' ' -f1
+}
+
+# Load sync state from file
+# Sets: SYNC_RUN_ID, SYNC_STATUS, SYNC_CONFIG_HASH, SYNC_COMPLETED (array), SYNC_PENDING (array)
+load_sync_state() {
+    local state_file
+    state_file=$(get_sync_state_file)
+
+    if [[ ! -f "$state_file" ]]; then
+        return 1
+    fi
+
+    # Parse JSON state file (using pure bash - no jq dependency)
+    local content
+    content=$(<"$state_file")
+
+    # Extract fields using grep/sed (simple JSON structure)
+    SYNC_RUN_ID=$(echo "$content" | grep -o '"run_id"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*: *"\([^"]*\)"/\1/')
+    SYNC_STATUS=$(echo "$content" | grep -o '"status"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*: *"\([^"]*\)"/\1/')
+    SYNC_CONFIG_HASH=$(echo "$content" | grep -o '"config_hash"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*: *"\([^"]*\)"/\1/')
+    SYNC_RESULTS_FILE=$(echo "$content" | grep -o '"results_file"[[:space:]]*:[[:space:]]*"[^"]*"' | sed 's/.*: *"\([^"]*\)"/\1/')
+
+    # Extract completed array (comma-separated inside brackets)
+    local completed_str
+    completed_str=$(echo "$content" | grep -o '"completed"[[:space:]]*:[[:space:]]*\[[^]]*\]' | sed 's/.*\[\([^]]*\)\]/\1/')
+    SYNC_COMPLETED=()
+    if [[ -n "$completed_str" ]]; then
+        while IFS= read -r item; do
+            [[ -n "$item" ]] && SYNC_COMPLETED+=("$item")
+        done < <(echo "$completed_str" | tr ',' '\n' | sed 's/[[:space:]]*"\([^"]*\)".*/\1/' | grep -v '^$')
+    fi
+
+    # Extract pending array
+    local pending_str
+    pending_str=$(echo "$content" | grep -o '"pending"[[:space:]]*:[[:space:]]*\[[^]]*\]' | sed 's/.*\[\([^]]*\)\]/\1/')
+    SYNC_PENDING=()
+    if [[ -n "$pending_str" ]]; then
+        while IFS= read -r item; do
+            [[ -n "$item" ]] && SYNC_PENDING+=("$item")
+        done < <(echo "$pending_str" | tr ',' '\n' | sed 's/[[:space:]]*"\([^"]*\)".*/\1/' | grep -v '^$')
+    fi
+
+    return 0
+}
+
+# Save sync state to file (atomic write)
+# Args: status completed_array pending_array
+save_sync_state() {
+    local status="$1"
+    shift
+    local -n completed_ref=$1
+    shift
+    local -n pending_ref=$1
+
+    local state_file
+    state_file=$(get_sync_state_file)
+    local tmp_file="${state_file}.tmp.$$"
+
+    ensure_dir "$(dirname "$state_file")"
+
+    # Build JSON
+    local run_id
+    run_id="${SYNC_RUN_ID:-$(date -Iseconds)}"
+    local config_hash
+    config_hash=$(get_config_hash)
+
+    # Build completed array JSON
+    local completed_json=""
+    for item in "${completed_ref[@]}"; do
+        [[ -n "$completed_json" ]] && completed_json+=","
+        completed_json+="\"$item\""
+    done
+
+    # Build pending array JSON
+    local pending_json=""
+    for item in "${pending_ref[@]}"; do
+        [[ -n "$pending_json" ]] && pending_json+=","
+        pending_json+="\"$item\""
+    done
+
+    cat > "$tmp_file" <<EOF
+{
+  "run_id": "$run_id",
+  "status": "$status",
+  "config_hash": "$config_hash",
+  "results_file": "${RESULTS_FILE:-}",
+  "completed": [$completed_json],
+  "pending": [$pending_json]
+}
+EOF
+
+    # Atomic rename
+    mv "$tmp_file" "$state_file"
+    SYNC_RUN_ID="$run_id"
+}
+
+# Clean up sync state file (on successful completion)
+cleanup_sync_state() {
+    local state_file
+    state_file=$(get_sync_state_file)
+    [[ -f "$state_file" ]] && rm -f "$state_file"
+}
+
+# Check if a repo name is in the completed list
+is_repo_completed() {
+    local repo_name="$1"
+    local item
+    for item in "${SYNC_COMPLETED[@]}"; do
+        [[ "$item" == "$repo_name" ]] && return 0
+    done
+    return 1
+}
+
+#==============================================================================
 # SECTION 11: EXIT TRAP AND CLEANUP
 #==============================================================================
 
 cleanup() {
+    # If sync was interrupted, preserve state file
+    if [[ "$SYNC_INTERRUPTED" == "true" ]]; then
+        log_warn "Sync interrupted. Resume with: ru sync --resume"
+        return
+    fi
+
     # Remove temp files
     if [[ -n "${RESULTS_FILE:-}" && -f "$RESULTS_FILE" ]]; then
         rm -f "$RESULTS_FILE"
@@ -1150,6 +1290,14 @@ parse_args() {
                 ;;
             --no-fetch)
                 FETCH_REMOTES="false"
+                shift
+                ;;
+            --resume)
+                RESUME="true"
+                shift
+                ;;
+            --restart)
+                RESTART="true"
                 shift
                 ;;
             sync|status|init|add|list|doctor|self-update|config)
@@ -1239,12 +1387,107 @@ cmd_sync() {
 
     local total=${#repos[@]}
     local current=0
-    local cloned=0 updated=0 skipped=0 failed=0 conflicts=0
+    local cloned=0 updated=0 skipped=0 failed=0 conflicts=0 resumed=0
 
-    log_info "Syncing $total repositories..."
+    # Resume support: check for interrupted sync
+    SYNC_COMPLETED=()
+    local pending_repos=()
+    local state_exists="false"
+
+    if load_sync_state; then
+        state_exists="true"
+        if [[ "$SYNC_STATUS" == "in_progress" ]]; then
+            if [[ "$RESTART" == "true" ]]; then
+                # User wants to start fresh
+                log_info "Discarding interrupted sync state..."
+                cleanup_sync_state
+                pending_repos=("${repos[@]}")
+            elif [[ "$RESUME" == "true" ]]; then
+                # Resume from where we left off
+                local completed_count=${#SYNC_COMPLETED[@]}
+                log_info "Resuming sync: ${completed_count} repos already completed"
+
+                # Check if config changed
+                local current_hash
+                current_hash=$(get_config_hash)
+                if [[ "$current_hash" != "$SYNC_CONFIG_HASH" ]]; then
+                    log_warn "Repository list has changed since last sync"
+                fi
+
+                # Filter out completed repos
+                for repo_spec in "${repos[@]}"; do
+                    local url branch custom_name local_path repo_name
+                    parse_repo_spec "$repo_spec" url branch custom_name
+                    if [[ -n "$custom_name" ]]; then
+                        local_path="${PROJECTS_DIR}/${custom_name}"
+                    else
+                        local_path=$(url_to_local_path "$url" "$PROJECTS_DIR" "$LAYOUT")
+                    fi
+                    repo_name=$(basename "$local_path")
+
+                    if is_repo_completed "$repo_name"; then
+                        ((resumed++))
+                    else
+                        pending_repos+=("$repo_spec")
+                    fi
+                done
+            else
+                # State exists but no flag - warn user
+                log_warn "Interrupted sync detected from ${SYNC_RUN_ID}"
+                log_warn "${#SYNC_COMPLETED[@]} repos completed, ${#SYNC_PENDING[@]} pending"
+                echo "" >&2
+                log_info "Options:"
+                log_info "  ru sync --resume   # Continue from where you left off"
+                log_info "  ru sync --restart  # Start fresh, discard progress"
+                exit 3
+            fi
+        else
+            # State exists but completed - start fresh
+            pending_repos=("${repos[@]}")
+        fi
+    else
+        # No state file - fresh start
+        pending_repos=("${repos[@]}")
+    fi
+
+    # Set up interrupt handler for graceful resume
+    handle_sync_interrupt() {
+        echo "" >&2
+        log_warn "Sync interrupted!"
+        SYNC_INTERRUPTED="true"
+        # State is already saved after each repo
+        exit 130
+    }
+    trap handle_sync_interrupt INT TERM
+
+    # Initialize pending repos array for state tracking
+    local pending_names=()
+    for repo_spec in "${pending_repos[@]}"; do
+        local url branch custom_name local_path repo_name
+        parse_repo_spec "$repo_spec" url branch custom_name
+        if [[ -n "$custom_name" ]]; then
+            local_path="${PROJECTS_DIR}/${custom_name}"
+        else
+            local_path=$(url_to_local_path "$url" "$PROJECTS_DIR" "$LAYOUT")
+        fi
+        repo_name=$(basename "$local_path")
+        pending_names+=("$repo_name")
+    done
+
+    # Save initial state
+    if [[ ${#pending_repos[@]} -gt 0 ]]; then
+        save_sync_state "in_progress" SYNC_COMPLETED pending_names
+    fi
+
+    local pending_count=${#pending_repos[@]}
+    if [[ $resumed -gt 0 ]]; then
+        log_info "Syncing $pending_count repositories ($resumed already completed)..."
+    else
+        log_info "Syncing $total repositories..."
+    fi
     echo "" >&2
 
-    for repo_spec in "${repos[@]}"; do
+    for repo_spec in "${pending_repos[@]}"; do
         ((current++))
 
         # Parse the repo spec
@@ -1327,14 +1570,32 @@ cmd_sync() {
                 ((failed++))
             fi
         fi
+
+        # Update state: mark this repo as completed
+        SYNC_COMPLETED+=("$repo_name")
+        # Remove from pending_names
+        local new_pending=()
+        for p in "${pending_names[@]}"; do
+            [[ "$p" != "$repo_name" ]] && new_pending+=("$p")
+        done
+        pending_names=("${new_pending[@]}")
+        # Save state after each repo (enables resume on interrupt)
+        save_sync_state "in_progress" SYNC_COMPLETED pending_names
     done
 
     echo "" >&2
+
+    # Sync completed successfully - clean up state file
+    cleanup_sync_state
+
+    # Reset trap to normal cleanup
+    trap cleanup EXIT
 
     log_info "Sync complete:"
     [[ $cloned -gt 0 ]] && log_success "  Cloned:    $cloned"
     [[ $updated -gt 0 ]] && log_success "  Updated:   $updated"
     [[ $skipped -gt 0 ]] && log_info "  Current:   $skipped"
+    [[ $resumed -gt 0 ]] && log_info "  Resumed:   $resumed (skipped from prior run)"
     [[ $conflicts -gt 0 ]] && log_warn "  Conflicts: $conflicts"
     [[ $failed -gt 0 ]] && log_error "  Failed:    $failed"
 

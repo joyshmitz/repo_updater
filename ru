@@ -541,6 +541,33 @@ gum_confirm() {
     fi
 }
 
+# Print styled banner at startup
+print_banner() {
+    [[ "$QUIET" == "true" ]] && return
+
+    if [[ "$GUM_AVAILABLE" == "true" ]]; then
+        gum style --border rounded --padding "0 2" \
+            "🔄 ru v$VERSION" "Repo Updater" >&2
+    else
+        echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}" >&2
+        echo -e "  ${BOLD}ru${NC} v$VERSION - Repo Updater" >&2
+        echo -e "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}" >&2
+    fi
+}
+
+# Show spinner during operation with fallback
+gum_spin() {
+    local title="$1"
+    shift
+
+    if [[ "$GUM_AVAILABLE" == "true" && "$QUIET" != "true" ]]; then
+        gum spin --spinner dot --title "$title" -- "$@"
+    else
+        [[ "$QUIET" != "true" ]] && echo -e "${CYAN}→${NC} $title" >&2
+        "$@"
+    fi
+}
+
 #==============================================================================
 # SECTION 8.1: DEPENDENCY MANAGEMENT
 #==============================================================================
@@ -731,6 +758,40 @@ url_to_clone_target() {
     fi
 
     echo "${owner}/${repo}"
+}
+
+# Sanitize a path segment for filesystem safety
+# Removes/replaces dangerous characters to prevent path traversal and other issues
+sanitize_path_segment() {
+    local segment="$1"
+
+    # Reject empty input
+    [[ -z "$segment" ]] && return 1
+
+    # Remove leading/trailing whitespace
+    segment="${segment#"${segment%%[![:space:]]*}"}"
+    segment="${segment%"${segment##*[![:space:]]}"}"
+
+    # Replace potentially problematic characters
+    segment="${segment//\//_}"    # Forward slash
+    segment="${segment//\\/_}"    # Backslash
+    segment="${segment//:/_}"     # Colon (problematic on Windows)
+    segment="${segment//\*/_}"    # Asterisk
+    segment="${segment//\?/_}"    # Question mark
+    segment="${segment//\"/_}"    # Double quote
+    segment="${segment//\</_}"    # Less than
+    segment="${segment//\>/_}"    # Greater than
+    segment="${segment//\|/_}"    # Pipe
+
+    # Remove leading dots (hidden files/directories)
+    while [[ "$segment" == .* ]]; do
+        segment="${segment#.}"
+    done
+
+    # Reject if empty after sanitization
+    [[ -z "$segment" ]] && return 1
+
+    echo "$segment"
 }
 
 #==============================================================================

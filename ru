@@ -286,6 +286,7 @@ COMMANDS:
     status          Show repository status without making changes
     init            Initialize configuration directory and files
     add <repo>      Add a repository to your list
+    remove <repo>   Remove a repository from your list
     list            Show configured repositories
     doctor          Run system diagnostics
     self-update     Update ru to the latest version
@@ -318,6 +319,7 @@ EXAMPLES:
     ru sync --dry-run    Preview sync without changes
     ru status            Show status of all repos
     ru add owner/repo    Add a repository
+    ru remove owner/repo Remove a repository
     ru doctor            Check system configuration
 
 CONFIGURATION:
@@ -1300,7 +1302,7 @@ parse_args() {
                 RESTART="true"
                 shift
                 ;;
-            sync|status|init|add|list|doctor|self-update|config)
+            sync|status|init|add|remove|list|doctor|self-update|config)
                 COMMAND="$1"
                 shift
                 ;;
@@ -1762,6 +1764,81 @@ cmd_add() {
     done
 }
 
+cmd_remove() {
+    if [[ ${#ARGS[@]} -eq 0 ]]; then
+        log_error "Usage: ru remove <repo> [repo2] ..."
+        log_info "Examples:"
+        log_info "  ru remove owner/repo"
+        log_info "  ru remove https://github.com/owner/repo"
+        exit 4
+    fi
+
+    # Ensure config exists
+    if [[ ! -d "$RU_CONFIG_DIR" ]]; then
+        log_error "No configuration found. Run: ru init"
+        exit 1
+    fi
+
+    local repos_file="$RU_CONFIG_DIR/repos.d/repos.txt"
+    if [[ ! -f "$repos_file" ]]; then
+        log_error "No repositories configured"
+        exit 1
+    fi
+
+    local removed=0 not_found=0
+
+    for repo in "${ARGS[@]}"; do
+        # Normalize the repo URL for matching
+        local host owner repo_name
+        if ! parse_repo_url "$repo" host owner repo_name; then
+            log_error "Invalid repo format: $repo"
+            continue
+        fi
+
+        # Create a pattern that matches the repo in various formats
+        # Match: owner/repo, github.com/owner/repo, https://github.com/owner/repo, git@github.com:owner/repo
+        local pattern_short="${owner}/${repo_name}"
+        local pattern_full="github.com/${owner}/${repo_name}"
+        local pattern_ssh="${owner}/${repo_name}.git"
+
+        # Read file, filter out matching lines, write back
+        local tmp_file="${repos_file}.tmp.$$"
+        local found="false"
+
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            # Skip empty lines and preserve them
+            if [[ -z "$line" ]] || [[ "$line" =~ ^[[:space:]]*# ]]; then
+                echo "$line" >> "$tmp_file"
+                continue
+            fi
+
+            # Check if this line matches the repo to remove
+            if [[ "$line" == *"$pattern_short"* ]] || \
+               [[ "$line" == *"$pattern_full"* ]] || \
+               [[ "$line" == *"$pattern_ssh"* ]]; then
+                found="true"
+                # Don't add to tmp file (remove it)
+            else
+                echo "$line" >> "$tmp_file"
+            fi
+        done < "$repos_file"
+
+        if [[ "$found" == "true" ]]; then
+            mv "$tmp_file" "$repos_file"
+            log_success "Removed: $repo"
+            ((removed++))
+        else
+            rm -f "$tmp_file"
+            log_warn "Not found in list: $repo"
+            ((not_found++))
+        fi
+    done
+
+    if [[ $removed -eq 0 && $not_found -gt 0 ]]; then
+        exit 1
+    fi
+}
+
 cmd_list() {
     # Ensure config exists
     if [[ ! -d "$RU_CONFIG_DIR" ]]; then
@@ -1961,6 +2038,7 @@ main() {
         status)     cmd_status ;;
         init)       cmd_init ;;
         add)        cmd_add ;;
+        remove)     cmd_remove ;;
         list)       cmd_list ;;
         doctor)     cmd_doctor ;;
         self-update) cmd_self_update ;;

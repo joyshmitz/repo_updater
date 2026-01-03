@@ -1346,8 +1346,103 @@ cmd_sync() {
 }
 
 cmd_status() {
-    log_info "status command not yet implemented"
-    exit 0
+    # Ensure config exists
+    if [[ ! -d "$RU_CONFIG_DIR" ]]; then
+        log_info "No configuration found. Run: ru init"
+        exit 0
+    fi
+
+    # Check for configured repos
+    local repos_file="$RU_CONFIG_DIR/repos.d/repos.txt"
+    if [[ ! -f "$repos_file" ]] || [[ ! -s "$repos_file" ]] || ! grep -qv '^\s*#\|^\s*$' "$repos_file" 2>/dev/null; then
+        log_info "No repositories configured."
+        log_info "Add repos with: ru add owner/repo"
+        exit 0
+    fi
+
+    # Load all repos from config
+    local repos=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && repos+=("$line")
+    done < <(get_all_repos)
+
+    local total=${#repos[@]}
+
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        # JSON output mode
+        echo "["
+        local first="true"
+        for repo_spec in "${repos[@]}"; do
+            local url branch custom_name local_path repo_name
+            parse_repo_spec "$repo_spec" url branch custom_name
+            if [[ -n "$custom_name" ]]; then
+                local_path="${PROJECTS_DIR}/${custom_name}"
+            else
+                local_path=$(url_to_local_path "$url" "$PROJECTS_DIR" "$LAYOUT")
+            fi
+            repo_name=$(basename "$local_path")
+            local status="missing" ahead=0 behind=0 dirty="false" branch_name=""
+            if [[ -d "$local_path" ]] && is_git_repo "$local_path"; then
+                local status_info
+                status_info=$(get_repo_status "$local_path" "$FETCH_REMOTES")
+                status=$(echo "$status_info" | sed 's/.*STATUS=\([^ ]*\).*/\1/')
+                ahead=$(echo "$status_info" | sed 's/.*AHEAD=\([^ ]*\).*/\1/')
+                behind=$(echo "$status_info" | sed 's/.*BEHIND=\([^ ]*\).*/\1/')
+                dirty=$(echo "$status_info" | sed 's/.*DIRTY=\([^ ]*\).*/\1/')
+                branch_name=$(echo "$status_info" | sed 's/.*BRANCH=\([^ ]*\).*/\1/')
+            elif [[ -d "$local_path" ]]; then
+                status="not_git"
+            fi
+            [[ "$first" == "true" ]] || echo ","
+            first="false"
+            printf '{"repo":"%s","path":"%s","status":"%s","branch":"%s","ahead":%d,"behind":%d,"dirty":%s}' \
+                "$repo_name" "$local_path" "$status" "$branch_name" "$ahead" "$behind" "$dirty"
+        done
+        echo "]"
+    else
+        # Human-readable output
+        log_info "Repository Status ($total repos)"
+        [[ "$FETCH_REMOTES" == "true" ]] && log_info "Fetching remotes for accurate status..."
+        echo "" >&2
+        printf "%-30s %-12s %-15s %s\n" "Repository" "Status" "Branch" "Ahead/Behind" >&2
+        printf "%-30s %-12s %-15s %s\n" "------------------------------" "------------" "---------------" "------------" >&2
+        for repo_spec in "${repos[@]}"; do
+            local url branch custom_name local_path repo_name
+            parse_repo_spec "$repo_spec" url branch custom_name
+            if [[ -n "$custom_name" ]]; then
+                local_path="${PROJECTS_DIR}/${custom_name}"
+            else
+                local_path=$(url_to_local_path "$url" "$PROJECTS_DIR" "$LAYOUT")
+            fi
+            repo_name=$(basename "$local_path")
+            local status="missing" ahead=0 behind=0 dirty="false" branch_name="" status_display
+            if [[ -d "$local_path" ]] && is_git_repo "$local_path"; then
+                local status_info
+                status_info=$(get_repo_status "$local_path" "$FETCH_REMOTES")
+                status=$(echo "$status_info" | sed 's/.*STATUS=\([^ ]*\).*/\1/')
+                ahead=$(echo "$status_info" | sed 's/.*AHEAD=\([^ ]*\).*/\1/')
+                behind=$(echo "$status_info" | sed 's/.*BEHIND=\([^ ]*\).*/\1/')
+                dirty=$(echo "$status_info" | sed 's/.*DIRTY=\([^ ]*\).*/\1/')
+                branch_name=$(echo "$status_info" | sed 's/.*BRANCH=\([^ ]*\).*/\1/')
+            elif [[ -d "$local_path" ]]; then
+                status="not_git"
+            fi
+            case "$status" in
+                current)     status_display="${GREEN}current${RESET}" ;;
+                behind)      status_display="${YELLOW}behind${RESET}" ;;
+                ahead)       status_display="${CYAN}ahead${RESET}" ;;
+                diverged)    status_display="${RED}diverged${RESET}" ;;
+                missing)     status_display="${DIM}missing${RESET}" ;;
+                not_git)     status_display="${RED}not_git${RESET}" ;;
+                no_upstream) status_display="${YELLOW}no_upstrm${RESET}" ;;
+                *)           status_display="$status" ;;
+            esac
+            [[ "$dirty" == "true" ]] && status_display="${status_display}${YELLOW}*${RESET}"
+            printf "%-30s %-12b %-15s %d/%d\n" "${repo_name:0:30}" "$status_display" "${branch_name:0:15}" "$ahead" "$behind" >&2
+        done
+        echo "" >&2
+        log_info "Legend: * = uncommitted changes"
+    fi
 }
 
 cmd_init() {
@@ -1394,8 +1489,8 @@ cmd_add() {
             continue
         fi
 
-        # Check if already in file
-        if grep -qF "$repo" "$repos_file" 2>/dev/null; then
+        # Check if already in file (only non-comment lines)
+        if grep -v '^[[:space:]]*#' "$repos_file" 2>/dev/null | grep -qxF "$repo"; then
             log_warn "Already configured: $repo"
             continue
         fi

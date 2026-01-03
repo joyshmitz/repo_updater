@@ -110,6 +110,8 @@ create_remote_repo() {
     local remote_dir="$TEMP_DIR/remotes/$name.git"
     mkdir -p "$remote_dir"
     git init --bare "$remote_dir" >/dev/null 2>&1
+    # Set default branch to main so clones check out main and track it
+    git -C "$remote_dir" symbolic-ref HEAD refs/heads/main
     echo "$remote_dir"
 }
 

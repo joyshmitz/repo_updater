@@ -1,0 +1,53 @@
+# Release Workflow for repo_updater (ru)
+# Triggered by version tags (v*)
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag matches VERSION file
+        run: |
+          tag_version="${GITHUB_REF#refs/tags/v}"
+          file_version=$(cat VERSION)
+          if [[ "$tag_version" != "$file_version" ]]; then
+            echo "Tag version ($tag_version) does not match VERSION file ($file_version)"
+            exit 1
+          fi
+
+      - name: Generate checksums
+        run: |
+          sha256sum ru > ru.sha256
+          sha256sum install.sh > install.sh.sha256
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            ru
+            install.sh
+            ru.sha256
+            install.sh.sha256
+          generate_release_notes: true
+          body: |
+            ## Installation
+
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/repo_updater/main/install.sh | bash
+            ```
+
+            ## Checksums
+
+            Verify downloads with the `.sha256` files attached to this release.

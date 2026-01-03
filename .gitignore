@@ -36,3 +36,6 @@ node_modules/
 
 # Vim session
 Session.vim
+
+# bv (beads viewer) local config and caches
+.bv/

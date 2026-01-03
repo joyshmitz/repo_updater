@@ -1,0 +1,69 @@
+# CI Workflow for repo_updater (ru)
+# Runs on every push and PR to main
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Run ShellCheck on ru
+        run: shellcheck --severity=warning ru
+
+      - name: Run ShellCheck on install.sh
+        run: shellcheck --severity=warning install.sh
+
+  syntax:
+    name: Bash Syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check ru syntax
+        run: bash -n ru
+
+      - name: Check install.sh syntax
+        run: bash -n install.sh
+
+  test-install:
+    name: Test Installation
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test installer
+        run: |
+          chmod +x install.sh
+          DEST=/tmp/ru-test ./install.sh
+          /tmp/ru-test/ru --version
+
+  version-check:
+    name: Version Consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check VERSION file matches script
+        run: |
+          file_version=$(cat VERSION)
+          script_version=$(grep -m1 'VERSION=' ru | cut -d'"' -f2)
+          if [[ "$file_version" != "$script_version" ]]; then
+            echo "Version mismatch: VERSION file ($file_version) != ru script ($script_version)"
+            exit 1
+          fi
+          echo "Version check passed: $file_version"

@@ -1755,28 +1755,59 @@ steps:
       You MUST produce a structured review plan artifact at:
         .ru/review-plan.json
 
-      Schema:
+      Contract:
+      - `.ru/review-plan.json` MUST be strictly valid JSON (no markdown fences, no trailing commas).
+      - It MUST conform to Section 8.5 “Review Plan Artifact (schema v1)”.
+      - Required decisions: `fix` | `skip` | `needs-info` | `closed`
+
+      Minimum required shape (see Section 8.5 for full schema/fields):
       {
         "schema_version": 1,
         "run_id": "${env.REVIEW_RUN_ID}",
         "repo": "${inputs.repo_name}",
+        "worktree_path": "${inputs.worktree_path}",
         "items": [
-          {"type": "issue|pr", "number": N, "priority": "...",
-           "decision": "fix|close|needs-info|skip", "notes": "..."}
+          {
+            "type": "issue|pr",
+            "number": 123,
+            "title": "...",
+            "priority": "critical|high|normal|low",
+            "decision": "fix|skip|needs-info|closed",
+            "notes": "..."
+          }
         ],
         "questions": [
-          {"id": "q1", "prompt": "...", "options": [...], "recommended": "a"}
+          {
+            "id": "q1",
+            "prompt": "...",
+            "options": [{"label":"A","description":"..."},{"label":"B","description":"..."}],
+            "recommended": "A",
+            "answered": false
+          }
         ],
         "git": {
           "branch": "current branch name",
+          "base_ref": "main",
           "commits": [{"sha": "...", "subject": "..."}],
-          "tests": {"ran": true|false, "ok": true|false, "command": "..."}
+          "tests": {"ran": true, "ok": true, "command": "...", "output_summary": "..."}
         },
         "gh_actions": [
           {"op": "comment", "target": "issue#42", "body": "..."},
           {"op": "close", "target": "issue#42", "reason": "completed"}
-        ]
+        ],
+        "metadata": {
+          "started_at": "ISO-8601",
+          "completed_at": "ISO-8601",
+          "model": "model identifier",
+          "driver": "ntm|local"
+        }
       }
+
+      Questions (interactive coordination):
+      - When you need maintainer input, use the `AskUserQuestion` tool (see Section 8.2).
+      - Provide 2–4 options with `label` + `description`, set `multiSelect=false`.
+      - Mirror any asked question into `review-plan.json` under `questions[]` with `answered=false`.
+        If the maintainer answers during the same run, set `answered=true`, add `answer` + `answered_at`.
 
       Use ultrathink.
     working_dir: ${inputs.worktree_path}
@@ -1814,6 +1845,75 @@ outputs:
   items_reviewed:
     description: Number of items reviewed
     value: ${steps.review_issues_prs.items_count:-0}
+```
+
+### 9.3.1 Canonical Prompt Templates (ru-generated)
+
+These templates are the recommended canonical prompts for both drivers (`ntm` and `local`).
+They are designed to be copy-pasteable into `claude -p ... --output-format stream-json` and
+to produce the artifacts ru needs without transcript scraping.
+
+```bash
+# Generate the “digest” prompt (writes/updates .ru/repo-digest.md)
+generate_digest_prompt() {
+  cat <<'EOF'
+First read ALL of AGENTS.md and README.md carefully.
+
+If a prior digest exists at `.ru/repo-digest.md`, read it first, then update it based on changes since the last review:
+  - inspect `git log` since the last digest timestamp
+  - inspect changed files and any new architecture decisions
+
+If no digest exists, create a comprehensive digest covering:
+  - project purpose and architecture
+  - key files/modules and their roles
+  - conventions, quality gates, and how to run tests
+
+Write the updated digest to `.ru/repo-digest.md`.
+EOF
+}
+
+# Generate the “review work items” prompt (must write .ru/review-plan.json)
+# Args: repo_name worktree_path run_id work_items_json
+generate_review_prompt() {
+  local repo_name="$1"
+  local worktree_path="$2"
+  local run_id="$3"
+  local work_items_json="$4"
+
+  cat <<EOF
+POLICY: We don't allow PRs or outside contributions. Feel free to submit issues and PRs to illustrate fixes, but they will not be merged directly. The agent reviews and independently decides whether and how to address submissions. Bug reports are welcome.
+
+TASK: Review the following work items using \`gh\` READ operations only:
+$work_items_json
+
+For each item:
+1) Read the issue/PR independently via \`gh issue view\` or \`gh pr view\`.
+2) Verify claims independently; do not trust reports blindly.
+3) Check dates against recent commits (issues/PRs may be stale).
+4) If actionable: create local commits with focused fixes.
+5) If unclear: ask the maintainer using the \`AskUserQuestion\` tool (see Section 8.2).
+
+CRITICAL RESTRICTIONS (PLAN MODE):
+- DO NOT run any \`gh\` mutation commands (comment/close/label/merge/etc).
+- DO NOT push any changes.
+- Prefer minimal, reviewable commits; avoid broad refactors unless justified.
+
+REQUIRED OUTPUT (contract):
+- You MUST write \`.ru/review-plan.json\` as strictly valid JSON.
+- It MUST conform to Section 8.5 (schema v1).
+- Set:
+  - schema_version: 1
+  - run_id: "$run_id"
+  - repo: "$repo_name"
+  - worktree_path: "$worktree_path"
+  - metadata.model: your model id
+  - metadata.driver: "ntm" or "local"
+
+If you ask any maintainer questions:
+- Use \`AskUserQuestion\` with 2–4 options (label+description), multiSelect=false.
+- Mirror those into \`review-plan.json\` under \`questions[]\` with answered=false until answered.
+EOF
+}
 ```
 
 ### 9.4 New ntm Components Needed

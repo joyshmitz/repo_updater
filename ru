@@ -2750,9 +2750,9 @@ cmd_import() {
         exit 4
     fi
 
-    # Check if we can auto-detect visibility
+    # Check if we can auto-detect visibility (only works for github.com repos)
     local can_detect_visibility="false"
-    if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
+    if command -v gh &>/dev/null && gh auth status &>/dev/null; then
         can_detect_visibility="true"
     fi
 
@@ -2790,7 +2790,6 @@ cmd_import() {
     # Arrays for detailed reporting
     local invalid_repos=()
     local error_repos=()
-    local success_repos=()
 
     # Process each file
     for input_file in "${file_args[@]}"; do
@@ -2834,49 +2833,42 @@ cmd_import() {
 
             # Determine visibility
             local is_private="unknown"
-            local visibility_label=""
 
             if [[ "$force_private" == "true" ]]; then
                 is_private="true"
-                visibility_label="private (forced)"
             elif [[ "$force_public" == "true" ]]; then
                 is_private="false"
-                visibility_label="public (forced)"
-            elif [[ "$can_detect_visibility" == "true" ]]; then
-                # Use GitHub API to detect visibility
+            elif [[ "$can_detect_visibility" == "true" && "$host" == "github.com" ]]; then
+                # Use GitHub API to detect visibility (only works for github.com)
                 local api_response
                 if api_response=$(gh api "repos/$owner/$repo" --jq '.private' 2>/dev/null); then
                     if [[ "$api_response" == "true" ]]; then
                         is_private="true"
-                        visibility_label="private"
                     else
                         is_private="false"
-                        visibility_label="public"
                     fi
                 else
                     ((skipped_error++))
                     error_repos+=("$line|API lookup failed")
                     continue
                 fi
+            elif [[ "$host" != "github.com" ]]; then
+                # Non-GitHub host: default to public (can't auto-detect visibility)
+                is_private="false"
             fi
 
             # Add to appropriate file
-            local target_file
             if [[ "$is_private" == "true" ]]; then
-                target_file="$private_file"
                 if [[ "$DRY_RUN" != "true" ]]; then
-                    echo "$normalized" >> "$target_file"
+                    printf '%s\n' "$normalized" >> "$private_file"
                 fi
                 ((imported_private++))
             else
-                target_file="$public_file"
                 if [[ "$DRY_RUN" != "true" ]]; then
-                    echo "$normalized" >> "$target_file"
+                    printf '%s\n' "$normalized" >> "$public_file"
                 fi
                 ((imported_public++))
             fi
-
-            success_repos+=("$line|$visibility_label")
 
         done < "$input_file"
 

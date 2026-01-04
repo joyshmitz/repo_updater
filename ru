@@ -3894,41 +3894,110 @@ get_review_lock_file() {
     echo "${RU_STATE_DIR}/review.lock"
 }
 
+# Get path to review lock info file (JSON metadata)
+get_review_lock_info_file() {
+    echo "${RU_STATE_DIR}/review.lock.info"
+}
+
+# Check for and clean up stale locks from crashed processes
+# Returns 0 if lock was stale (and cleaned up), 1 if lock is valid or doesn't exist
+check_stale_lock() {
+    local info_file
+    info_file=$(get_review_lock_info_file)
+
+    if [[ ! -f "$info_file" ]]; then
+        return 1  # No info file, can't determine staleness
+    fi
+
+    # Parse PID from info file
+    local lock_pid
+    lock_pid=$(jq -r '.pid // empty' "$info_file" 2>/dev/null)
+
+    if [[ -z "$lock_pid" ]]; then
+        # Corrupt info file, treat as stale
+        log_warn "Found corrupt lock info file, cleaning up"
+        rm -f "$info_file"
+        return 0
+    fi
+
+    # Check if the process still exists
+    if ! kill -0 "$lock_pid" 2>/dev/null; then
+        # Process is dead, lock is stale
+        local run_id started_at
+        run_id=$(jq -r '.run_id // "unknown"' "$info_file" 2>/dev/null)
+        started_at=$(jq -r '.started_at // "unknown"' "$info_file" 2>/dev/null)
+        log_warn "Found stale lock from dead process $lock_pid (run_id: $run_id, started: $started_at)"
+        rm -f "$info_file"
+        return 0  # Lock is stale
+    fi
+
+    return 1  # Lock is valid
+}
+
 # Acquire review lock (prevents concurrent reviews)
+# Uses flock for atomic lock acquisition and JSON info file for metadata
 acquire_review_lock() {
-    local lock_file
+    local lock_file info_file
     lock_file=$(get_review_lock_file)
+    info_file=$(get_review_lock_info_file)
     ensure_dir "$(dirname "$lock_file")"
 
-    # Try to get exclusive lock
+    # Check for stale locks first and clean up if needed
+    check_stale_lock
+
+    # Open fd 9 for locking (survives subshell)
     exec 9>"$lock_file"
+
+    # Try non-blocking lock
     if ! flock -n 9 2>/dev/null; then
-        # Check if the lock holder is still running
-        local pid=""
-        if [[ -f "$lock_file" ]]; then
-            pid=$(cat "$lock_file" 2>/dev/null || true)
-        fi
-        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-            log_error "Another review is running (PID $pid)"
+        # Lock held by another process - read info
+        if [[ -f "$info_file" ]]; then
+            local holder_run_id holder_started holder_pid holder_mode
+            holder_run_id=$(jq -r '.run_id // "unknown"' "$info_file" 2>/dev/null)
+            holder_started=$(jq -r '.started_at // "unknown"' "$info_file" 2>/dev/null)
+            holder_pid=$(jq -r '.pid // "unknown"' "$info_file" 2>/dev/null)
+            holder_mode=$(jq -r '.mode // "unknown"' "$info_file" 2>/dev/null)
+
+            log_error "Another review session is active"
+            log_error "  Run ID:  $holder_run_id"
+            log_error "  Started: $holder_started"
+            log_error "  PID:     $holder_pid"
+            log_error "  Mode:    $holder_mode"
         else
-            log_error "Stale lock file exists. Remove manually: $lock_file"
+            log_error "Another review is running (no info available)"
         fi
+        log_info "Use 'ru review --status' to check, or wait for completion"
+        exec 9>&-
         return 1
     fi
 
-    # Write our PID to the lock file
-    echo $$ > "$lock_file"
+    # Lock acquired - write info file with JSON metadata
+    local run_id="${REVIEW_RUN_ID:-$$}"
+    local mode="${REVIEW_MODE:-plan}"
+
+    cat > "$info_file" << EOF
+{
+  "run_id": "$run_id",
+  "started_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "pid": $$,
+  "mode": "$mode"
+}
+EOF
+
     return 0
 }
 
-# Release review lock
+# Release review lock and clean up info file
 release_review_lock() {
-    local lock_file
+    local lock_file info_file
     lock_file=$(get_review_lock_file)
-    # Remove PID from file
-    : > "$lock_file"
+    info_file=$(get_review_lock_info_file)
+
+    # Remove info file
+    rm -f "$info_file"
+
     # Release the flock (closing fd 9)
-    exec 9>&-
+    exec 9>&- 2>/dev/null || true
 }
 
 # Detect which review driver to use
@@ -4528,6 +4597,216 @@ local_driver_stream_events() {
     else
         log_error "No event source found for session: $session_id"
         return 1
+    fi
+}
+
+#------------------------------------------------------------------------------
+# Wait Reason Detection (bd-4ps0)
+# Classify why Claude is waiting for input: AskUserQuestion, text question, or
+# external prompt (git, ssh, auth)
+#------------------------------------------------------------------------------
+
+# Detect external prompts (git, ssh, auth, etc.)
+# Args:
+#   $1 - Terminal output to check
+# Outputs:
+#   Matched pattern if found
+# Returns:
+#   0 if external prompt found, 1 otherwise
+detect_external_prompt() {
+    local output="$1"
+
+    local -a patterns=(
+        'CONFLICT.*Merge conflict'
+        'Please enter.*commit message'
+        'Enter passphrase'
+        'Password:'
+        '\(yes/no\)'
+        '\(yes/no/\[fingerprint\]\)'
+        'error: cannot pull with rebase'
+        'Username for'
+        'gh auth login'
+        'fatal: could not read'
+        'Permission denied'
+        'Are you sure you want to continue connecting'
+        'Host key verification failed'
+        'Authentication failed'
+        'Error: authentication required'
+        'npm login'
+        'Enter OTP'
+        'Two-factor authentication'
+    )
+
+    for pattern in "${patterns[@]}"; do
+        if echo "$output" | grep -qE "$pattern"; then
+            echo "$pattern"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# Classify risk level of external prompt
+# Args:
+#   $1 - Matched pattern from detect_external_prompt
+# Outputs:
+#   Risk level: high, medium, or low
+classify_external_prompt_risk() {
+    local prompt="$1"
+
+    local lower
+    lower=$(echo "$prompt" | tr '[:upper:]' '[:lower:]')
+
+    # High risk: credentials, auth, security
+    if echo "$lower" | grep -qE 'password|passphrase|credential|auth|token|otp|two-factor|permission denied|authentication'; then
+        echo "high"
+        return
+    fi
+
+    # Medium risk: merge conflicts, host verification
+    if echo "$lower" | grep -qE 'conflict|merge|rebase|overwrite|delete|host key|fingerprint|yes/no'; then
+        echo "medium"
+        return
+    fi
+
+    # Low risk: informational prompts
+    echo "low"
+}
+
+# Extract question context from text output
+# Args:
+#   $1 - Text output containing question
+# Outputs:
+#   Lines around the question for context
+extract_question_from_text() {
+    local output="$1"
+
+    # Get lines around question pattern
+    local question_line
+    question_line=$(echo "$output" | grep -nE 'Should I|Do you want|Would you|Which.*\?|What.*\?|How should' | tail -1)
+
+    if [[ -n "$question_line" ]]; then
+        local line_num="${question_line%%:*}"
+        # Get 5 lines before and 2 after for context
+        local start=$((line_num - 5))
+        [[ $start -lt 1 ]] && start=1
+        local end=$((line_num + 2))
+        echo "$output" | sed -n "${start},${end}p"
+    else
+        echo "$output" | tail -10
+    fi
+}
+
+# Extract inline options from text (e.g., "a) option", "1. option")
+# Args:
+#   $1 - Text output to parse
+# Outputs:
+#   Extracted options (newline-separated)
+extract_inline_options() {
+    local output="$1"
+
+    # Look for patterns like "a) ...", "1. ...", "- Option A"
+    echo "$output" | grep -E '^\s*[a-z]\)|^\s*[0-9]+\.|^\s*-\s+[A-Z]' | head -5
+}
+
+# Detect wait reason and classify it
+# Priority: AskUserQuestion > external_prompt > agent_question_text
+# Args:
+#   $1 - Session ID
+#   $2 - Event data from stream-json (optional)
+#   $3 - Terminal output (optional)
+# Outputs:
+#   JSON object with: reason, context, options, risk_level
+detect_wait_reason() {
+    local session_id="$1"
+    local event_data="${2:-}"
+    local output="${3:-}"
+
+    local reason="unknown"
+    local context=""
+    local options=""
+    local risk_level="low"
+
+    # Priority 1: Check for AskUserQuestion in event stream
+    if [[ -n "$event_data" ]] && detect_ask_user_question "$event_data"; then
+        reason="ask_user_question"
+        context=$(extract_question_info "$event_data")
+        format_wait_info "$reason" "$context" "" "low"
+        return 0
+    fi
+
+    # Priority 2: Check for external prompts
+    local ext_prompt
+    if [[ -n "$output" ]]; then
+        if ext_prompt=$(detect_external_prompt "$output"); then
+            reason="external_prompt"
+            context="$ext_prompt"
+            risk_level=$(classify_external_prompt_risk "$ext_prompt")
+            format_wait_info "$reason" "$context" "" "$risk_level"
+            return 0
+        fi
+
+        # Priority 3: Check for agent text question
+        if detect_text_question "$output"; then
+            reason="agent_question_text"
+            context=$(extract_question_from_text "$output")
+            options=$(extract_inline_options "$output")
+            format_wait_info "$reason" "$context" "$options" "low"
+            return 0
+        fi
+    fi
+
+    # Fallback: unknown
+    if [[ -n "$output" ]]; then
+        context=$(echo "$output" | tail -10)
+    fi
+    format_wait_info "$reason" "$context" "" "$risk_level"
+    return 0
+}
+
+# Format wait info as JSON for TUI consumption
+# Args:
+#   $1 - Wait reason
+#   $2 - Context (text or JSON depending on reason)
+#   $3 - Options (newline-separated list, optional)
+#   $4 - Risk level
+# Outputs:
+#   JSON object suitable for TUI rendering
+format_wait_info() {
+    local reason="$1"
+    local context="$2"
+    local options="${3:-}"
+    local risk_level="${4:-low}"
+
+    # If context is already JSON (from extract_question_info), embed it
+    if echo "$context" | jq empty 2>/dev/null; then
+        jq -n \
+            --arg reason "$reason" \
+            --argjson context "$context" \
+            --arg options "$options" \
+            --arg risk "$risk_level" \
+            '{
+                reason: $reason,
+                context: $context,
+                options: ($options | split("\n") | map(select(. != ""))),
+                risk_level: $risk,
+                detected_at: (now | todate)
+            }'
+    else
+        # Context is plain text
+        jq -n \
+            --arg reason "$reason" \
+            --arg context "$context" \
+            --arg options "$options" \
+            --arg risk "$risk_level" \
+            '{
+                reason: $reason,
+                context: $context,
+                options: ($options | split("\n") | map(select(. != ""))),
+                risk_level: $risk,
+                detected_at: (now | todate)
+            }'
     fi
 }
 
@@ -5625,9 +5904,16 @@ cmd_review() {
         exit 1
     fi
 
-    # Ensure cleanup on exit
+    # Set up cleanup trap for lock release
     # shellcheck disable=SC2064
-    trap "release_review_lock" EXIT
+    cleanup_review() {
+        log_verbose "Cleaning up review session..."
+        release_review_lock
+    }
+    trap cleanup_review EXIT
+
+    # Handle interrupts gracefully
+    trap 'echo "" >&2; log_warn "Review interrupted!"; exit 130' INT TERM
 
     # Auto-detect driver if needed
     if [[ "$REVIEW_DRIVER" == "auto" ]]; then

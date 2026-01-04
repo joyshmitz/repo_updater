@@ -1370,7 +1370,19 @@ ru uses it to:
 - Compute metrics without transcript scraping
 - Audit what was done
 
+**Location (absolute):**
+```
+{worktree}/.ru/review-plan.json
+```
+
 **Schema (v1):**
+
+Top-level contract notes:
+- `schema_version` is an integer and must be `1` for this version.
+- `repo` is `owner/repo` (GitHub shorthand).
+- `worktree_path` is the absolute path of the isolated worktree for this repo.
+- `items` must exist (may be empty if nothing was reviewed).
+- `metadata` must exist (at minimum timestamps + model/driver info).
 
 ```json
 {
@@ -1387,7 +1399,9 @@ ru uses it to:
       "priority": "high",
       "decision": "fix",
       "notes": "Root cause: path separator in auth.py:234",
-      "risk_level": "low"
+      "risk_level": "low",
+      "files_changed": ["src/auth.py"],
+      "lines_changed": 5
     },
     {
       "type": "pr",
@@ -1411,7 +1425,8 @@ ru uses it to:
       ],
       "recommended": "Quick fix",
       "answered": true,
-      "answer": "Quick fix"
+      "answer": "Quick fix",
+      "answered_at": "2025-01-04T10:35:00Z"
     }
   ],
 
@@ -1419,13 +1434,20 @@ ru uses it to:
     "branch": "ru/review/20250104-103000-12345/owner-repo",
     "base_ref": "main",
     "commits": [
-      {"sha": "abc123", "subject": "Fix Windows path handling in auth.py"}
+      {
+        "sha": "abc123def456",
+        "subject": "Fix Windows path handling in auth.py",
+        "files": ["src/auth.py"],
+        "insertions": 3,
+        "deletions": 2
+      }
     ],
     "tests": {
       "ran": true,
       "ok": true,
       "command": "make test",
-      "output_summary": "12 tests passed"
+      "output_summary": "12 tests passed",
+      "duration_seconds": 45
     }
   },
 
@@ -1441,6 +1463,11 @@ ru uses it to:
       "reason": "completed"
     },
     {
+      "op": "label",
+      "target": "issue#42",
+      "labels": ["fixed-in-main"]
+    },
+    {
       "op": "comment",
       "target": "pr#15",
       "body": "Thank you for the suggestion. After review, I've decided..."
@@ -1451,26 +1478,153 @@ ru uses it to:
     "started_at": "2025-01-04T10:30:00Z",
     "completed_at": "2025-01-04T10:45:00Z",
     "duration_seconds": 900,
-    "context_usage_percent": 45
+    "context_usage_percent": 45,
+    "model": "claude-sonnet-4",
+    "driver": "local"
   }
 }
 ```
+
+**Field definitions**
+
+Top level:
+| Field | Type | Required | Notes |
+|-------|------|----------|------|
+| `schema_version` | int | yes | Must be `1` |
+| `run_id` | string | yes | Unique run identifier for the overall review run |
+| `repo` | string | yes | `owner/repo` |
+| `worktree_path` | string | yes | Absolute path to isolated worktree |
+| `items` | array | yes | Work items reviewed (may be empty) |
+| `questions` | array | no | Questions asked/answered (optional) |
+| `git` | object | no | Git summary (optional; absent if no commits) |
+| `gh_actions` | array | no | GitHub mutations to apply later (optional; Plan mode must not execute them) |
+| `metadata` | object | yes | Session metadata (timing + model/driver) |
+
+Item object:
+| Field | Type | Required | Notes |
+|-------|------|----------|------|
+| `type` | `"issue"`\|`"pr"` | yes | Work item type |
+| `number` | int | yes | Issue/PR number |
+| `title` | string | yes | Title as seen on GitHub |
+| `priority` | string | yes | Suggested values: `critical` \| `high` \| `normal` \| `low` |
+| `decision` | string | yes | `fix` \| `skip` \| `needs-info` \| `closed` |
+| `notes` | string | no | Rationale / summary |
+| `risk_level` | string | no | Suggested values: `low` \| `medium` \| `high` \| `n/a` |
+| `files_changed` | array | no | Files touched for this item (best-effort) |
+| `lines_changed` | int | no | Net lines changed (best-effort) |
+
+Question object:
+| Field | Type | Required | Notes |
+|-------|------|----------|------|
+| `id` | string | yes | Unique within plan file |
+| `prompt` | string | yes | Question text |
+| `options` | array | no | Options the user can choose from |
+| `recommended` | string | no | Agent recommendation |
+| `answered` | bool | yes | Whether answered during this run |
+| `answer` | string | no | Required when `answered=true` |
+| `answered_at` | string | no | ISO-8601 timestamp; required when `answered=true` |
+
+`gh_actions` object:
+| Field | Type | Required | Notes |
+|-------|------|----------|------|
+| `op` | string | yes | `comment` \| `close` \| `label` \| `merge` |
+| `target` | string | yes | `issue#N` or `pr#N` |
+| `body` | string | no | Required for `comment` |
+| `reason` | string | no | Required for `close` (e.g. `completed`, `not_planned`) |
+| `labels` | array | no | Required for `label` |
 
 **Validation:**
 ```bash
 validate_review_plan() {
     local plan_file="$1"
 
+    # Must exist
+    [[ -f "$plan_file" ]] || { echo "Plan file not found: $plan_file" >&2; return 1; }
+
+    # We require jq for validation. ru can treat jq as optional for other flows,
+    # but review-plan.json is an Apply-phase contract and must be machine-validated.
+    command -v jq &>/dev/null || { echo "jq is required to validate review plans" >&2; return 3; }
+
     # Must be valid JSON
-    jq empty "$plan_file" || return 1
+    jq empty "$plan_file" >/dev/null || { echo "Invalid JSON" >&2; return 1; }
 
     # Must have required fields
-    jq -e '.schema_version and .repo and .items' "$plan_file" >/dev/null || return 1
+    jq -e '
+      (.schema_version == 1)
+      and (.run_id | type == "string" and length > 0)
+      and (.repo | type == "string" and length > 0)
+      and (.worktree_path | type == "string" and length > 0)
+      and (.items | type == "array")
+      and (.metadata | type == "object")
+    ' "$plan_file" >/dev/null || { echo "Missing/invalid required top-level fields" >&2; return 1; }
 
     # Items must have required fields
-    jq -e '.items | all(.type and .number and .decision)' "$plan_file" >/dev/null || return 1
+    jq -e '
+      .items
+      | all(
+          (.type | IN("issue","pr"))
+          and (.number | type == "number" and . > 0)
+          and (.title | type == "string" and length > 0)
+          and (.decision | IN("fix","skip","needs-info","closed"))
+        )
+    ' "$plan_file" >/dev/null || { echo "One or more items are missing required fields" >&2; return 1; }
+
+    # Questions (if present) must have required fields, and answered questions must include answer + answered_at
+    jq -e '
+      if has("questions") then
+        (.questions | type == "array")
+        and (.questions
+          | all(
+              (.id | type == "string" and length > 0)
+              and (.prompt | type == "string" and length > 0)
+              and (.answered | type == "boolean")
+              and (if .answered then
+                    (.answer | type == "string" and length > 0)
+                    and (.answered_at | type == "string" and length > 0)
+                  else true end)
+            )
+        )
+      else true end
+    ' "$plan_file" >/dev/null || { echo "Invalid questions section" >&2; return 1; }
+
+    # gh_actions (if present) must have required fields and op-specific fields
+    jq -e '
+      if has("gh_actions") then
+        (.gh_actions | type == "array")
+        and (.gh_actions
+          | all(
+              (.op | IN("comment","close","label","merge"))
+              and (.target | type == "string" and length > 0)
+              and (if .op == "comment" then (.body | type == "string" and length > 0) else true end)
+              and (if .op == "close" then (.reason | type == "string" and length > 0) else true end)
+              and (if .op == "label" then (.labels | type == "array") else true end)
+            )
+        )
+      else true end
+    ' "$plan_file" >/dev/null || { echo "Invalid gh_actions section" >&2; return 1; }
 
     return 0
+}
+```
+
+**Summary helper (for logs / TUI):**
+```bash
+summarize_review_plan() {
+    local plan_file="$1"
+    command -v jq &>/dev/null || { echo "jq is required" >&2; return 3; }
+
+    jq -r '
+      def c(decision): ([.items[]? | select(.decision == decision)] | length);
+      "Repository: \(.repo)",
+      "Items reviewed: \(.items | length)",
+      "  - Fixed: \(c("fix"))",
+      "  - Skipped: \(c("skip"))",
+      "  - Needs info: \(c("needs-info"))",
+      "  - Closed: \(c("closed"))",
+      "Commits: \((.git.commits // []) | length)",
+      "Tests: \(if (.git.tests.ok // false) then "PASS" else "FAIL/NOT RUN" end)",
+      "gh_actions pending: \((.gh_actions // []) | length)"
+    ' "$plan_file"
 }
 ```
 

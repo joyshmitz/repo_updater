@@ -96,8 +96,9 @@ DEFAULT_PARALLEL="1"
 # SECTION 2: ANSI COLOR DEFINITIONS
 #==============================================================================
 
-# Colors (disabled if not a terminal or NO_COLOR is set)
-if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+# Colors (disabled if stderr is not a terminal or NO_COLOR is set)
+# We check -t 2 (stderr) because all log functions output to stderr
+if [[ -t 2 ]] && [[ -z "${NO_COLOR:-}" ]]; then
     RED='\033[0;31m'
     GREEN='\033[0;32m'
     YELLOW='\033[0;33m'
@@ -188,11 +189,12 @@ write_result() {
     local message="${5:-}"
 
     if [[ -n "$RESULTS_FILE" ]]; then
-        # Escape message for JSON safety
-        local safe_message
+        # Escape all string fields for JSON safety
+        local safe_repo safe_message
+        safe_repo=$(json_escape "$repo_name")
         safe_message=$(json_escape "$message")
         printf '{"repo":"%s","action":"%s","status":"%s","duration":%s,"message":"%s","timestamp":"%s"}\n' \
-            "$repo_name" "$action" "$status" "${duration:-0}" "$safe_message" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            "$safe_repo" "$action" "$status" "${duration:-0}" "$safe_message" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             >> "$RESULTS_FILE"
     fi
 }

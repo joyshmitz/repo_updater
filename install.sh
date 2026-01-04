@@ -49,10 +49,11 @@ GITHUB_API="https://api.github.com"
 GITHUB_RAW="https://raw.githubusercontent.com"
 
 #==============================================================================
-# COLORS (disabled if not a terminal or NO_COLOR is set)
+# COLORS (disabled if stderr is not a terminal or NO_COLOR is set)
+# We check -t 2 (stderr) because all log functions output to stderr
 #==============================================================================
 
-if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+if [[ -t 2 ]] && [[ -z "${NO_COLOR:-}" ]]; then
     RED='\033[0;31m'
     GREEN='\033[0;32m'
     YELLOW='\033[0;33m'

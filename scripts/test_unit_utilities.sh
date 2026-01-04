@@ -17,21 +17,18 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 # Source the test framework
 source "$SCRIPT_DIR/test_framework.sh"
 
-# Source ru to get access to the functions we're testing
-# We need to source it in a way that doesn't run main()
-# The functions are defined before the main execution block
-source "$PROJECT_DIR/ru" --source-only 2>/dev/null || {
-    # If --source-only isn't supported, extract functions manually
-    # by sourcing up to line where main execution starts
-    eval "$(sed -n '1,/^# SECTION 13:/p' "$PROJECT_DIR/ru" | head -n -1)"
-}
+# Source the specific functions we need to test using the framework helper
+source_ru_function "ensure_dir"
+source_ru_function "json_escape"
+source_ru_function "write_result"
 
 #==============================================================================
 # Tests: ensure_dir
 #==============================================================================
 
 test_ensure_dir_creates_directory() {
-    log_test_start "ensure_dir creates non-existent directory"
+    local test_name="ensure_dir creates non-existent directory"
+    log_test_start "$test_name"
     local test_env
     test_env=$(create_test_env)
 
@@ -46,11 +43,12 @@ test_ensure_dir_creates_directory() {
     # Now it should exist
     assert_dir_exists "$new_dir" "Directory should exist after ensure_dir"
 
-    log_test_pass
+    log_test_pass "$test_name"
 }
 
 test_ensure_dir_noop_existing() {
-    log_test_start "ensure_dir is no-op for existing directory"
+    local test_name="ensure_dir is no-op for existing directory"
+    log_test_start "$test_name"
     local test_env
     test_env=$(create_test_env)
 
@@ -66,11 +64,12 @@ test_ensure_dir_noop_existing() {
     # Marker file should still exist
     assert_file_exists "$existing_dir/marker.txt" "Marker file should still exist"
 
-    log_test_pass
+    log_test_pass "$test_name"
 }
 
 test_ensure_dir_creates_nested() {
-    log_test_start "ensure_dir creates nested directories"
+    local test_name="ensure_dir creates nested directories"
+    log_test_start "$test_name"
     local test_env
     test_env=$(create_test_env)
 
@@ -88,7 +87,7 @@ test_ensure_dir_creates_nested() {
     assert_dir_exists "$test_env/a/b/c" "Third level should exist"
     assert_dir_exists "$nested_dir" "Final level should exist"
 
-    log_test_pass
+    log_test_pass "$test_name"
 }
 
 #==============================================================================
@@ -96,29 +95,32 @@ test_ensure_dir_creates_nested() {
 #==============================================================================
 
 test_json_escape_backslash() {
-    log_test_start "json_escape escapes backslashes"
+    local test_name="json_escape escapes backslashes"
+    log_test_start "$test_name"
 
     local result
     result=$(json_escape 'path\to\file')
 
     assert_equals 'path\\to\\file' "$result" "Backslashes should be escaped"
 
-    log_test_pass
+    log_test_pass "$test_name"
 }
 
 test_json_escape_double_quote() {
-    log_test_start "json_escape escapes double quotes"
+    local test_name="json_escape escapes double quotes"
+    log_test_start "$test_name"
 
     local result
     result=$(json_escape 'say "hello"')
 
     assert_equals 'say \"hello\"' "$result" "Double quotes should be escaped"
 
-    log_test_pass
+    log_test_pass "$test_name"
 }
 
 test_json_escape_newline() {
-    log_test_start "json_escape escapes newlines"
+    local test_name="json_escape escapes newlines"
+    log_test_start "$test_name"
 
     local input=$'line1\nline2'
     local result
@@ -126,11 +128,12 @@ test_json_escape_newline() {
 
     assert_equals 'line1\nline2' "$result" "Newlines should be escaped"
 
-    log_test_pass
+    log_test_pass "$test_name"
 }
 
 test_json_escape_carriage_return() {
-    log_test_start "json_escape escapes carriage returns"
+    local test_name="json_escape escapes carriage returns"
+    log_test_start "$test_name"
 
     local input=$'text\rmore'
     local result
@@ -138,11 +141,12 @@ test_json_escape_carriage_return() {
 
     assert_equals 'text\rmore' "$result" "Carriage returns should be escaped"
 
-    log_test_pass
+    log_test_pass "$test_name"
 }
 
 test_json_escape_tab() {
-    log_test_start "json_escape escapes tabs"
+    local test_name="json_escape escapes tabs"
+    log_test_start "$test_name"
 
     local input=$'col1\tcol2'
     local result
@@ -150,33 +154,36 @@ test_json_escape_tab() {
 
     assert_equals 'col1\tcol2' "$result" "Tabs should be escaped"
 
-    log_test_pass
+    log_test_pass "$test_name"
 }
 
 test_json_escape_no_special_chars() {
-    log_test_start "json_escape handles strings without special characters"
+    local test_name="json_escape handles strings without special characters"
+    log_test_start "$test_name"
 
     local result
     result=$(json_escape 'simple string 123')
 
     assert_equals 'simple string 123' "$result" "String without special chars should be unchanged"
 
-    log_test_pass
+    log_test_pass "$test_name"
 }
 
 test_json_escape_empty_string() {
-    log_test_start "json_escape handles empty string"
+    local test_name="json_escape handles empty string"
+    log_test_start "$test_name"
 
     local result
     result=$(json_escape '')
 
     assert_equals '' "$result" "Empty string should remain empty"
 
-    log_test_pass
+    log_test_pass "$test_name"
 }
 
 test_json_escape_complex() {
-    log_test_start "json_escape handles complex strings with multiple special chars"
+    local test_name="json_escape handles complex strings with multiple special chars"
+    log_test_start "$test_name"
 
     local input=$'file: "test\\path"\nline2'
     local result
@@ -185,7 +192,7 @@ test_json_escape_complex() {
     # Expected: file: \"test\\path\"\nline2
     assert_equals 'file: \"test\\path\"\nline2' "$result" "Complex string should be properly escaped"
 
-    log_test_pass
+    log_test_pass "$test_name"
 }
 
 #==============================================================================
@@ -193,7 +200,8 @@ test_json_escape_complex() {
 #==============================================================================
 
 test_write_result_creates_valid_json() {
-    log_test_start "write_result creates valid NDJSON"
+    local test_name="write_result creates valid NDJSON"
+    log_test_start "$test_name"
     local test_env
     test_env=$(create_test_env)
 
@@ -222,11 +230,12 @@ test_write_result_creates_valid_json() {
     fi
 
     unset RESULTS_FILE
-    log_test_pass
+    log_test_pass "$test_name"
 }
 
 test_write_result_includes_all_fields() {
-    log_test_start "write_result includes all required fields"
+    local test_name="write_result includes all required fields"
+    log_test_start "$test_name"
     local test_env
     test_env=$(create_test_env)
 
@@ -245,11 +254,12 @@ test_write_result_includes_all_fields() {
     assert_file_contains "$results_file" '"timestamp":' "Should contain timestamp field"
 
     unset RESULTS_FILE
-    log_test_pass
+    log_test_pass "$test_name"
 }
 
 test_write_result_escapes_special_chars() {
-    log_test_start "write_result escapes special characters"
+    local test_name="write_result escapes special characters"
+    log_test_start "$test_name"
     local test_env
     test_env=$(create_test_env)
 
@@ -259,15 +269,16 @@ test_write_result_escapes_special_chars() {
     # Use a message with special characters
     write_result "owner/repo" "clone" "failed" "0" 'Error: "file not found"' "/path/to/repo"
 
-    # The output should have escaped quotes
-    assert_file_contains "$results_file" '\"file not found\"' "Quotes in message should be escaped"
+    # The output should have escaped quotes (grep needs double-escaped backslash)
+    assert_file_contains "$results_file" '\\"file not found\\"' "Quotes in message should be escaped"
 
     unset RESULTS_FILE
-    log_test_pass
+    log_test_pass "$test_name"
 }
 
 test_write_result_handles_missing_optional() {
-    log_test_start "write_result handles missing optional parameters"
+    local test_name="write_result handles missing optional parameters"
+    log_test_start "$test_name"
     local test_env
     test_env=$(create_test_env)
 
@@ -282,32 +293,34 @@ test_write_result_handles_missing_optional() {
     assert_file_contains "$results_file" '"duration":0' "Duration should default to 0"
 
     unset RESULTS_FILE
-    log_test_pass
+    log_test_pass "$test_name"
 }
 
 test_write_result_noop_without_results_file() {
-    log_test_start "write_result is no-op when RESULTS_FILE is unset"
+    local test_name="write_result is no-op when RESULTS_FILE is empty"
+    log_test_start "$test_name"
     local test_env
     test_env=$(create_test_env)
 
-    # Ensure RESULTS_FILE is unset
-    unset RESULTS_FILE
+    # Set RESULTS_FILE to empty (not unset, which would fail with set -u)
+    RESULTS_FILE=""
 
     # This should not error or create any files
     local output
     if output=$(write_result "owner/repo" "clone" "success" 2>&1); then
         # Should succeed silently
-        assert_true "true" "write_result should not error when RESULTS_FILE is unset"
+        assert_true "true" "write_result should not error when RESULTS_FILE is empty"
     else
-        log_test_fail "write_result should not fail when RESULTS_FILE is unset"
+        log_test_fail "$test_name" "write_result should not fail when RESULTS_FILE is empty"
         return 1
     fi
 
-    log_test_pass
+    log_test_pass "$test_name"
 }
 
 test_write_result_appends_multiple() {
-    log_test_start "write_result appends multiple results"
+    local test_name="write_result appends multiple results"
+    log_test_start "$test_name"
     local test_env
     test_env=$(create_test_env)
 
@@ -326,11 +339,12 @@ test_write_result_appends_multiple() {
     assert_equals "3" "$line_count" "Should have 3 result lines"
 
     unset RESULTS_FILE
-    log_test_pass
+    log_test_pass "$test_name"
 }
 
 test_write_result_includes_timestamp() {
-    log_test_start "write_result includes ISO timestamp"
+    local test_name="write_result includes ISO timestamp"
+    log_test_start "$test_name"
     local test_env
     test_env=$(create_test_env)
 
@@ -347,7 +361,7 @@ test_write_result_includes_timestamp() {
         if [[ "$timestamp" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
             assert_true "true" "Timestamp should be in ISO format"
         else
-            log_test_fail "Timestamp format invalid: $timestamp"
+            log_test_fail "$test_name" "Timestamp format invalid: $timestamp"
             return 1
         fi
     else
@@ -356,7 +370,7 @@ test_write_result_includes_timestamp() {
     fi
 
     unset RESULTS_FILE
-    log_test_pass
+    log_test_pass "$test_name"
 }
 
 #==============================================================================

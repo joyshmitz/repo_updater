@@ -1050,46 +1050,48 @@ resolve_repo_spec() {
     local -n _rrs_path=$7
     local -n _rrs_repo_id=$8
 
-    local url branch custom host owner repo
-    parse_repo_spec "$spec" url branch custom
+    # Use unique prefixes to avoid shadowing caller's nameref targets and
+    # avoid conflicts with namerefs in parse_repo_spec and parse_repo_url
+    local spec_url spec_branch spec_custom spec_host spec_owner spec_repo
+    parse_repo_spec "$spec" spec_url spec_branch spec_custom
 
     # Validate branch name to prevent option-injection into git checkout/switch
-    if [[ -n "$branch" ]]; then
+    if [[ -n "$spec_branch" ]]; then
         # Reject branches starting with - (option injection)
-        [[ "$branch" == -* ]] && return 1
+        [[ "$spec_branch" == -* ]] && return 1
         # Use git to validate ref format if available
         if command -v git &>/dev/null; then
-            git check-ref-format --branch "$branch" >/dev/null 2>&1 || return 1
+            git check-ref-format --branch "$spec_branch" >/dev/null 2>&1 || return 1
         fi
     fi
 
     # Parse and validate the URL
-    if ! parse_repo_url "$url" host owner repo; then
+    if ! parse_repo_url "$spec_url" spec_host spec_owner spec_repo; then
         return 1
     fi
 
     # Validate custom name if provided
-    if [[ -n "$custom" ]]; then
-        _is_safe_path_segment "$custom" || return 1
-        _rrs_path="${projects_dir}/${custom}"
+    if [[ -n "$spec_custom" ]]; then
+        _is_safe_path_segment "$spec_custom" || return 1
+        _rrs_path="${projects_dir}/${spec_custom}"
     else
         case "$layout" in
-            flat)       _rrs_path="${projects_dir}/${repo}" ;;
-            owner-repo) _rrs_path="${projects_dir}/${owner}/${repo}" ;;
-            full)       _rrs_path="${projects_dir}/${host}/${owner}/${repo}" ;;
+            flat)       _rrs_path="${projects_dir}/${spec_repo}" ;;
+            owner-repo) _rrs_path="${projects_dir}/${spec_owner}/${spec_repo}" ;;
+            full)       _rrs_path="${projects_dir}/${spec_host}/${spec_owner}/${spec_repo}" ;;
             *)          return 1 ;;
         esac
     fi
 
-    _rrs_url="$url"
-    _rrs_branch="$branch"
-    _rrs_custom="$custom"
+    _rrs_url="$spec_url"
+    _rrs_branch="$spec_branch"
+    _rrs_custom="$spec_custom"
 
     # Build canonical repo ID for display/reporting
-    if [[ "$host" == "github.com" ]]; then
-        _rrs_repo_id="${owner}/${repo}"
+    if [[ "$spec_host" == "github.com" ]]; then
+        _rrs_repo_id="${spec_owner}/${spec_repo}"
     else
-        _rrs_repo_id="${host}/${owner}/${repo}"
+        _rrs_repo_id="${spec_host}/${spec_owner}/${spec_repo}"
     fi
 
     return 0

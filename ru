@@ -147,6 +147,9 @@ RESUME="false"
 RESTART="false"
 SYNC_INTERRUPTED="false"
 
+# Init command options
+INIT_EXAMPLE="false"
+
 # Gum availability
 GUM_AVAILABLE="false"
 
@@ -344,6 +347,9 @@ SYNC OPTIONS:
 STATUS OPTIONS:
     --fetch              Fetch remotes first (default)
     --no-fetch           Skip fetch, use cached state
+
+INIT OPTIONS:
+    --example            Include example repositories in initial config
 
 EXAMPLES:
     ru sync              Sync all configured repos
@@ -1445,6 +1451,10 @@ parse_args() {
                 GIT_TIMEOUT="$2"
                 shift 2
                 ;;
+            --example)
+                INIT_EXAMPLE="true"
+                shift
+                ;;
             sync|status|init|add|remove|list|doctor|self-update|config)
                 COMMAND="$1"
                 shift
@@ -2213,6 +2223,20 @@ cmd_init() {
         log_success "Created configuration directory: $RU_CONFIG_DIR"
         log_success "Created repos file: $RU_CONFIG_DIR/repos.d/repos.txt"
         log_success "Created config file: $RU_CONFIG_DIR/config"
+
+        # Handle --example flag: copy example repos to repos.txt
+        if [[ "$INIT_EXAMPLE" == "true" ]]; then
+            local example_file="$SCRIPT_DIR/examples/public.txt"
+            local repos_file="$RU_CONFIG_DIR/repos.d/repos.txt"
+            if [[ -f "$example_file" ]]; then
+                # Overwrite the template repos.txt with example content
+                cp "$example_file" "$repos_file"
+                log_success "Added example repos from $example_file"
+            else
+                log_warn "Example file not found: $example_file"
+            fi
+        fi
+
         echo "" >&2
         log_info "Next steps:"
         log_info "  1. Add repos:  ru add owner/repo"

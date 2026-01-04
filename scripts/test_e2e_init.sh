@@ -258,6 +258,29 @@ test_init_respects_xdg_config_home() {
     cleanup_test_env
 }
 
+test_init_example_flag() {
+    echo "Test: ru init --example adds sample repos"
+    setup_test_env
+
+    local repos_file="$XDG_CONFIG_HOME/ru/repos.d/repos.txt"
+
+    # Run init with --example flag
+    local output
+    output=$("$RU_SCRIPT" init --example 2>&1)
+    local exit_code=$?
+
+    assert_exit_code 0 "$exit_code" "ru init --example exits with code 0"
+    assert_file_exists "$repos_file" "repos.txt file created with --example"
+
+    # Verify example repos are present (from examples/public.txt)
+    assert_file_contains "$repos_file" "charmbracelet/gum" "repos.txt contains charmbracelet/gum"
+    assert_file_contains "$repos_file" "cli/cli" "repos.txt contains cli/cli"
+    assert_file_contains "$repos_file" "koalaman/shellcheck" "repos.txt contains koalaman/shellcheck"
+    assert_output_contains "$output" "Added example repos" "Output confirms example repos added"
+
+    cleanup_test_env
+}
+
 #==============================================================================
 # Run Tests
 #==============================================================================
@@ -289,6 +312,9 @@ test_init_output_shows_next_steps
 echo ""
 
 test_init_respects_xdg_config_home
+echo ""
+
+test_init_example_flag
 echo ""
 
 echo "============================================"

@@ -5004,12 +5004,15 @@ GH_WRITE_COMMANDS=(
 # Outputs:
 #   JSON with validation result
 validate_agent_command() {
-    local cmd="$1"
+    local raw_cmd="$1"
     local mode="${2:-execute}"
 
+    # Normalize whitespace to single spaces
+    local cmd
+    cmd=$(echo "$raw_cmd" | xargs)
+
     # Extract the base command (first word)
-    local base_cmd
-    base_cmd=$(echo "$cmd" | awk '{print $1}')
+    local base_cmd="${cmd%% *}"
 
     # Check blocked commands first (highest priority)
     local blocked
@@ -5068,6 +5071,21 @@ validate_agent_command() {
             --arg reason "gh command (unknown subcommand)" \
             '{command: $cmd, status: $status, reason: $reason}'
         return 0
+    fi
+
+    # Special check for git push variants (security bypass prevention)
+    if [[ "$base_cmd" == "git" ]]; then
+        # Check for 'push' token anywhere in the command
+        # This covers: git push, git -C path push, git push --force, etc.
+        if [[ " $cmd " == *" push "* ]]; then
+            jq -n \
+                --arg cmd "$cmd" \
+                --arg base "$base_cmd" \
+                --arg status "needs_approval" \
+                --arg reason "git push operation requires confirmation" \
+                '{command: $cmd, base_command: $base, status: $status, reason: $reason}'
+            return 2
+        fi
     fi
 
     # Check approval-required commands
@@ -5513,6 +5531,546 @@ EOF
     }
 }
 
+#------------------------------------------------------------------------------
+# DASHBOARD VIEW FOR NTM MODE (bd-9j92)
+# Full-screen TUI showing pending questions, active sessions, and summary stats
+#------------------------------------------------------------------------------
+
+# Dashboard state (global for event loop access)
+declare -gA DASHBOARD_STATE=(
+    [selected_index]=0
+    [expanded_question]=""
+    [scroll_offset]=0
+    [panel_focus]="questions"
+    [refresh_needed]="true"
+    [last_refresh]=0
+    [running]="true"
+)
+
+# Dashboard color definitions
+DASH_BOLD=$'\033[1m'
+DASH_DIM=$'\033[2m'
+DASH_RESET=$'\033[0m'
+DASH_RED=$'\033[31m'
+DASH_GREEN=$'\033[32m'
+DASH_YELLOW=$'\033[33m'
+DASH_BLUE=$'\033[34m'
+DASH_CYAN=$'\033[36m'
+DASH_BG_BLUE=$'\033[44m'
+DASH_BG_GRAY=$'\033[100m'
+
+# Get terminal dimensions
+get_terminal_size() {
+    local -n _cols=$1
+    local -n _rows=$2
+    if command -v tput &>/dev/null; then
+        _cols=$(tput cols)
+        _rows=$(tput lines)
+    else
+        _cols=80
+        _rows=24
+    fi
+}
+
+# Enter alternate screen buffer
+enter_alt_screen() {
+    printf '\033[?1049h'  # Enter alternate screen
+    printf '\033[?25l'    # Hide cursor
+    stty -echo -icanon   # Disable echo and canonical mode
+}
+
+# Exit alternate screen buffer
+exit_alt_screen() {
+    printf '\033[?25h'    # Show cursor
+    printf '\033[?1049l'  # Exit alternate screen
+    stty echo icanon     # Restore terminal settings
+}
+
+# Clear screen and move cursor to top-left
+clear_screen() {
+    printf '\033[2J\033[H'
+}
+
+# Move cursor to position
+move_cursor() {
+    local row="$1"
+    local col="$2"
+    printf '\033[%d;%dH' "$row" "$col"
+}
+
+# Draw a horizontal line
+draw_hline() {
+    local width="$1"
+    local char="${2:-─}"
+    printf '%*s' "$width" '' | tr ' ' "$char"
+}
+
+# Truncate string to fit width with ellipsis
+truncate_string() {
+    local str="$1"
+    local max_width="$2"
+    if [[ ${#str} -gt $max_width ]]; then
+        echo "${str:0:$((max_width - 3))}..."
+    else
+        echo "$str"
+    fi
+}
+
+# Format duration from seconds
+format_duration() {
+    local seconds="$1"
+    local mins=$((seconds / 60))
+    local secs=$((seconds % 60))
+    printf '%dm %02ds' "$mins" "$secs"
+}
+
+# Render dashboard header
+# Args: $1=cols, $2=run_id, $3=progress_current, $4=progress_total, $5=start_time
+render_header() {
+    local cols="$1"
+    local run_id="$2"
+    local current="$3"
+    local total="$4"
+    local start_time="$5"
+
+    local now
+    now=$(date +%s)
+    local runtime=$((now - start_time))
+
+    # Top border
+    printf '%s%s' "${DASH_BG_BLUE}${DASH_BOLD}" "${DASH_RESET}"
+    printf '%s' "${DASH_BG_BLUE}"
+
+    # Title and stats
+    local title="ru review"
+    local stats
+    stats=$(printf 'Progress: %d/%d  Runtime: %s' "$current" "$total" "$(format_duration "$runtime")")
+    local padding=$((cols - ${#title} - ${#stats} - 4))
+    if [[ $padding -lt 0 ]]; then padding=0; fi
+
+    printf '  %s%s%*s%s  ' "${DASH_BOLD}${title}${DASH_RESET}${DASH_BG_BLUE}" "" "$padding" "" "$stats"
+    printf '%s\n' "${DASH_RESET}"
+
+    # Border line
+    printf '%s' "${DASH_DIM}"
+    draw_hline "$cols"
+    printf '%s\n' "${DASH_RESET}"
+}
+
+# Render a single question entry
+# Args: $1=index, $2=selected, $3=expanded, $4=question_json, $5=cols
+render_question_entry() {
+    local index="$1"
+    local selected="$2"
+    local expanded="$3"
+    local question_json="$4"
+    local cols="$5"
+
+    local repo number item_type priority context
+    repo=$(echo "$question_json" | jq -r '.repo // "unknown"')
+    number=$(echo "$question_json" | jq -r '.number // 0')
+    item_type=$(echo "$question_json" | jq -r '.type // "issue"')
+    priority=$(echo "$question_json" | jq -r '.priority // "NORMAL"')
+    context=$(echo "$question_json" | jq -r '.context // ""' | head -1)
+
+    # Priority colors
+    local priority_color="$DASH_RESET"
+    case "$priority" in
+        CRITICAL) priority_color="$DASH_RED" ;;
+        HIGH)     priority_color="$DASH_YELLOW" ;;
+        NORMAL)   priority_color="$DASH_GREEN" ;;
+        LOW)      priority_color="$DASH_DIM" ;;
+    esac
+
+    # Selection indicator
+    local indicator="○"
+    if [[ "$selected" == "true" ]]; then
+        indicator="●"
+        printf '%s' "$DASH_BG_GRAY"
+    fi
+
+    # Format type tag
+    local type_tag
+    if [[ "$item_type" == "pr" ]]; then
+        type_tag="PR #$number"
+    else
+        type_tag="Issue #$number"
+    fi
+
+    # Main line
+    local main_line
+    main_line=$(printf '  [%d] %s %-18s %-12s Priority: %s%s%s' \
+        "$index" "$indicator" \
+        "$(truncate_string "$repo" 18)" \
+        "$type_tag" \
+        "$priority_color" "$priority" "$DASH_RESET")
+    printf '%s\n' "$(truncate_string "$main_line" "$cols")"
+
+    if [[ "$selected" == "true" ]]; then
+        printf '%s' "$DASH_RESET"
+    fi
+
+    # Context line (if selected or expanded)
+    if [[ "$expanded" == "true" || "$selected" == "true" ]]; then
+        local context_display
+        context_display=$(truncate_string "$context" $((cols - 10)))
+        printf '      %sContext: %s%s\n' "$DASH_DIM" "$context_display" "$DASH_RESET"
+
+        # Options (if available)
+        local options
+        options=$(echo "$question_json" | jq -r '.options // [] | .[] | .label' 2>/dev/null)
+        if [[ -n "$options" ]]; then
+            local opt_line="      > "
+            local opt_index=0
+            while IFS= read -r opt; do
+                [[ -z "$opt" ]] && continue
+                local letter
+                letter=$(printf '%c' $((97 + opt_index)))  # a, b, c...
+                opt_line+="${letter}) ${opt}  "
+                ((opt_index++))
+            done <<< "$options"
+            printf '%s\n' "$(truncate_string "$opt_line" "$cols")"
+        fi
+    fi
+}
+
+# Render questions panel
+# Args: $1=cols, $2=max_rows, $3=questions_json_array
+render_questions_panel() {
+    local cols="$1"
+    local max_rows="$2"
+    local questions_json="$3"
+
+    local count
+    count=$(echo "$questions_json" | jq 'length')
+    local selected_idx="${DASHBOARD_STATE[selected_index]}"
+
+    # Panel header
+    printf '\n  %sPENDING QUESTIONS (%d)%s\n' "${DASH_BOLD}" "$count" "${DASH_RESET}"
+    printf '  %s' "${DASH_DIM}"
+    draw_hline $((cols - 4))
+    printf '%s\n' "${DASH_RESET}"
+
+    if [[ "$count" -eq 0 ]]; then
+        printf '  %sNo pending questions%s\n' "${DASH_DIM}" "${DASH_RESET}"
+        return
+    fi
+
+    # Render visible questions
+    local visible_rows=$((max_rows - 4))
+    local scroll_offset="${DASHBOARD_STATE[scroll_offset]}"
+    local end_idx=$((scroll_offset + visible_rows))
+    [[ $end_idx -gt $count ]] && end_idx=$count
+
+    local i
+    for ((i = scroll_offset; i < end_idx; i++)); do
+        local question
+        question=$(echo "$questions_json" | jq ".[$i]")
+        local is_selected="false"
+        local is_expanded="false"
+        [[ $i -eq $selected_idx ]] && is_selected="true"
+        [[ "${DASHBOARD_STATE[expanded_question]}" == "$i" ]] && is_expanded="true"
+        render_question_entry "$((i + 1))" "$is_selected" "$is_expanded" "$question" "$cols"
+    done
+
+    # Scroll indicator
+    if [[ $count -gt $visible_rows ]]; then
+        printf '  %s[%d more below]%s\n' "${DASH_DIM}" "$((count - end_idx))" "${DASH_RESET}"
+    fi
+}
+
+# Render sessions panel
+# Args: $1=cols, $2=sessions_json_array
+render_sessions_panel() {
+    local cols="$1"
+    local sessions_json="$2"
+
+    local count
+    count=$(echo "$sessions_json" | jq 'length')
+
+    # Panel header
+    printf '\n  %sACTIVE SESSIONS%s\n' "${DASH_BOLD}" "${DASH_RESET}"
+    printf '  %s' "${DASH_DIM}"
+    draw_hline $((cols - 4))
+    printf '%s\n' "${DASH_RESET}"
+
+    if [[ "$count" -eq 0 ]]; then
+        printf '  %sNo active sessions%s\n' "${DASH_DIM}" "${DASH_RESET}"
+        return
+    fi
+
+    # Table header
+    printf '  %s%-20s %-14s %-10s %-10s%s\n' \
+        "${DASH_DIM}" "Repo" "State" "Progress" "Health" "${DASH_RESET}"
+
+    # Render sessions
+    echo "$sessions_json" | jq -r '.[] | "\(.repo)\t\(.state)\t\(.progress)\t\(.health)"' | \
+    while IFS=$'\t' read -r repo state progress health; do
+        # State colors
+        local state_color="$DASH_RESET"
+        case "$state" in
+            GENERATING) state_color="$DASH_GREEN" ;;
+            THINKING)   state_color="$DASH_CYAN" ;;
+            WAITING)    state_color="$DASH_YELLOW" ;;
+            IDLE)       state_color="$DASH_DIM" ;;
+        esac
+
+        # Health colors
+        local health_color="$DASH_GREEN"
+        [[ "$health" == "Degraded" ]] && health_color="$DASH_YELLOW"
+        [[ "$health" == "Unhealthy" ]] && health_color="$DASH_RED"
+
+        printf '  %-20s %s%-14s%s %-10s %s%-10s%s\n' \
+            "$(truncate_string "$repo" 20)" \
+            "$state_color" "$state" "$DASH_RESET" \
+            "$progress" \
+            "$health_color" "$health" "$DASH_RESET"
+    done
+}
+
+# Render summary panel
+# Args: $1=cols, $2=completed, $3=issues, $4=prs, $5=commits
+render_summary_panel() {
+    local cols="$1"
+    local completed="$2"
+    local issues="$3"
+    local prs="$4"
+    local commits="$5"
+
+    printf '\n  %s' "${DASH_DIM}"
+    draw_hline $((cols - 4))
+    printf '%s\n' "${DASH_RESET}"
+
+    printf '  %sSUMMARY%s\n' "${DASH_BOLD}" "${DASH_RESET}"
+    printf '  Completed: %s%d%s | Issues: %d | PRs: %d | Commits: %d\n' \
+        "${DASH_GREEN}" "$completed" "${DASH_RESET}" "$issues" "$prs" "$commits"
+}
+
+# Render footer with keyboard shortcuts
+# Args: $1=cols
+render_footer() {
+    local cols="$1"
+
+    printf '\n%s' "${DASH_DIM}"
+    draw_hline "$cols"
+    printf '\n'
+
+    local shortcuts="[1-9] Answer [Enter] Expand [d] Drill [s] Skip [a] Apply [q] Quit"
+    printf ' %s%s\n' "$shortcuts" "${DASH_RESET}"
+}
+
+# Main dashboard render function
+# Args: $1=run_id, $2=start_time, $3=questions_json, $4=sessions_json, $5=stats_json
+render_dashboard() {
+    local run_id="$1"
+    local start_time="$2"
+    local questions_json="$3"
+    local sessions_json="$4"
+    local stats_json="$5"
+
+    local cols rows
+    get_terminal_size cols rows
+
+    # Parse stats
+    local completed issues prs commits progress_current progress_total
+    completed=$(echo "$stats_json" | jq -r '.completed // 0')
+    issues=$(echo "$stats_json" | jq -r '.issues // 0')
+    prs=$(echo "$stats_json" | jq -r '.prs // 0')
+    commits=$(echo "$stats_json" | jq -r '.commits // 0')
+    progress_current=$(echo "$stats_json" | jq -r '.current // 0')
+    progress_total=$(echo "$stats_json" | jq -r '.total // 0')
+
+    clear_screen
+
+    # Render components
+    render_header "$cols" "$run_id" "$progress_current" "$progress_total" "$start_time"
+
+    # Calculate available space for questions panel
+    local questions_rows=$((rows - 18))  # Reserve space for other panels
+    [[ $questions_rows -lt 5 ]] && questions_rows=5
+
+    render_questions_panel "$cols" "$questions_rows" "$questions_json"
+    render_sessions_panel "$cols" "$sessions_json"
+    render_summary_panel "$cols" "$completed" "$issues" "$prs" "$commits"
+    render_footer "$cols"
+}
+
+# Handle single keypress
+# Args: $1=key, $2=questions_count
+# Returns: action to take (answer:N, expand, drill, skip, apply, quit, none)
+handle_dashboard_keypress() {
+    local key="$1"
+    local questions_count="$2"
+    local selected="${DASHBOARD_STATE[selected_index]}"
+
+    case "$key" in
+        # Number keys for quick answer
+        [1-9])
+            local idx=$((key - 1))
+            if [[ $idx -lt $questions_count ]]; then
+                echo "answer:$idx"
+            fi
+            ;;
+
+        # Navigation
+        j|$'\x1b[B')  # j or down arrow
+            if [[ $((selected + 1)) -lt $questions_count ]]; then
+                DASHBOARD_STATE[selected_index]=$((selected + 1))
+            fi
+            echo "refresh"
+            ;;
+        k|$'\x1b[A')  # k or up arrow
+            if [[ $selected -gt 0 ]]; then
+                DASHBOARD_STATE[selected_index]=$((selected - 1))
+            fi
+            echo "refresh"
+            ;;
+
+        # Expand/collapse
+        $'\x0a'|$'\x0d')  # Enter
+            if [[ "${DASHBOARD_STATE[expanded_question]}" == "$selected" ]]; then
+                DASHBOARD_STATE[expanded_question]=""
+            else
+                DASHBOARD_STATE[expanded_question]="$selected"
+            fi
+            echo "refresh"
+            ;;
+
+        # Actions
+        d) echo "drill:$selected" ;;
+        s) echo "skip:$selected" ;;
+        a) echo "apply" ;;
+        q) echo "quit" ;;
+        h) echo "help" ;;
+
+        # Ignore other keys
+        *) echo "none" ;;
+    esac
+}
+
+# Read a keypress (handles escape sequences for arrow keys)
+read_keypress() {
+    local key
+    IFS= read -rsn1 key 2>/dev/null || return 1
+
+    # Check for escape sequence
+    if [[ "$key" == $'\x1b' ]]; then
+        local seq
+        IFS= read -rsn2 -t 0.1 seq 2>/dev/null || true
+        key+="$seq"
+    fi
+
+    echo "$key"
+}
+
+# Main dashboard event loop
+# Args: $1=run_id, $2=start_time
+# Global: Uses DASHBOARD_STATE, reads from question queue
+run_dashboard() {
+    local run_id="$1"
+    local start_time="$2"
+
+    # Set up terminal
+    enter_alt_screen
+    trap 'exit_alt_screen; exit' EXIT INT TERM
+
+    # Handle resize
+    trap 'DASHBOARD_STATE[refresh_needed]="true"' SIGWINCH
+
+    DASHBOARD_STATE[running]="true"
+    DASHBOARD_STATE[last_refresh]=0
+
+    while [[ "${DASHBOARD_STATE[running]}" == "true" ]]; do
+        local now
+        now=$(date +%s)
+
+        # Check if refresh needed (every 5 seconds or on demand)
+        if [[ "${DASHBOARD_STATE[refresh_needed]}" == "true" ]] || \
+           [[ $((now - DASHBOARD_STATE[last_refresh])) -ge 5 ]]; then
+
+            # Get current state (these would be populated by the orchestrator)
+            local questions_json="${DASHBOARD_QUESTIONS:-[]}"
+            local sessions_json="${DASHBOARD_SESSIONS:-[]}"
+            local stats_json="${DASHBOARD_STATS:-{\"completed\":0,\"issues\":0,\"prs\":0,\"commits\":0,\"current\":0,\"total\":0}}"
+
+            render_dashboard "$run_id" "$start_time" "$questions_json" "$sessions_json" "$stats_json"
+
+            DASHBOARD_STATE[refresh_needed]="false"
+            DASHBOARD_STATE[last_refresh]="$now"
+        fi
+
+        # Wait for keypress with timeout (for periodic refresh)
+        local key
+        if key=$(timeout 1 bash -c 'read -rsn1 key 2>/dev/null && echo "$key"'); then
+            local questions_count
+            questions_count=$(echo "${DASHBOARD_QUESTIONS:-[]}" | jq 'length')
+
+            local action
+            action=$(handle_dashboard_keypress "$key" "$questions_count")
+
+            case "$action" in
+                answer:*)
+                    local idx="${action#answer:}"
+                    # TODO: Handle answer selection (implemented in later beads)
+                    log_verbose "Selected answer for question $idx"
+                    ;;
+                drill:*)
+                    local idx="${action#drill:}"
+                    # TODO: Open drill-down view (bd-7of4)
+                    log_verbose "Drill into question $idx"
+                    ;;
+                skip:*)
+                    local idx="${action#skip:}"
+                    # TODO: Skip question
+                    log_verbose "Skip question $idx"
+                    ;;
+                apply)
+                    # TODO: Apply approved changes
+                    log_verbose "Apply changes requested"
+                    ;;
+                quit)
+                    DASHBOARD_STATE[running]="false"
+                    ;;
+                refresh)
+                    DASHBOARD_STATE[refresh_needed]="true"
+                    ;;
+                help)
+                    # TODO: Show help overlay (bd-80pt)
+                    log_verbose "Help requested"
+                    ;;
+            esac
+        fi
+    done
+
+    exit_alt_screen
+}
+
+# Initialize dashboard with data
+# Args: $1=questions_json, $2=sessions_json, $3=stats_json
+init_dashboard_data() {
+    DASHBOARD_QUESTIONS="$1"
+    DASHBOARD_SESSIONS="$2"
+    DASHBOARD_STATS="$3"
+}
+
+# Update dashboard questions
+update_dashboard_questions() {
+    DASHBOARD_QUESTIONS="$1"
+    DASHBOARD_STATE[refresh_needed]="true"
+}
+
+# Update dashboard sessions
+update_dashboard_sessions() {
+    DASHBOARD_SESSIONS="$1"
+    DASHBOARD_STATE[refresh_needed]="true"
+}
+
+# Update dashboard stats
+update_dashboard_stats() {
+    DASHBOARD_STATS="$1"
+    DASHBOARD_STATE[refresh_needed]="true"
+}
+
 # Parse review-specific arguments
 parse_review_args() {
     # Reset review-specific variables
@@ -5574,6 +6132,9 @@ parse_review_args() {
                 ;;
             --dry-run)
                 REVIEW_DRY_RUN="true"
+                ;;
+            --resume)
+                REVIEW_RESUME="true"
                 ;;
             --push)
                 REVIEW_PUSH="true"
@@ -6969,6 +7530,7 @@ cmd_review() {
     cleanup_review() {
         log_verbose "Cleaning up review session..."
         release_review_lock
+        cleanup
     }
     trap cleanup_review EXIT
 

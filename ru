@@ -5548,12 +5548,14 @@ declare -gA DASHBOARD_STATE=(
 )
 
 # Dashboard color definitions
+# shellcheck disable=SC2034  # Some colors reserved for future use
 DASH_BOLD=$'\033[1m'
 DASH_DIM=$'\033[2m'
 DASH_RESET=$'\033[0m'
 DASH_RED=$'\033[31m'
 DASH_GREEN=$'\033[32m'
 DASH_YELLOW=$'\033[33m'
+# shellcheck disable=SC2034
 DASH_BLUE=$'\033[34m'
 DASH_CYAN=$'\033[36m'
 DASH_BG_BLUE=$'\033[44m'
@@ -6134,6 +6136,7 @@ parse_review_args() {
                 REVIEW_DRY_RUN="true"
                 ;;
             --resume)
+                # shellcheck disable=SC2034  # Used by later phases
                 REVIEW_RESUME="true"
                 ;;
             --push)

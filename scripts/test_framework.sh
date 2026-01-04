@@ -81,11 +81,25 @@ _tf_timestamp() {
 }
 
 # Get elapsed time since test start (in ms)
+# Note: On macOS/BSD, nanoseconds aren't supported, so we fall back to seconds
 _tf_elapsed_ms() {
     if [[ -n "$TF_TEST_START_TIME" ]]; then
         local now
-        now=$(date +%s%N 2>/dev/null || echo "0")
-        if [[ "$now" != "0" && "$TF_TEST_START_TIME" != "0" ]]; then
+        now=$(date +%s%N 2>/dev/null)
+        # Check if nanoseconds are supported (macOS returns literal %N)
+        if [[ "$now" =~ %N$ || -z "$now" ]]; then
+            # Fall back to seconds-based timing
+            local now_sec end_sec
+            now_sec=$(date +%s)
+            # TF_TEST_START_TIME might be in nanoseconds or seconds format
+            if [[ ${#TF_TEST_START_TIME} -gt 12 ]]; then
+                # Nanoseconds format - extract seconds part
+                end_sec=${TF_TEST_START_TIME:0:10}
+            else
+                end_sec=$TF_TEST_START_TIME
+            fi
+            echo $(( (now_sec - end_sec) * 1000 ))
+        elif [[ "$TF_TEST_START_TIME" != "0" ]]; then
             echo $(( (now - TF_TEST_START_TIME) / 1000000 ))
         else
             echo "0"
@@ -149,7 +163,11 @@ log_error() {
 # Usage: log_test_start "test_name"
 log_test_start() {
     local test_name="$1"
-    TF_TEST_START_TIME=$(date +%s%N 2>/dev/null || echo "0")
+    # Try nanoseconds first, fall back to seconds (for macOS)
+    TF_TEST_START_TIME=$(date +%s%N 2>/dev/null)
+    if [[ "$TF_TEST_START_TIME" =~ %N$ || -z "$TF_TEST_START_TIME" ]]; then
+        TF_TEST_START_TIME=$(date +%s)
+    fi
     _tf_log "$TF_LOG_INFO" "TEST" "Starting: $test_name" "$TF_BOLD"
 }
 
@@ -544,11 +562,14 @@ create_temp_dir() {
 
 # Clean up all temporary directories
 cleanup_temp_dirs() {
-    for dir in "${TF_TEMP_DIRS[@]}"; do
-        if [[ -d "$dir" ]]; then
-            rm -rf "$dir"
-        fi
-    done
+    # Guard against empty array with set -u
+    if [[ ${#TF_TEMP_DIRS[@]} -gt 0 ]]; then
+        for dir in "${TF_TEMP_DIRS[@]}"; do
+            if [[ -d "$dir" ]]; then
+                rm -rf "$dir"
+            fi
+        done
+    fi
     TF_TEMP_DIRS=()
     TF_TEST_ENV_ROOT=""
 }
@@ -748,7 +769,7 @@ export -f _tf_pass _tf_fail _tf_log _tf_timestamp _tf_elapsed_ms
 export -f log_debug log_info log_warn log_error
 export -f log_test_start log_test_pass log_test_fail log_test_skip
 export -f init_log_file set_log_level
-export -f create_temp_dir cleanup_temp_dirs reset_test_env create_test_env get_test_env_root
+export -f create_temp_dir cleanup_temp_dirs reset_test_env create_test_env get_test_env_root setup_cleanup_trap
 export -f run_test skip_test print_results get_exit_code
 export -f get_project_dir source_ru_function
 export -f create_mock_repo create_bare_repo

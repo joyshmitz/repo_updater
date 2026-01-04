@@ -4284,20 +4284,250 @@ local_driver_interrupt_session() {
     return 0
 }
 
+#------------------------------------------------------------------------------
+# STREAM-JSON EVENT PARSING (bd-8zt6)
+# Parse Claude Code's --output-format stream-json NDJSON output
+#------------------------------------------------------------------------------
+
+# Parse a single stream-json event line
+# Args:
+#   $1 - JSON line to parse
+#   $2 - nameref for event_type output
+#   $3 - nameref for event_data output
+# Returns:
+#   0 if valid JSON, 1 if invalid
+parse_stream_json_event() {
+    local line="$1"
+    local -n _pse_event_type=$2
+    local -n _pse_event_data=$3
+
+    # Validate JSON
+    if ! echo "$line" | jq empty 2>/dev/null; then
+        _pse_event_type="invalid"
+        _pse_event_data="$line"
+        return 1
+    fi
+
+    _pse_event_type=$(echo "$line" | jq -r '.type // "unknown"')
+
+    case "$_pse_event_type" in
+        system)
+            local subtype
+            subtype=$(echo "$line" | jq -r '.subtype // ""')
+            if [[ "$subtype" == "init" ]]; then
+                _pse_event_data=$(echo "$line" | jq -c '{session_id, tools, cwd}')
+            else
+                _pse_event_data=$(echo "$line" | jq -c '.')
+            fi
+            ;;
+        assistant)
+            _pse_event_data=$(echo "$line" | jq -c '.message.content // []')
+            ;;
+        user)
+            _pse_event_data=$(echo "$line" | jq -c '.message.content // []')
+            ;;
+        result)
+            _pse_event_data=$(echo "$line" | jq -c '{status, duration_ms, session_id, cost_usd}')
+            ;;
+        *)
+            _pse_event_data="$line"
+            ;;
+    esac
+
+    return 0
+}
+
+# Detect if an assistant event contains AskUserQuestion tool use
+# Args:
+#   $1 - Event data (message.content array)
+# Returns:
+#   0 if AskUserQuestion found, 1 otherwise
+detect_ask_user_question() {
+    local event_data="$1"
+
+    # Check if any content block is AskUserQuestion
+    echo "$event_data" | jq -e \
+        '.[] | select(.type == "tool_use" and .name == "AskUserQuestion")' \
+        >/dev/null 2>&1
+}
+
+# Extract question information from AskUserQuestion tool use
+# Args:
+#   $1 - Event data (message.content array)
+# Outputs:
+#   JSON object with question details
+extract_question_info() {
+    local event_data="$1"
+
+    # Extract the AskUserQuestion input
+    local question_input
+    question_input=$(echo "$event_data" | jq -c \
+        '[.[] | select(.name == "AskUserQuestion")] | .[0].input // {}')
+
+    # Parse first question (usually only one)
+    local tool_use_id
+    tool_use_id=$(echo "$event_data" | jq -r \
+        '[.[] | select(.name == "AskUserQuestion")] | .[0].id // ""')
+
+    # Format for queue
+    echo "$question_input" | jq --arg tool_id "$tool_use_id" '{
+        questions: .questions,
+        tool_use_id: $tool_id,
+        detected_at: (now | todate)
+    }'
+}
+
+# Detect questions in plain text output (fallback detection)
+# Args:
+#   $1 - Text to check for question patterns
+# Returns:
+#   0 if question pattern found, 1 otherwise
+detect_text_question() {
+    local text="$1"
+
+    # Question patterns
+    local -a patterns=(
+        'Should I'
+        'Do you want'
+        'Would you like'
+        'Please confirm'
+        'Choose.*:'
+        'Which.*\?'
+        'What.*\?'
+        'How should'
+        '\[y/N\]'
+        '\[Y/n\]'
+        'Enter.*:'
+        'Press.*to'
+    )
+
+    for pattern in "${patterns[@]}"; do
+        if echo "$text" | grep -qiE "$pattern"; then
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+# Extract text content from assistant message
+# Args:
+#   $1 - Event data (message.content array)
+# Outputs:
+#   Plain text extracted from text blocks
+extract_text_content() {
+    local event_data="$1"
+
+    echo "$event_data" | jq -r \
+        '[.[] | select(.type == "text") | .text] | join("\n")'
+}
+
+# Check if event contains tool use
+# Args:
+#   $1 - Event data (message.content array)
+# Outputs:
+#   Tool names used (newline-separated)
+get_tool_uses() {
+    local event_data="$1"
+
+    echo "$event_data" | jq -r \
+        '[.[] | select(.type == "tool_use") | .name] | .[]'
+}
+
+# Process stream-json events from a file/pipe
+# Args:
+#   $1 - Path to log file or named pipe
+#   $2 - Callback function name (receives: event_type, event_data)
+# Returns:
+#   0 on successful completion, 1 on error
+process_stream_json() {
+    local source="$1"
+    local callback="$2"
+
+    # Validate callback is a function
+    if ! declare -F "$callback" >/dev/null 2>&1; then
+        log_error "process_stream_json: callback '$callback' is not a function"
+        return 1
+    fi
+
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+
+        local event_type event_data
+        if ! parse_stream_json_event "$line" event_type event_data; then
+            log_verbose "Skipping invalid JSON line"
+            continue
+        fi
+
+        case "$event_type" in
+            system)
+                "$callback" "init" "$event_data"
+                ;;
+            assistant)
+                # Check for AskUserQuestion
+                if detect_ask_user_question "$event_data"; then
+                    local question_info
+                    question_info=$(extract_question_info "$event_data")
+                    "$callback" "question" "$question_info"
+                else
+                    # Check for text content with question patterns
+                    local text_content
+                    text_content=$(extract_text_content "$event_data")
+                    if [[ -n "$text_content" ]] && detect_text_question "$text_content"; then
+                        "$callback" "text_question" "$text_content"
+                    else
+                        "$callback" "assistant" "$event_data"
+                    fi
+                fi
+                ;;
+            user)
+                "$callback" "user" "$event_data"
+                ;;
+            result)
+                "$callback" "complete" "$event_data"
+                break
+                ;;
+            *)
+                "$callback" "unknown" "$event_data"
+                ;;
+        esac
+    done < "$source"
+}
+
 # Local driver: Stream events from a session
 # Parses NDJSON from Claude's stream-json output
 local_driver_stream_events() {
-    # shellcheck disable=SC2034  # Variables used when implementation complete (bd-8zt6)
-    local session_id="$1" callback="$2"
+    local session_id="$1"
+    local callback="$2"
+    local wt_path="${3:-}"
 
-    # Find event pipe from session artifacts
-    # Session ID is used as tmux session name, need to find worktree
-    # For now, assume event_pipe path is passed or discoverable
+    # If worktree path not provided, try to discover it
+    if [[ -z "$wt_path" ]]; then
+        # Look for session artifacts in state directory
+        local session_dir="$RU_STATE_DIR/sessions/$session_id"
+        if [[ -d "$session_dir" ]]; then
+            wt_path=$(cat "$session_dir/worktree_path" 2>/dev/null || true)
+        fi
+    fi
 
-    log_warn "local_driver_stream_events: Full implementation pending (bd-8zt6)"
+    if [[ -z "$wt_path" ]] || [[ ! -d "$wt_path" ]]; then
+        log_error "Cannot find worktree for session: $session_id"
+        return 1
+    fi
 
-    # This stub shows the pattern; full parsing in bd-8zt6
-    return 0
+    local log_file="$wt_path/.ru/session.log"
+    local event_pipe="$wt_path/.ru/events.pipe"
+
+    # Prefer pipe if exists, otherwise use log file with tail -f
+    if [[ -p "$event_pipe" ]]; then
+        process_stream_json "$event_pipe" "$callback"
+    elif [[ -f "$log_file" ]]; then
+        # Use tail -f for real-time streaming
+        tail -f "$log_file" | process_stream_json /dev/stdin "$callback"
+    else
+        log_error "No event source found for session: $session_id"
+        return 1
+    fi
 }
 
 # Local driver: List all active sessions
@@ -4851,18 +5081,222 @@ cleanup_old_review_state() {
     "
 }
 
-# Stub: Discover work items from GitHub (will be implemented in bd-ff8h)
+#------------------------------------------------------------------------------
+# GRAPHQL BATCHED REPOSITORY DISCOVERY (bd-ff8h)
+#
+# Efficiently discovers open issues and PRs across all configured repos
+# using GraphQL alias batching (up to 25 repos per API call).
+#------------------------------------------------------------------------------
+
+# Split repo IDs into chunks for batched GraphQL queries
+# Args: chunk_size, repo_ids...
+# Output: Each chunk on a separate line (repos within chunk are newline-separated)
+chunk_repo_ids() {
+    local chunk_size="$1"
+    shift
+    local repos=("$@")
+    local count=0
+    local chunk=""
+
+    for repo in "${repos[@]}"; do
+        chunk+="${repo}"$'\n'
+        ((count++))
+        if [[ $count -ge $chunk_size ]]; then
+            printf '%s' "$chunk"
+            chunk=""
+            count=0
+        fi
+    done
+
+    # Output remaining repos
+    [[ -n "$chunk" ]] && printf '%s' "$chunk"
+}
+
+# Execute GraphQL query for a batch of repos
+# Args: chunk (newline-separated repo IDs like owner/repo)
+# Output: GraphQL JSON response
+gh_api_graphql_repo_batch() {
+    local chunk="$1"
+    local q="query {"
+    local i=0
+
+    while IFS= read -r repo_id; do
+        [[ -z "$repo_id" ]] && continue
+        local owner="${repo_id%%/*}"
+        local name="${repo_id#*/}"
+
+        # Build aliased query for this repo
+        q+=" repo${i}: repository(owner:\"${owner}\", name:\"${name}\") {"
+        q+=" nameWithOwner isArchived isFork updatedAt"
+        # Issues with metadata for scoring
+        q+=" issues(states:OPEN, first:50, orderBy:{field:CREATED_AT, direction:DESC}) {"
+        q+="   nodes { number title createdAt updatedAt"
+        q+="     labels(first:10) { nodes { name } }"
+        q+="   }"
+        q+=" }"
+        # PRs with metadata for scoring
+        q+=" pullRequests(states:OPEN, first:20, orderBy:{field:CREATED_AT, direction:DESC}) {"
+        q+="   nodes { number title createdAt updatedAt isDraft"
+        q+="     labels(first:10) { nodes { name } }"
+        q+="   }"
+        q+=" }"
+        q+=" }"
+        ((i++))
+    done <<< "$chunk"
+
+    q+=" }"
+
+    # Execute query via gh CLI
+    gh api graphql -f query="$q" 2>/dev/null
+}
+
+# Parse GraphQL response into work items (TSV format)
+# Args: json_response
+# Output: TSV lines: repo_id\ttype\tnumber\ttitle\tlabels\tcreated_at\tupdated_at\tis_draft
+parse_graphql_work_items() {
+    local resp="$1"
+
+    echo "$resp" | jq -r '
+        .data | to_entries[] | select(.value != null) |
+        select(.value.isArchived != true) |
+        select(.value.isFork != true) |
+        .value as $repo |
+        (
+            # Issues
+            ($repo.issues.nodes // [])[] |
+            [$repo.nameWithOwner, "issue", .number, .title,
+             ([.labels.nodes[].name] | join(",")),
+             .createdAt, .updatedAt, "false"] | @tsv
+        ),
+        (
+            # PRs
+            ($repo.pullRequests.nodes // [])[] |
+            [$repo.nameWithOwner, "pr", .number, .title,
+             ([.labels.nodes[].name] | join(",")),
+             .createdAt, .updatedAt, (.isDraft | tostring)] | @tsv
+        )
+    ' 2>/dev/null
+}
+
+# Convert repo spec to owner/repo format (GitHub only)
+# Args: repo_spec
+# Output: owner/repo or empty if not GitHub
+repo_spec_to_github_id() {
+    local spec="$1"
+    local url branch custom_name local_path repo_id
+
+    # Parse spec to get repo_id
+    if resolve_repo_spec "$spec" "$PROJECTS_DIR" "$LAYOUT" url branch custom_name local_path repo_id; then
+        # Check if it's a GitHub repo
+        if [[ "$url" =~ github\.com[/:] ]]; then
+            echo "$repo_id"
+        fi
+    fi
+}
+
+# Discover work items from GitHub using GraphQL batching
+# Args: result_array_name, priority_filter, max_repos
 discover_work_items() {
     local -n _items_ref=$1
+    # shellcheck disable=SC2034  # Used in bd-5jph (priority scoring)
     local priority_filter="$2"
     local max_repos="$3"
 
-    # Stub implementation - returns empty array
-    # Real implementation will use GraphQL to batch-query repos
     _items_ref=()
 
-    log_verbose "discover_work_items: stub - returning empty list"
-    log_verbose "  priority_filter=$priority_filter, max_repos=$max_repos"
+    # Check for jq (required for parsing)
+    if ! command -v jq &>/dev/null; then
+        log_warn "jq is required for work item discovery"
+        return 0
+    fi
+
+    # Check for gh CLI
+    if ! command -v gh &>/dev/null; then
+        log_warn "gh CLI is required for work item discovery"
+        return 0
+    fi
+
+    # Load all configured repos
+    local -a all_repos=()
+    while IFS= read -r line; do
+        [[ -n "$line" ]] && all_repos+=("$line")
+    done < <(get_all_repos)
+
+    if [[ ${#all_repos[@]} -eq 0 ]]; then
+        log_verbose "No configured repos"
+        return 0
+    fi
+
+    # Convert to GitHub IDs (filter non-GitHub repos)
+    local -a github_repos=()
+    for spec in "${all_repos[@]}"; do
+        local github_id
+        github_id=$(repo_spec_to_github_id "$spec")
+        if [[ -n "$github_id" ]]; then
+            github_repos+=("$github_id")
+        fi
+    done
+
+    if [[ ${#github_repos[@]} -eq 0 ]]; then
+        log_verbose "No GitHub repos configured"
+        return 0
+    fi
+
+    log_verbose "Querying ${#github_repos[@]} GitHub repo(s)"
+
+    # Process in chunks of 25
+    local chunk_size=25
+    local all_work_items=""
+    local chunk=""
+    local count=0
+
+    for repo in "${github_repos[@]}"; do
+        chunk+="${repo}"$'\n'
+        ((count++))
+
+        if [[ $count -ge $chunk_size ]]; then
+            # Execute batch query
+            log_verbose "Querying batch of $count repos"
+            local response
+            if response=$(gh_api_graphql_repo_batch "$chunk"); then
+                local items
+                items=$(parse_graphql_work_items "$response")
+                [[ -n "$items" ]] && all_work_items+="${items}"$'\n'
+            else
+                log_warn "GraphQL batch query failed"
+            fi
+            chunk=""
+            count=0
+        fi
+    done
+
+    # Process remaining repos
+    if [[ -n "$chunk" ]]; then
+        log_verbose "Querying final batch of $count repos"
+        local response
+        if response=$(gh_api_graphql_repo_batch "$chunk"); then
+            local items
+            items=$(parse_graphql_work_items "$response")
+            [[ -n "$items" ]] && all_work_items+="${items}"$'\n'
+        else
+            log_warn "GraphQL batch query failed"
+        fi
+    fi
+
+    # Parse work items into array (pipe-separated format)
+    # Format: repo_id|type|number|title|labels|created_at|updated_at|is_draft
+    while IFS=$'\t' read -r repo_id item_type number title labels created_at updated_at is_draft; do
+        [[ -z "$repo_id" ]] && continue
+        # Convert TSV to pipe-separated for easier parsing later
+        _items_ref+=("${repo_id}|${item_type}|${number}|${title}|${labels}|${created_at}|${updated_at}|${is_draft}")
+    done <<< "$all_work_items"
+
+    # Apply max_repos limit if specified
+    if [[ -n "$max_repos" ]] && [[ ${#_items_ref[@]} -gt $max_repos ]]; then
+        _items_ref=("${_items_ref[@]:0:$max_repos}")
+    fi
+
+    log_verbose "Discovered ${#_items_ref[@]} work item(s)"
 }
 
 # Stub: Show discovery summary (will be enhanced in later phases)

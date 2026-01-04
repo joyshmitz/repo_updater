@@ -1984,6 +1984,16 @@ parse_args() {
                     shift 2
                 fi
                 ;;
+            --parallel=*)
+                if [[ "$COMMAND" == "review" ]]; then
+                    ARGS+=("$1")
+                elif [[ -z "$COMMAND" ]]; then
+                    pending_global_args+=("$1")
+                else
+                    PARALLEL="${1#--parallel=}"
+                fi
+                shift
+                ;;
             -j)
                 if [[ "$COMMAND" == "review" ]]; then
                     if [[ $# -lt 2 ]]; then
@@ -2008,6 +2018,16 @@ parse_args() {
                     shift 2
                 fi
                 ;;
+            -j[0-9]*)
+                if [[ "$COMMAND" == "review" ]]; then
+                    ARGS+=("$1")
+                elif [[ -z "$COMMAND" ]]; then
+                    pending_global_args+=("$1")
+                else
+                    PARALLEL="${1#-j}"
+                fi
+                shift
+                ;;
             --example)
                 INIT_EXAMPLE="true"
                 shift
@@ -2021,7 +2041,7 @@ parse_args() {
                 ARGS+=("$1")
                 shift
                 ;;
-            --plan|--apply|--push|--mode=*|--repos=*|--skip-days=*|--priority=*|--max-repos=*|--max-runtime=*|--max-questions=*|--parallel=*|-j[0-9]*)
+            --plan|--apply|--push|--mode=*|--repos=*|--skip-days=*|--priority=*|--max-repos=*|--max-runtime=*|--max-questions=*)
                 if [[ "$COMMAND" == "review" ]]; then
                     ARGS+=("$1")
                     shift

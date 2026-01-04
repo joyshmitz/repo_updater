@@ -74,6 +74,14 @@ if [[ -f "$SCRIPT_DIR/VERSION" ]]; then
     VERSION="$(cat "$SCRIPT_DIR/VERSION")"
 fi
 
+# GitHub repository constants (for self-update - used by cmd_self_update bd-1006)
+# shellcheck disable=SC2034
+RU_REPO_OWNER="Dicklesworthstone"
+# shellcheck disable=SC2034
+RU_REPO_NAME="repo_updater"
+# shellcheck disable=SC2034
+RU_GITHUB_API="https://api.github.com"
+
 # XDG Base Directory defaults
 XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
@@ -1213,7 +1221,17 @@ get_sync_state_file() {
 
 # Generate a hash of the current repo configuration (for detecting changes)
 get_config_hash() {
-    get_all_repos 2>/dev/null | sort | md5sum | cut -d' ' -f1
+    local input
+    input=$(get_all_repos 2>/dev/null | sort)
+    if command -v md5sum &>/dev/null; then
+        echo "$input" | md5sum | cut -d' ' -f1
+    elif command -v md5 &>/dev/null; then
+        # macOS uses 'md5' instead of 'md5sum'
+        echo "$input" | md5
+    else
+        # Fallback: use wc and date for a rough "hash"
+        echo "${#input}-$(date +%s)"
+    fi
 }
 
 # Load sync state from file
@@ -1431,7 +1449,7 @@ parse_args() {
                 COMMAND="$1"
                 shift
                 ;;
-            --paths|--print|--set=*)
+            --paths|--print|--set=*|--check)
                 # Subcommand-specific options - pass through to ARGS
                 ARGS+=("$1")
                 shift
@@ -1713,13 +1731,17 @@ generate_json_report() {
             [[ "$first" == "true" ]] || repos_json+=","
             first="false"
             # Parse each field and rebuild with proper structure
-            local repo action status repo_duration message
+            local repo action status repo_duration path
             [[ "$line" =~ \"repo\":\"([^\"]+)\" ]] && repo="${BASH_REMATCH[1]}"
             [[ "$line" =~ \"action\":\"([^\"]+)\" ]] && action="${BASH_REMATCH[1]}"
             [[ "$line" =~ \"status\":\"([^\"]+)\" ]] && status="${BASH_REMATCH[1]}"
             [[ "$line" =~ \"duration\":([0-9]+) ]] && repo_duration="${BASH_REMATCH[1]}"
-
-            local path="$PROJECTS_DIR/$repo"
+            # Extract path from NDJSON (falls back to computed path for backwards compat)
+            if [[ "$line" =~ \"path\":\"([^\"]+)\" ]]; then
+                path="${BASH_REMATCH[1]}"
+            else
+                path="$PROJECTS_DIR/$repo"
+            fi
             local safe_path
             safe_path=$(json_escape "$path")
 
@@ -2447,8 +2469,186 @@ cmd_doctor() {
 }
 
 cmd_self_update() {
-    log_info "self-update command not yet implemented"
-    exit 0
+    local check_only="false"
+
+    # Parse --check option
+    for arg in "${ARGS[@]}"; do
+        case "$arg" in
+            --check) check_only="true" ;;
+        esac
+    done
+
+    log_step "Checking for updates..."
+
+    # Get current version
+    local current_version="$VERSION"
+    log_verbose "Current version: $current_version"
+
+    # Fetch latest release version from GitHub API
+    local api_url="$RU_GITHUB_API/repos/$RU_REPO_OWNER/$RU_REPO_NAME/releases/latest"
+    local response
+    if command -v curl &>/dev/null; then
+        response=$(curl -sS "$api_url" 2>/dev/null) || {
+            log_error "Failed to fetch latest release from GitHub"
+            exit 3
+        }
+    elif command -v wget &>/dev/null; then
+        response=$(wget -qO- "$api_url" 2>/dev/null) || {
+            log_error "Failed to fetch latest release from GitHub"
+            exit 3
+        }
+    else
+        log_error "Neither curl nor wget found"
+        exit 3
+    fi
+
+    # Extract version from response (simple grep for portability)
+    local latest_version
+    latest_version=$(echo "$response" | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | cut -d'"' -f4)
+
+    if [[ -z "$latest_version" ]]; then
+        log_error "Could not parse version from GitHub API response"
+        exit 3
+    fi
+
+    # Remove 'v' prefix if present
+    latest_version="${latest_version#v}"
+    log_verbose "Latest version: $latest_version"
+
+    # Compare versions
+    if [[ "$current_version" == "$latest_version" ]]; then
+        log_success "Already up to date (v$current_version)"
+        exit 0
+    fi
+
+    # Version comparison (simple string comparison works for semver)
+    log_info "Update available: v$current_version -> v$latest_version"
+
+    if [[ "$check_only" == "true" ]]; then
+        # --check mode: just report and exit
+        echo "" >&2
+        log_info "Run 'ru self-update' to install the update"
+        exit 0
+    fi
+
+    # Prompt for confirmation if interactive
+    if can_prompt; then
+        if ! gum_confirm "Update to v$latest_version?"; then
+            log_info "Update cancelled"
+            exit 0
+        fi
+    fi
+
+    # Create temp directory for download
+    local temp_dir
+    temp_dir=$(mktemp -d)
+    # Clean up on exit
+    cleanup_temp() { rm -rf "$temp_dir"; }
+    trap cleanup_temp EXIT
+
+    # Download URLs
+    local release_base="https://github.com/$RU_REPO_OWNER/$RU_REPO_NAME/releases/download/v$latest_version"
+    local script_url="$release_base/ru"
+    local checksum_url="$release_base/checksums.txt"
+
+    # Download the new script
+    log_step "Downloading v$latest_version..."
+    if command -v curl &>/dev/null; then
+        if ! curl -fsSL "$script_url" -o "$temp_dir/ru"; then
+            log_error "Failed to download update"
+            exit 1
+        fi
+    else
+        if ! wget -q "$script_url" -O "$temp_dir/ru"; then
+            log_error "Failed to download update"
+            exit 1
+        fi
+    fi
+
+    # Download and verify checksum
+    log_step "Verifying checksum..."
+    local checksum_verified="false"
+    if command -v curl &>/dev/null; then
+        curl -fsSL "$checksum_url" -o "$temp_dir/checksums.txt" 2>/dev/null || true
+    else
+        wget -q "$checksum_url" -O "$temp_dir/checksums.txt" 2>/dev/null || true
+    fi
+
+    if [[ -f "$temp_dir/checksums.txt" ]]; then
+        local expected_checksum
+        expected_checksum=$(grep -E "^[a-f0-9]{64}[[:space:]]+\*?ru$" "$temp_dir/checksums.txt" | cut -d' ' -f1)
+
+        if [[ -n "$expected_checksum" ]]; then
+            local actual_checksum
+            if command -v sha256sum &>/dev/null; then
+                actual_checksum=$(sha256sum "$temp_dir/ru" | cut -d' ' -f1)
+            elif command -v shasum &>/dev/null; then
+                actual_checksum=$(shasum -a 256 "$temp_dir/ru" | cut -d' ' -f1)
+            fi
+
+            if [[ -n "$actual_checksum" ]]; then
+                if [[ "$actual_checksum" == "$expected_checksum" ]]; then
+                    log_success "Checksum verified"
+                    checksum_verified="true"
+                else
+                    log_error "Checksum verification failed!"
+                    log_error "Expected: $expected_checksum"
+                    log_error "Got:      $actual_checksum"
+                    exit 1
+                fi
+            fi
+        fi
+    fi
+
+    if [[ "$checksum_verified" != "true" ]]; then
+        log_warn "Could not verify checksum (checksums.txt not found or incomplete)"
+        if can_prompt; then
+            if ! gum_confirm "Continue without checksum verification?"; then
+                log_info "Update cancelled"
+                exit 0
+            fi
+        else
+            log_error "Cannot proceed without checksum verification in non-interactive mode"
+            exit 1
+        fi
+    fi
+
+    # Verify the downloaded script is valid bash
+    if ! bash -n "$temp_dir/ru" 2>/dev/null; then
+        log_error "Downloaded file is not valid bash script"
+        exit 1
+    fi
+
+    # Get the path to the current script
+    local script_path
+    script_path=$(realpath "${BASH_SOURCE[0]}")
+
+    # Check if we can write to the script location
+    if [[ ! -w "$script_path" ]]; then
+        log_error "Cannot write to $script_path (permission denied)"
+        log_info "Try: sudo ru self-update"
+        exit 1
+    fi
+
+    # Atomic replacement: copy to temp in same directory, then mv
+    local script_dir
+    script_dir=$(dirname "$script_path")
+    local temp_script="$script_dir/.ru.update.$$"
+
+    log_step "Installing update..."
+    cp "$temp_dir/ru" "$temp_script"
+    chmod +x "$temp_script"
+
+    # Atomic move to replace
+    if mv "$temp_script" "$script_path"; then
+        log_success "Updated to v$latest_version"
+        echo "" >&2
+        log_info "Run 'ru --version' to verify"
+    else
+        rm -f "$temp_script"
+        log_error "Failed to install update"
+        exit 1
+    fi
 }
 
 cmd_config() {

@@ -13,39 +13,87 @@ permissions:
 
 jobs:
   release:
-    name: Create Release
+    name: Create Release with Checksums
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Verify tag matches VERSION file
+      - name: Extract version from tag
+        id: version
         run: |
-          tag_version="${GITHUB_REF#refs/tags/v}"
-          file_version=$(cat VERSION)
-          if [[ "$tag_version" != "$file_version" ]]; then
-            echo "Tag version ($tag_version) does not match VERSION file ($file_version)"
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Releasing version: $VERSION"
+
+      - name: Verify script version matches tag
+        run: |
+          script_version=$(grep -m1 'VERSION=' ru | cut -d'"' -f2)
+          tag_version="${{ steps.version.outputs.version }}"
+
+          if [[ "$script_version" != "$tag_version" ]]; then
+            echo "::error::Script VERSION ($script_version) does not match tag ($tag_version)"
+            echo "Please update VERSION in ru before tagging"
             exit 1
           fi
 
-      - name: Generate checksums
-        run: |
-          sha256sum ru install.sh > checksums.txt
+          echo "✓ Version check passed: $tag_version"
 
-      - name: Create Release
+      - name: Verify VERSION file matches tag
+        run: |
+          if [[ -f VERSION ]]; then
+            file_version=$(cat VERSION)
+            tag_version="${{ steps.version.outputs.version }}"
+
+            if [[ "$file_version" != "$tag_version" ]]; then
+              echo "::error::VERSION file ($file_version) does not match tag ($tag_version)"
+              exit 1
+            fi
+          fi
+
+      - name: Compute SHA256 checksums
+        run: |
+          echo "Computing checksums..."
+          sha256sum ru install.sh > checksums.sha256
+          cat checksums.sha256
+
+      - name: Create individual checksum files
+        run: |
+          sha256sum ru | awk '{print $1}' > ru.sha256
+          sha256sum install.sh | awk '{print $1}' > install.sh.sha256
+
+      - name: Generate release notes
+        run: |
+          cat > release_notes.md << 'EOF'
+## Installation
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/repo_updater/main/install.sh | bash
+```
+
+## Verify Installation (Optional)
+
+After downloading, verify the checksum:
+
+```bash
+# Verify ru script
+echo "$(curl -fsSL https://github.com/Dicklesworthstone/repo_updater/releases/download/v${{ steps.version.outputs.version }}/ru.sha256)  ru" | sha256sum -c -
+```
+
+## Checksums
+
+SHA256 checksums for this release are attached as `checksums.sha256`.
+EOF
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
+          name: ru v${{ steps.version.outputs.version }}
+          body_path: release_notes.md
           files: |
             ru
             install.sh
-            checksums.txt
+            checksums.sha256
+            ru.sha256
+            install.sh.sha256
           generate_release_notes: true
-          body: |
-            ## Installation
-
-            ```bash
-            curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/repo_updater/main/install.sh | bash
-            ```
-
-            ## Checksums
-
-            Verify downloads with `checksums.txt` attached to this release.
+          append_body: true

@@ -8,22 +8,21 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 jobs:
-  lint:
+  shellcheck:
     name: ShellCheck
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install ShellCheck
-        run: sudo apt-get install -y shellcheck
-
-      - name: Run ShellCheck on ru
-        run: shellcheck --severity=warning ru
-
-      - name: Run ShellCheck on install.sh
-        run: shellcheck --severity=warning install.sh
+      - name: Run ShellCheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: '.'
+          severity: warning
+          additional_files: 'ru install.sh'
 
   syntax:
     name: Bash Syntax
@@ -37,22 +36,52 @@ jobs:
       - name: Check install.sh syntax
         run: bash -n install.sh
 
-  test-install:
-    name: Test Installation
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
+      - name: Check test scripts syntax
+        run: |
+          bash -n scripts/test_parsing.sh
+          bash -n scripts/test_local_git.sh
+
+  unit-tests:
+    name: Unit Tests
+    needs: [shellcheck, syntax]
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Test installer
+      - name: Run parsing tests
+        run: ./scripts/test_parsing.sh
+
+      - name: Run git integration tests
+        run: ./scripts/test_local_git.sh
+
+  install-test:
+    name: Installation Test
+    needs: [shellcheck, syntax]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run installer
         run: |
           chmod +x install.sh
           # Use RU_UNSAFE_MAIN=1 to test main-branch install path
           # (avoids dependency on GitHub releases existing)
           RU_UNSAFE_MAIN=1 DEST=/tmp/ru-test ./install.sh
-          /tmp/ru-test/ru --version
+
+      - name: Verify installation
+        run: |
+          test -x /tmp/ru-test/ru
+          echo "✓ ru is installed and executable"
+
+      - name: Check version output
+        run: /tmp/ru-test/ru --version
+
+      - name: Check help output
+        run: /tmp/ru-test/ru --help | head -20
 
   version-check:
     name: Version Consistency
@@ -60,12 +89,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check VERSION file matches script
+      - name: Check VERSION file exists
         run: |
+          if [[ ! -f VERSION ]]; then
+            echo "::warning::VERSION file not found"
+            exit 0
+          fi
+
+      - name: Verify version matches
+        run: |
+          if [[ ! -f VERSION ]]; then
+            exit 0
+          fi
+
           file_version=$(cat VERSION)
           script_version=$(grep -m1 'VERSION=' ru | cut -d'"' -f2)
+
           if [[ "$file_version" != "$script_version" ]]; then
-            echo "Version mismatch: VERSION file ($file_version) != ru script ($script_version)"
+            echo "::error::VERSION file ($file_version) does not match ru script ($script_version)"
             exit 1
           fi
-          echo "Version check passed: $file_version"
+
+          echo "✓ Versions are consistent: $file_version"

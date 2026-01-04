@@ -4705,7 +4705,8 @@ record_review_run() {
 }
 
 # Save a checkpoint for resume functionality
-# Args: completed_repos (space-separated), pending_repos (space-separated)
+# Args: completed_repos (space-separated string), pending_repos (space-separated string)
+# shellcheck disable=SC2178,SC2128  # Intentionally using space-separated strings
 checkpoint_review_state() {
     local completed_repos="$1"
     local pending_repos="$2"

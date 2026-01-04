@@ -112,12 +112,13 @@ if [[ -t 2 ]] && [[ -z "${NO_COLOR:-}" ]]; then
     GREEN='\033[0;32m'
     YELLOW='\033[0;33m'
     BLUE='\033[0;34m'
+    MAGENTA='\033[0;35m'
     CYAN='\033[0;36m'
     BOLD='\033[1m'
     DIM='\033[2m'
     RESET='\033[0m'
 else
-    RED='' GREEN='' YELLOW='' BLUE='' CYAN='' BOLD='' DIM='' RESET=''
+    RED='' GREEN='' YELLOW='' BLUE='' MAGENTA='' CYAN='' BOLD='' DIM='' RESET=''
 fi
 
 #==============================================================================
@@ -281,6 +282,7 @@ COMMANDS:
     self-update     Update ru to the latest version
     config          Show or set configuration values
     prune           Find and manage orphan repositories
+    import <file>   Import repos from file with auto visibility detection
 
 GLOBAL OPTIONS:
     -h, --help           Show this help message
@@ -323,6 +325,11 @@ PRUNE OPTIONS:
     --archive            Move orphans to archive directory
     --delete             Delete orphans (requires confirmation)
 
+IMPORT OPTIONS:
+    --public             Force all repos to be added as public
+    --private            Force all repos to be added as private
+    --dry-run            Preview import without modifying config
+
 EXAMPLES:
     ru sync              Sync all configured repos
     ru sync --dry-run    Preview sync without changes
@@ -332,6 +339,7 @@ EXAMPLES:
     ru doctor            Check system configuration
     ru prune             Find orphan repos not in config
     ru prune --archive   Archive orphan repos
+    ru import repos.txt  Import repos from file (auto-detects visibility)
 
 CONFIGURATION:
     Config:  ~/.config/ru/config
@@ -417,12 +425,21 @@ EOF
 
     # Check if key already exists
     if grep -q "^${key}=" "$config_file" 2>/dev/null; then
+        # Escape special sed replacement characters in value:
+        #   & means "matched text" in sed replacement
+        #   \ is the escape character
+        #   | is our delimiter
+        local escaped_value="$value"
+        escaped_value="${escaped_value//\\/\\\\}"  # Escape backslashes first
+        escaped_value="${escaped_value//&/\\&}"    # Escape ampersands
+        escaped_value="${escaped_value//|/\\|}"    # Escape our delimiter
+
         # Update existing key (use sed with different delimiter for paths with /)
         # macOS sed requires -i '' while GNU sed uses -i
         if [[ "$OSTYPE" == "darwin"* ]]; then
-            sed -i '' "s|^${key}=.*|${key}=${value}|" "$config_file"
+            sed -i '' "s|^${key}=.*|${key}=${escaped_value}|" "$config_file"
         else
-            sed -i "s|^${key}=.*|${key}=${value}|" "$config_file"
+            sed -i "s|^${key}=.*|${key}=${escaped_value}|" "$config_file"
         fi
     else
         # Append new key
@@ -1721,7 +1738,7 @@ parse_args() {
                 INIT_EXAMPLE="true"
                 shift
                 ;;
-            sync|status|init|add|remove|list|doctor|self-update|config|prune)
+            sync|status|init|add|remove|list|doctor|self-update|config|prune|import)
                 COMMAND="$1"
                 shift
                 ;;
@@ -2604,6 +2621,7 @@ cmd_add() {
 
     for repo in "${repo_args[@]}"; do
         # Parse the repo spec to extract URL (ignoring branch/custom name for dupe check)
+        # shellcheck disable=SC2034  # spec_branch/spec_name set by nameref, intentionally unused
         local spec_url spec_branch spec_name
         parse_repo_spec "$repo" spec_url spec_branch spec_name
 
@@ -2627,6 +2645,7 @@ cmd_add() {
             [[ -z "$line" ]] && continue
 
             # Parse the existing spec to get its URL
+            # shellcheck disable=SC2034  # existing_branch/existing_name set by nameref, intentionally unused
             local existing_url existing_branch existing_name
             parse_repo_spec "$line" existing_url existing_branch existing_name
 
@@ -2664,6 +2683,7 @@ cmd_add() {
         if [[ -f "$other_file" ]]; then
             while IFS= read -r line; do
                 [[ -z "$line" ]] && continue
+                # shellcheck disable=SC2034  # existing_branch, existing_name set by nameref but only URL used
                 local existing_url existing_branch existing_name
                 parse_repo_spec "$line" existing_url existing_branch existing_name
                 local existing_host existing_owner existing_repo
@@ -2688,6 +2708,236 @@ cmd_add() {
         [[ "$use_private" == "true" ]] && file_label=" (private)"
         log_success "Added: $repo$file_label"
     done
+}
+
+# Import repos from files with auto public/private detection
+cmd_import() {
+    local force_public="false"
+    local force_private="false"
+    local file_args=()
+
+    # Parse import-specific options from ARGS
+    for arg in "${ARGS[@]}"; do
+        case "$arg" in
+            --public)  force_public="true" ;;
+            --private) force_private="true" ;;
+            *)         file_args+=("$arg") ;;
+        esac
+    done
+
+    if [[ ${#file_args[@]} -eq 0 ]]; then
+        log_error "Usage: ru import [--dry-run] [--public|--private] <file> [file2] ..."
+        log_info ""
+        log_info "Import repositories from files into your ru configuration."
+        log_info "By default, uses GitHub API to auto-detect public/private status."
+        log_info ""
+        log_info "Options:"
+        log_info "  --dry-run   Preview changes without modifying config files"
+        log_info "  --public    Force all repos to be added as public"
+        log_info "  --private   Force all repos to be added as private"
+        log_info ""
+        log_info "Supported formats in files:"
+        log_info "  owner/repo"
+        log_info "  https://github.com/owner/repo"
+        log_info "  git@github.com:owner/repo.git"
+        exit 4
+    fi
+
+    # Check if we can auto-detect visibility
+    local can_detect_visibility="false"
+    if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
+        can_detect_visibility="true"
+    fi
+
+    if [[ "$can_detect_visibility" == "false" && "$force_public" == "false" && "$force_private" == "false" ]]; then
+        log_warn "GitHub CLI (gh) not available or not authenticated"
+        log_warn "Cannot auto-detect public/private status"
+        log_info "Use --public or --private to specify, or authenticate gh"
+        exit 3
+    fi
+
+    # Ensure config exists
+    if [[ ! -d "$RU_CONFIG_DIR" ]]; then
+        log_error "No configuration found. Run: ru init"
+        exit 3
+    fi
+
+    local repos_dir="$RU_CONFIG_DIR/repos.d"
+    mkdir -p "$repos_dir"
+
+    local public_file="$repos_dir/repos.txt"
+    local private_file="$repos_dir/private.txt"
+
+    # Initialize files if needed
+    [[ ! -f "$public_file" ]] && touch "$public_file"
+    [[ ! -f "$private_file" ]] && touch "$private_file"
+
+    # Counters
+    local imported_public=0
+    local imported_private=0
+    local skipped_duplicate=0
+    local skipped_invalid=0
+    local skipped_error=0
+    local total_lines=0
+
+    # Arrays for detailed reporting
+    local invalid_repos=()
+    local error_repos=()
+    local success_repos=()
+
+    # Process each file
+    for input_file in "${file_args[@]}"; do
+        if [[ ! -f "$input_file" ]]; then
+            log_error "File not found: $input_file"
+            continue
+        fi
+
+        log_info "Processing: $input_file"
+        local file_line_count=0
+
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            # Skip empty lines and comments
+            line="${line%%#*}"
+            # Trim leading and trailing whitespace
+            line="${line#"${line%%[![:space:]]*}"}"
+            line="${line%"${line##*[![:space:]]}"}"
+            [[ -z "$line" ]] && continue
+
+            ((total_lines++))
+            ((file_line_count++))
+
+            # Parse the URL
+            local host="" owner="" repo=""
+            if ! parse_repo_url "$line" host owner repo 2>/dev/null; then
+                ((skipped_invalid++))
+                invalid_repos+=("$line")
+                continue
+            fi
+
+            # Normalize to canonical form
+            local normalized
+            normalized=$(normalize_url "$line")
+
+            # Check for duplicates in both files
+            if grep -qxF "$normalized" "$public_file" 2>/dev/null || \
+               grep -qxF "$normalized" "$private_file" 2>/dev/null; then
+                ((skipped_duplicate++))
+                continue
+            fi
+
+            # Determine visibility
+            local is_private="unknown"
+            local visibility_label=""
+
+            if [[ "$force_private" == "true" ]]; then
+                is_private="true"
+                visibility_label="private (forced)"
+            elif [[ "$force_public" == "true" ]]; then
+                is_private="false"
+                visibility_label="public (forced)"
+            elif [[ "$can_detect_visibility" == "true" ]]; then
+                # Use GitHub API to detect visibility
+                local api_response
+                if api_response=$(gh api "repos/$owner/$repo" --jq '.private' 2>/dev/null); then
+                    if [[ "$api_response" == "true" ]]; then
+                        is_private="true"
+                        visibility_label="private"
+                    else
+                        is_private="false"
+                        visibility_label="public"
+                    fi
+                else
+                    ((skipped_error++))
+                    error_repos+=("$line|API lookup failed")
+                    continue
+                fi
+            fi
+
+            # Add to appropriate file
+            local target_file
+            if [[ "$is_private" == "true" ]]; then
+                target_file="$private_file"
+                if [[ "$DRY_RUN" != "true" ]]; then
+                    echo "$normalized" >> "$target_file"
+                fi
+                ((imported_private++))
+            else
+                target_file="$public_file"
+                if [[ "$DRY_RUN" != "true" ]]; then
+                    echo "$normalized" >> "$target_file"
+                fi
+                ((imported_public++))
+            fi
+
+            success_repos+=("$line|$visibility_label")
+
+        done < "$input_file"
+
+        log_info "  Processed $file_line_count entries from $(basename "$input_file")"
+    done
+
+    # Print summary
+    echo "" >&2
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo -e "${BOLD}Import Preview${RESET} (dry-run)" >&2
+    else
+        echo -e "${BOLD}Import Summary${RESET}" >&2
+    fi
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+
+    local total_imported=$((imported_public + imported_private))
+
+    # Success stats
+    if [[ $total_imported -gt 0 ]]; then
+        echo -e "${GREEN}✓${RESET} Imported:    ${BOLD}$total_imported${RESET} repos" >&2
+        if [[ $imported_public -gt 0 ]]; then
+            echo -e "              └─ ${CYAN}$imported_public public${RESET}" >&2
+        fi
+        if [[ $imported_private -gt 0 ]]; then
+            echo -e "              └─ ${MAGENTA}$imported_private private${RESET}" >&2
+        fi
+    fi
+
+    # Skip stats
+    if [[ $skipped_duplicate -gt 0 ]]; then
+        echo -e "${YELLOW}⏭${RESET}  Duplicates: ${BOLD}$skipped_duplicate${RESET} (already configured)" >&2
+    fi
+
+    if [[ $skipped_invalid -gt 0 ]]; then
+        echo -e "${RED}✗${RESET} Invalid:     ${BOLD}$skipped_invalid${RESET} (couldn't parse)" >&2
+        if [[ "$VERBOSE" == "true" ]]; then
+            for item in "${invalid_repos[@]}"; do
+                echo -e "              └─ ${DIM}$item${RESET}" >&2
+            done
+        fi
+    fi
+
+    if [[ $skipped_error -gt 0 ]]; then
+        echo -e "${RED}✗${RESET} Errors:      ${BOLD}$skipped_error${RESET} (API/network issues)" >&2
+        if [[ "$VERBOSE" == "true" ]]; then
+            for item in "${error_repos[@]}"; do
+                local repo_part="${item%%|*}"
+                local error_part="${item#*|}"
+                echo -e "              └─ ${DIM}$repo_part: $error_part${RESET}" >&2
+            done
+        fi
+    fi
+
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" >&2
+    echo -e "Total lines processed: ${BOLD}$total_lines${RESET}" >&2
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        echo "" >&2
+        log_info "Run without --dry-run to apply changes"
+    fi
+
+    # Exit with appropriate code
+    if [[ $skipped_invalid -gt 0 || $skipped_error -gt 0 ]]; then
+        exit 1  # Partial failure
+    fi
+    exit 0
 }
 
 cmd_remove() {
@@ -3372,6 +3622,7 @@ main() {
         self-update) cmd_self_update ;;
         config)     cmd_config ;;
         prune)      cmd_prune ;;
+        import)     cmd_import ;;
         *)
             log_error "Unknown command: $COMMAND"
             show_help

@@ -1615,6 +1615,7 @@ summarize_review_plan() {
 
     jq -r '
       def c(decision): ([.items[]? | select(.decision == decision)] | length);
+      def test_status: if (.git.tests.ok // false) then "PASS" else "FAIL/NOT RUN" end;
       "Repository: \(.repo)",
       "Items reviewed: \(.items | length)",
       "  - Fixed: \(c("fix"))",
@@ -1622,7 +1623,7 @@ summarize_review_plan() {
       "  - Needs info: \(c("needs-info"))",
       "  - Closed: \(c("closed"))",
       "Commits: \((.git.commits // []) | length)",
-      "Tests: \(if (.git.tests.ok // false) then "PASS" else "FAIL/NOT RUN" end)",
+      "Tests: \(test_status)",
       "gh_actions pending: \((.gh_actions // []) | length)"
     ' "$plan_file"
 }

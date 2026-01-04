@@ -108,12 +108,16 @@ ru sync
 - [Configuration](#-configuration)
 - [Repo List Format](#-repo-list-format)
 - [Sync Workflow](#-sync-workflow)
+  - [Parallel Sync](#parallel-sync)
+  - [Resuming Interrupted Syncs](#resuming-interrupted-syncs)
 - [Git Status Detection](#-git-status-detection)
 - [Conflict Resolution](#-conflict-resolution)
+- [Managing Orphan Repositories](#-managing-orphan-repositories)
 - [Output Modes](#-output-modes)
 - [Exit Codes](#-exit-codes)
 - [Architecture](#-architecture)
 - [Design Principles](#-design-principles)
+- [Testing](#-testing)
 - [Troubleshooting](#-troubleshooting)
 - [Environment Variables](#-environment-variables)
 - [Dependencies](#-dependencies)
@@ -767,6 +771,90 @@ When ru encounters issues, it provides actionable resolution commands.
 | No upstream | Branch doesn't track remote | `git branch --set-upstream-to=origin/main` |
 | Remote mismatch | Different repo at same path | Remove directory or update list |
 | Auth failed | gh not authenticated | `gh auth login` or set `GH_TOKEN` |
+
+---
+
+## 🧹 Managing Orphan Repositories
+
+Over time, your projects directory may accumulate "orphan" repositories—directories that exist locally but aren't in your configuration. The `ru prune` command helps identify and manage these.
+
+### What is an Orphan?
+
+An orphan is a git repository in your projects directory that:
+- Exists as a valid git repository (has `.git` directory)
+- Is NOT listed in any of your `repos.d/*.txt` configuration files
+- May have been manually cloned, removed from config, or leftover from experiments
+
+### Detection
+
+```bash
+# List orphan repositories (dry run)
+ru prune
+
+# Output:
+# Found 3 orphan repositories:
+#   /data/projects/old-experiment
+#   /data/projects/manually-cloned
+#   /data/projects/removed-from-config
+#
+# Use --archive to move to archive, or --delete to remove
+```
+
+### Archive Mode
+
+Move orphans to a timestamped archive directory instead of deleting:
+
+```bash
+ru prune --archive
+
+# Orphans moved to:
+# ~/.local/state/ru/archived/old-experiment-2025-01-03-143022/
+# ~/.local/state/ru/archived/manually-cloned-2025-01-03-143022/
+```
+
+**Benefits of archiving:**
+- Non-destructive—repos can be recovered
+- Timestamped for audit trail
+- Clears your projects directory without losing work
+
+### Delete Mode
+
+Permanently remove orphan repositories:
+
+```bash
+# Interactive (asks for confirmation)
+ru prune --delete
+
+# Non-interactive (CI-safe, no prompts)
+ru --non-interactive prune --delete
+```
+
+**Safety measures:**
+- Interactive mode requires explicit confirmation
+- `--archive` and `--delete` are mutually exclusive
+- Only git repositories are considered (plain directories ignored)
+
+### Layout Awareness
+
+Prune respects your configured layout mode:
+
+| Layout | Scan Depth | Example Orphan Path |
+|--------|------------|---------------------|
+| `flat` | 1 level | `/data/projects/orphan` |
+| `owner-repo` | 2 levels | `/data/projects/owner/orphan` |
+| `full` | 3 levels | `/data/projects/github.com/owner/orphan` |
+
+### Custom Names
+
+Prune correctly handles custom-named repositories:
+
+```bash
+# In repos.d/public.txt:
+# owner/long-repository-name as shortname
+
+# The directory 'shortname' is NOT an orphan
+# because it matches the custom name in config
+```
 
 ---
 

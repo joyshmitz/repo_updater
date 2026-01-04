@@ -43,18 +43,19 @@ jobs:
             bash -n "$script"
           done
 
-  unit-tests:
-    name: Unit Tests
+  tests:
+    name: Test Suite
     needs: [shellcheck, syntax]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Run parsing tests
-        run: ./scripts/test_parsing.sh
+      - name: Run all tests
+        run: ./scripts/run_all_tests.sh --tap
 
-      - name: Run git integration tests
-        run: ./scripts/test_local_git.sh
+      - name: Run all tests (human-readable summary)
+        if: always()
+        run: ./scripts/run_all_tests.sh || true
 
   install-test:
     name: Installation Test

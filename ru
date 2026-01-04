@@ -8192,6 +8192,410 @@ get_review_plan_json_summary() {
 }
 
 #==============================================================================
+# SECTION 13.6: REVIEW POLICY CONFIGURATION
+#==============================================================================
+
+# Default policy directory (used by functions below)
+# shellcheck disable=SC2034
+REVIEW_POLICY_DIR=""
+
+#------------------------------------------------------------------------------
+# get_review_policy_dir: Get the review policies directory path
+#
+# Returns:
+#   0 always
+#
+# Outputs:
+#   Path to review-policies.d directory
+#------------------------------------------------------------------------------
+get_review_policy_dir() {
+    echo "${RU_CONFIG_DIR:-$HOME/.config/ru}/review-policies.d"
+}
+
+#------------------------------------------------------------------------------
+# init_review_policies: Initialize the review policies directory with examples
+#
+# Args:
+#   $1 - Optional: "quiet" to suppress output
+#
+# Returns:
+#   0 on success, 1 on failure
+#------------------------------------------------------------------------------
+init_review_policies() {
+    local quiet="${1:-}"
+    local policy_dir
+    policy_dir=$(get_review_policy_dir)
+
+    if [[ -d "$policy_dir" ]]; then
+        [[ "$quiet" != "quiet" ]] && log_info "Policy directory already exists: $policy_dir"
+        return 0
+    fi
+
+    if ! mkdir -p "$policy_dir"; then
+        log_error "Failed to create policy directory: $policy_dir"
+        return 1
+    fi
+
+    # Create example policy file
+    cat > "$policy_dir/_default.example" << 'EOF'
+# Default Review Policy Configuration
+# Copy to _default (no extension) to activate
+# Or create repo-specific files: github.com_owner_repo
+
+# Priority boost applied to all reviews for repos matching this policy
+# BASE_PRIORITY=0
+
+# Label-based priority boosts (comma-separated key=value pairs)
+# LABEL_PRIORITY_BOOST="security=2,bug=1,documentation=-1"
+
+# Whether to allow auto-push after successful review
+# REVIEW_ALLOW_PUSH=false
+
+# Whether to require explicit approval before merging
+# REVIEW_REQUIRE_APPROVAL=true
+
+# Maximum parallel agent sessions for this repo
+# MAX_PARALLEL_AGENTS=4
+
+# Patterns for files that should skip automated review
+# SKIP_PATTERNS="*.generated.go,vendor/*"
+
+# Custom test command (overrides auto-detection)
+# TEST_COMMAND=""
+
+# Custom lint command (overrides auto-detection)
+# LINT_COMMAND=""
+EOF
+
+    [[ "$quiet" != "quiet" ]] && log_info "Created policy directory with example: $policy_dir"
+    return 0
+}
+
+#------------------------------------------------------------------------------
+# validate_policy_file: Validate a policy file's syntax and values
+#
+# Args:
+#   $1 - Path to policy file
+#
+# Returns:
+#   0 if valid, 1 if invalid
+#
+# Outputs:
+#   Error messages to stderr, "Valid" to stdout on success
+#------------------------------------------------------------------------------
+validate_policy_file() {
+    local policy_file="$1"
+    local errors=()
+    local line_num=0
+
+    if [[ ! -f "$policy_file" ]]; then
+        echo "File not found: $policy_file" >&2
+        return 1
+    fi
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        ((line_num++))
+
+        # Skip empty lines and comments
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+
+        # Must be KEY=VALUE format
+        if [[ ! "$line" =~ ^[A-Z_][A-Z0-9_]*= ]]; then
+            errors+=("Line $line_num: Invalid format (expected KEY=VALUE): $line")
+            continue
+        fi
+
+        local key="${line%%=*}"
+        local value="${line#*=}"
+
+        # Validate specific keys
+        case "$key" in
+            BASE_PRIORITY)
+                if [[ ! "$value" =~ ^-?[0-9]+$ ]]; then
+                    errors+=("Line $line_num: BASE_PRIORITY must be an integer: $value")
+                fi
+                ;;
+            REVIEW_ALLOW_PUSH|REVIEW_REQUIRE_APPROVAL)
+                if [[ ! "$value" =~ ^(true|false)$ ]]; then
+                    errors+=("Line $line_num: $key must be true or false: $value")
+                fi
+                ;;
+            MAX_PARALLEL_AGENTS)
+                if [[ ! "$value" =~ ^[1-9][0-9]*$ ]]; then
+                    errors+=("Line $line_num: MAX_PARALLEL_AGENTS must be a positive integer: $value")
+                fi
+                ;;
+            LABEL_PRIORITY_BOOST)
+                # Validate comma-separated key=value pairs
+                if [[ -n "$value" && ! "$value" =~ ^[a-zA-Z0-9_-]+=-?[0-9]+(,[a-zA-Z0-9_-]+=-?[0-9]+)*$ ]]; then
+                    errors+=("Line $line_num: LABEL_PRIORITY_BOOST format: label1=N,label2=M")
+                fi
+                ;;
+            SKIP_PATTERNS|TEST_COMMAND|LINT_COMMAND)
+                # These accept any string value
+                ;;
+            *)
+                errors+=("Line $line_num: Unknown policy key: $key")
+                ;;
+        esac
+    done < "$policy_file"
+
+    if [[ ${#errors[@]} -gt 0 ]]; then
+        for err in "${errors[@]}"; do
+            echo "$err" >&2
+        done
+        return 1
+    fi
+
+    echo "Valid"
+    return 0
+}
+
+#------------------------------------------------------------------------------
+# load_policy_for_repo: Load and merge policies for a specific repository
+#
+# Merges in order: _default -> glob patterns -> exact repo match
+# Later values override earlier ones.
+#
+# Args:
+#   $1 - Repository identifier (e.g., "github.com/owner/repo" or "owner/repo")
+#
+# Returns:
+#   0 on success (even if no policies found), 1 on error
+#
+# Outputs:
+#   JSON object with merged policy values
+#------------------------------------------------------------------------------
+load_policy_for_repo() {
+    local repo_id="$1"
+    local policy_dir
+    policy_dir=$(get_review_policy_dir)
+
+    # Initialize default values
+    local base_priority=0
+    local label_priority_boost=""
+    local allow_push="false"
+    local require_approval="true"
+    local max_parallel=4
+    local skip_patterns=""
+    local test_command=""
+    local lint_command=""
+    local policies_loaded=()
+
+    # Helper to load a policy file
+    load_policy() {
+        local file="$1"
+        [[ ! -f "$file" ]] && return
+
+        # Skip example files
+        [[ "$file" == *.example ]] && return
+
+        policies_loaded+=("$(basename "$file")")
+
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+            [[ ! "$line" =~ ^[A-Z_][A-Z0-9_]*= ]] && continue
+
+            local key="${line%%=*}"
+            local value="${line#*=}"
+            # Strip surrounding quotes if present
+            value="${value#\"}"
+            value="${value%\"}"
+            value="${value#\'}"
+            value="${value%\'}"
+
+            case "$key" in
+                BASE_PRIORITY) base_priority="$value" ;;
+                LABEL_PRIORITY_BOOST) label_priority_boost="$value" ;;
+                REVIEW_ALLOW_PUSH) allow_push="$value" ;;
+                REVIEW_REQUIRE_APPROVAL) require_approval="$value" ;;
+                MAX_PARALLEL_AGENTS) max_parallel="$value" ;;
+                SKIP_PATTERNS) skip_patterns="$value" ;;
+                TEST_COMMAND) test_command="$value" ;;
+                LINT_COMMAND) lint_command="$value" ;;
+            esac
+        done < "$file"
+    }
+
+    # Normalize repo_id: github.com/owner/repo -> github.com_owner_repo
+    local repo_file_name
+    repo_file_name=$(echo "$repo_id" | tr '/' '_' | tr ':' '_')
+
+    # 1. Load default policy
+    load_policy "$policy_dir/_default"
+
+    # 2. Load glob-pattern policies (files starting with * or containing *)
+    if [[ -d "$policy_dir" ]]; then
+        local pattern_file
+        for pattern_file in "$policy_dir"/*; do
+            [[ ! -f "$pattern_file" ]] && continue
+            local basename
+            basename=$(basename "$pattern_file")
+            # Skip _default and exact matches
+            [[ "$basename" == "_default" ]] && continue
+            [[ "$basename" == "$repo_file_name" ]] && continue
+            [[ "$basename" == *.example ]] && continue
+
+            # Check if it's a glob pattern that matches
+            # shellcheck disable=SC2053
+            if [[ "$repo_file_name" == $basename ]]; then
+                load_policy "$pattern_file"
+            fi
+        done
+    fi
+
+    # 3. Load exact repo match
+    load_policy "$policy_dir/$repo_file_name"
+
+    # Output as JSON
+    jq -n \
+        --arg base_priority "$base_priority" \
+        --arg label_boost "$label_priority_boost" \
+        --arg allow_push "$allow_push" \
+        --arg require_approval "$require_approval" \
+        --arg max_parallel "$max_parallel" \
+        --arg skip_patterns "$skip_patterns" \
+        --arg test_cmd "$test_command" \
+        --arg lint_cmd "$lint_command" \
+        --arg policies_loaded "$(IFS=,; echo "${policies_loaded[*]}")" \
+        '{
+            base_priority: ($base_priority | tonumber),
+            label_priority_boost: $label_boost,
+            allow_push: ($allow_push == "true"),
+            require_approval: ($require_approval == "true"),
+            max_parallel_agents: ($max_parallel | tonumber),
+            skip_patterns: $skip_patterns,
+            test_command: $test_cmd,
+            lint_command: $lint_cmd,
+            policies_loaded: ($policies_loaded | split(",") | map(select(. != "")))
+        }'
+}
+
+#------------------------------------------------------------------------------
+# get_policy_value: Get a single policy value for a repository
+#
+# Args:
+#   $1 - Repository identifier
+#   $2 - Policy key (e.g., "base_priority", "allow_push")
+#
+# Returns:
+#   0 on success, 1 if key not found
+#
+# Outputs:
+#   The policy value
+#------------------------------------------------------------------------------
+get_policy_value() {
+    local repo_id="$1"
+    local key="$2"
+    local policy_json
+
+    policy_json=$(load_policy_for_repo "$repo_id")
+
+    local value
+    value=$(echo "$policy_json" | jq -r ".$key // empty")
+
+    if [[ -z "$value" ]]; then
+        return 1
+    fi
+
+    echo "$value"
+    return 0
+}
+
+#------------------------------------------------------------------------------
+# repo_allows_push: Check if a repository allows auto-push
+#
+# Args:
+#   $1 - Repository identifier
+#
+# Returns:
+#   0 if push allowed, 1 if not
+#------------------------------------------------------------------------------
+repo_allows_push() {
+    local repo_id="$1"
+    local value
+    value=$(get_policy_value "$repo_id" "allow_push")
+    [[ "$value" == "true" ]]
+}
+
+#------------------------------------------------------------------------------
+# repo_requires_approval: Check if a repository requires approval before merge
+#
+# Args:
+#   $1 - Repository identifier
+#
+# Returns:
+#   0 if approval required, 1 if not
+#------------------------------------------------------------------------------
+repo_requires_approval() {
+    local repo_id="$1"
+    local value
+    value=$(get_policy_value "$repo_id" "require_approval")
+    [[ "$value" == "true" ]]
+}
+
+#------------------------------------------------------------------------------
+# apply_policy_priority_boost: Apply priority boost based on policy and labels
+#
+# Args:
+#   $1 - Repository identifier
+#   $2 - Current priority (0-4)
+#   $3 - Comma-separated list of labels (optional)
+#
+# Returns:
+#   0 always
+#
+# Outputs:
+#   Adjusted priority (clamped to 0-4)
+#------------------------------------------------------------------------------
+apply_policy_priority_boost() {
+    local repo_id="$1"
+    local current_priority="${2:-2}"
+    local labels="${3:-}"
+
+    local policy_json
+    policy_json=$(load_policy_for_repo "$repo_id")
+
+    # Get base priority boost
+    local base_boost
+    base_boost=$(echo "$policy_json" | jq -r '.base_priority // 0')
+
+    # Get label priority boosts
+    local label_boost_str
+    label_boost_str=$(echo "$policy_json" | jq -r '.label_priority_boost // ""')
+
+    # Calculate total boost
+    local total_boost=$base_boost
+
+    if [[ -n "$label_boost_str" && -n "$labels" ]]; then
+        # Parse label boosts into associative array
+        local -A label_boosts
+        IFS=',' read -ra boost_pairs <<< "$label_boost_str"
+        for pair in "${boost_pairs[@]}"; do
+            local label="${pair%%=*}"
+            local boost="${pair#*=}"
+            label_boosts["$label"]="$boost"
+        done
+
+        # Apply boosts for matching labels
+        IFS=',' read -ra label_array <<< "$labels"
+        for label in "${label_array[@]}"; do
+            label=$(echo "$label" | tr -d ' ')
+            if [[ -n "${label_boosts[$label]:-}" ]]; then
+                ((total_boost += label_boosts[$label]))
+            fi
+        done
+    fi
+
+    # Calculate new priority and clamp to 0-4
+    local new_priority=$((current_priority - total_boost))
+    ((new_priority < 0)) && new_priority=0
+    ((new_priority > 4)) && new_priority=4
+
+    echo "$new_priority"
+}
+
+#==============================================================================
 # SECTION 14: MAIN DISPATCH
 #==============================================================================
 

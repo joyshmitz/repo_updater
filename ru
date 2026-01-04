@@ -4684,7 +4684,7 @@ extract_question_from_text() {
 
     # Get lines around question pattern
     local question_line
-    question_line=$(echo "$output" | grep -nE 'Should I|Do you want|Would you|Which.*\?|What.*\?|How should' | tail -1)
+    question_line=$(echo "$output" | grep -niE 'Should I|Do you want|Would you|Which.*\?|What.*\?|How should' | tail -1)
 
     if [[ -n "$question_line" ]]; then
         local line_num="${question_line%%:*}"
@@ -5965,13 +5965,18 @@ record_worktree_mapping() {
     # Add mapping atomically (requires jq)
     if command -v jq &>/dev/null; then
         local tmp_file="${mapping_file}.tmp.$$"
-        jq --arg repo "$repo_id" \
-           --arg path "$wt_path" \
-           --arg branch "$wt_branch" \
-           --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-           '.[$repo] = {"path": $path, "branch": $branch, "created_at": $created}' \
-           "$mapping_file" > "$tmp_file"
-        mv "$tmp_file" "$mapping_file"
+        if jq --arg repo "$repo_id" \
+              --arg path "$wt_path" \
+              --arg branch "$wt_branch" \
+              --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+              '.[$repo] = {"path": $path, "branch": $branch, "created_at": $created}' \
+              "$mapping_file" > "$tmp_file"; then
+            mv "$tmp_file" "$mapping_file"
+        else
+            log_error "Failed to update worktree mapping for $repo_id"
+            rm -f "$tmp_file"
+            return 1
+        fi
     else
         log_warn "jq not available, worktree mapping not recorded"
     fi

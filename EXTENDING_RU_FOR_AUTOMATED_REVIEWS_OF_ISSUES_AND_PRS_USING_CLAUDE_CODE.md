@@ -167,7 +167,20 @@ the project. Use ultrathink.
 We don't allow PRs or outside contributions to this project as a matter
 of policy; here is the policy disclosed to users:
 
-> *About Contributions:* [full policy text...]
+> *About Contributions:* Please don't take this the wrong way, but I do
+not accept outside contributions for any of my projects. I simply don't
+have the mental bandwidth to review anything, and it's my name on the
+thing, so I'm responsible for any problems it causes; thus, the
+risk-reward is highly asymmetric from my perspective. I'd also have to
+worry about other "stakeholders," which seems unwise for tools I mostly
+make for myself for free. Feel free to submit issues, and even PRs if
+you want to illustrate a proposed fix, but know I won't merge them
+directly. Instead, I'll have Claude or Codex review submissions via `gh`
+and independently decide whether and how to address them. Bug reports in
+particular are welcome. Sorry if this offends, but I want to avoid
+wasted time and hurt feelings. I understand this isn't in sync with the
+prevailing open-source ethos that seeks community contributions, but
+it's the only way I can move at this velocity and keep my sanity.
 
 But I want you to now use the `gh` utility to review all open issues and
 PRs and to independently read and review each of these carefully; without
@@ -1047,14 +1060,38 @@ steps:
       of policy; here is the policy disclosed to users:
 
       > *About Contributions:* Please don't take this the wrong way, but I do
-      not accept outside contributions for any of my projects. [...]
+      not accept outside contributions for any of my projects. I simply don't
+      have the mental bandwidth to review anything, and it's my name on the
+      thing, so I'm responsible for any problems it causes; thus, the
+      risk-reward is highly asymmetric from my perspective. I'd also have to
+      worry about other "stakeholders," which seems unwise for tools I mostly
+      make for myself for free. Feel free to submit issues, and even PRs if
+      you want to illustrate a proposed fix, but know I won't merge them
+      directly. Instead, I'll have Claude or Codex review submissions via `gh`
+      and independently decide whether and how to address them. Bug reports in
+      particular are welcome. Sorry if this offends, but I want to avoid
+      wasted time and hurt feelings. I understand this isn't in sync with the
+      prevailing open-source ethos that seeks community contributions, but
+      it's the only way I can move at this velocity and keep my sanity.
 
       But I want you to now use the `gh` utility to review all open issues and
       PRs and to independently read and review each of these carefully; without
       trusting or relying on any of the user reports being correct, or their
       suggested/proposed changes or "fixes" being correct, I want you to do
       your own totally separate and independent verification and validation.
-      [...]
+      You can use the stuff from users as possible inspiration, but everything
+      has to come from your own mind and/or official documentation and the
+      actual code and empirical, independent evidence. Note that MANY of these
+      are likely out of date because I made tons of fixes and changes already;
+      it's important to look at the dates and subsequent commits. Use ultrathink.
+      After you have reviewed things carefully and taken actions in response
+      (including implementing possible fixes or new features), you can respond
+      on my behalf using `gh`.
+
+      Just a reminder: we do NOT accept ANY PRs. You can look at them to see if
+      they contain good ideas but even then you must check with me first before
+      integrating even ideas because they could take the project into another
+      direction I don't like or introduce scope creep. Use ultrathink.
     working_dir: ${inputs.repo_path}
     wait: user_interaction
     timeout: 30m

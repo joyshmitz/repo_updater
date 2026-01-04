@@ -213,51 +213,6 @@ write_result() {
     fi
 }
 
-# Generate per-repo log file path
-# Organizes logs by date and sanitizes repo names for filesystem safety
-get_repo_log_path() {
-    local repo_name="$1"
-    local date_dir
-    date_dir=$(date +%Y-%m-%d)
-
-    # Sanitize repo name: replace / with _ for filesystem safety
-    local safe_name="${repo_name//\//_}"
-
-    # Ensure log directory exists
-    local log_dir="$RU_LOG_DIR/$date_dir/repos"
-    ensure_dir "$log_dir"
-
-    echo "$log_dir/${safe_name}.log"
-}
-
-# Get the main run log path for today
-get_run_log_path() {
-    local date_dir
-    date_dir=$(date +%Y-%m-%d)
-
-    local log_dir="$RU_LOG_DIR/$date_dir"
-    ensure_dir "$log_dir"
-
-    echo "$log_dir/run.log"
-}
-
-# Update the 'latest' symlink to point to today's log directory
-update_latest_symlink() {
-    local date_dir
-    date_dir=$(date +%Y-%m-%d)
-
-    local latest_link="$RU_LOG_DIR/latest"
-    local target="$RU_LOG_DIR/$date_dir"
-
-    # Remove old symlink if it exists
-    if [[ -L "$latest_link" ]]; then
-        rm -f "$latest_link"
-    fi
-
-    # Create new symlink
-    ln -sf "$target" "$latest_link"
-}
-
 #==============================================================================
 # SECTION 5: LOGGING FUNCTIONS
 # Stream separation: stderr for humans, stdout for data
@@ -2109,9 +2064,6 @@ cmd_sync() {
 
     # Ensure projects directory exists
     ensure_dir "$PROJECTS_DIR"
-
-    # Update latest symlink for logs
-    update_latest_symlink
 
     # Check for positional arguments (ad-hoc repos)
     if [[ ${#ARGS[@]} -gt 0 ]]; then

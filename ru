@@ -5912,6 +5912,304 @@ cleanup_old_review_state() {
 }
 
 #------------------------------------------------------------------------------
+# GIT WORKTREE PREPARATION (bd-zlws)
+#
+# Creates isolated git worktrees for each repo being reviewed, so AI agents
+# can make changes without affecting the main working directory.
+#------------------------------------------------------------------------------
+
+# Get the worktrees directory for current review run
+get_worktrees_dir() {
+    echo "${RU_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ru}/worktrees/${REVIEW_RUN_ID:-unknown}"
+}
+
+# Check if a repository is clean (no uncommitted changes)
+# Args: repo_path
+# Returns: 0 if clean, 1 if dirty or not a git repo
+ensure_clean_or_fail() {
+    local repo_path="$1"
+
+    if ! is_git_repo "$repo_path"; then
+        log_error "$repo_path is not a git repository"
+        return 1
+    fi
+
+    local status
+    status=$(git -C "$repo_path" status --porcelain 2>/dev/null)
+
+    if [[ -n "$status" ]]; then
+        log_error "Repository has uncommitted changes: $repo_path"
+        log_error "Please commit or stash changes before running review"
+        return 1
+    fi
+
+    return 0
+}
+
+# Record worktree mapping to JSON file
+# Args: repo_id, worktree_path, branch_name
+record_worktree_mapping() {
+    local repo_id="$1"
+    local wt_path="$2"
+    local wt_branch="$3"
+
+    local worktrees_dir
+    worktrees_dir=$(get_worktrees_dir)
+    ensure_dir "$worktrees_dir"
+
+    local mapping_file="$worktrees_dir/mapping.json"
+
+    # Initialize if doesn't exist
+    [[ ! -f "$mapping_file" ]] && echo '{}' > "$mapping_file"
+
+    # Add mapping atomically (requires jq)
+    if command -v jq &>/dev/null; then
+        local tmp_file="${mapping_file}.tmp.$$"
+        jq --arg repo "$repo_id" \
+           --arg path "$wt_path" \
+           --arg branch "$wt_branch" \
+           --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+           '.[$repo] = {"path": $path, "branch": $branch, "created_at": $created}' \
+           "$mapping_file" > "$tmp_file"
+        mv "$tmp_file" "$mapping_file"
+    else
+        log_warn "jq not available, worktree mapping not recorded"
+    fi
+}
+
+# Get worktree path for a repo
+# Args: repo_id, nameref for path output
+# Returns: 0 if found, 1 if not found
+get_worktree_path() {
+    local repo_id="$1"
+    local -n _wt_path_ref=$2
+
+    local worktrees_dir
+    worktrees_dir=$(get_worktrees_dir)
+    local mapping_file="$worktrees_dir/mapping.json"
+
+    if [[ ! -f "$mapping_file" ]]; then
+        _wt_path_ref=""
+        return 1
+    fi
+
+    if command -v jq &>/dev/null; then
+        _wt_path_ref=$(jq -r --arg repo "$repo_id" '.[$repo].path // ""' "$mapping_file")
+        [[ -n "$_wt_path_ref" ]] && return 0
+    fi
+
+    return 1
+}
+
+# Get worktree mapping from work item info
+# Args: work_item (pipe-separated), nameref for repo_id, nameref for worktree_path
+get_worktree_mapping() {
+    local work_item="$1"
+    local -n _repo_id_ref=$2
+    local -n _wt_path_out=$3
+
+    # Extract repo_id from work item (first field before |)
+    _repo_id_ref="${work_item%%|*}"
+
+    get_worktree_path "$_repo_id_ref" _wt_path_out
+}
+
+# Prepare worktrees for review
+# Args: work_items array (pipe-separated format: repo_id|type|number|...)
+# Sets: REVIEW_WORKTREES associative array mapping repo_id -> worktree_path
+prepare_review_worktrees() {
+    local -a items=("$@")
+
+    if [[ ${#items[@]} -eq 0 ]]; then
+        log_verbose "No work items to prepare worktrees for"
+        return 0
+    fi
+
+    local worktrees_dir
+    worktrees_dir=$(get_worktrees_dir)
+    ensure_dir "$worktrees_dir"
+
+    # Track unique repos (multiple issues/PRs may be in same repo)
+    local -A seen_repos=()
+    local prepared=0
+    local skipped=0
+    local failed=0
+
+    for item in "${items[@]}"; do
+        local repo_id
+        repo_id="${item%%|*}"
+
+        # Skip if already processed
+        [[ -n "${seen_repos[$repo_id]:-}" ]] && continue
+        seen_repos["$repo_id"]=1
+
+        # Resolve repo spec to get local path
+        # shellcheck disable=SC2034  # resolved_repo_id used by resolve_repo_spec
+        local url branch custom_name local_path resolved_repo_id
+        if ! resolve_repo_spec "$repo_id" "$PROJECTS_DIR" "$LAYOUT" \
+                url branch custom_name local_path resolved_repo_id 2>/dev/null; then
+            log_warn "Could not resolve repo: $repo_id"
+            ((failed++))
+            continue
+        fi
+
+        # Check if repo exists locally
+        if [[ ! -d "$local_path" ]]; then
+            log_warn "Repo not cloned locally, skipping: $repo_id ($local_path)"
+            ((skipped++))
+            continue
+        fi
+
+        # Verify it's a git repo
+        if ! is_git_repo "$local_path"; then
+            log_warn "Not a git repository, skipping: $local_path"
+            ((skipped++))
+            continue
+        fi
+
+        # CRITICAL: Refuse to run on dirty trees
+        if ! ensure_clean_or_fail "$local_path"; then
+            ((failed++))
+            continue
+        fi
+
+        # Create worktree path (sanitize repo_id for filesystem)
+        local safe_repo_id="${repo_id//\//_}"
+        local wt_path="$worktrees_dir/$safe_repo_id"
+        local wt_branch="ru/review/${REVIEW_RUN_ID:-unknown}/${repo_id//\//-}"
+
+        # Fetch latest from remote (quiet, ignore failures)
+        git -C "$local_path" fetch --quiet 2>/dev/null || true
+
+        # Determine base reference (respect branch pins)
+        local base_ref="${branch:-HEAD}"
+
+        # Check if worktree already exists
+        if [[ -d "$wt_path" ]]; then
+            log_warn "Worktree already exists, reusing: $wt_path"
+        else
+            # Create worktree with new branch
+            if ! git -C "$local_path" worktree add -b "$wt_branch" "$wt_path" "$base_ref" >/dev/null 2>&1; then
+                # Branch may already exist from previous run, try without -b
+                if ! git -C "$local_path" worktree add "$wt_path" "$base_ref" >/dev/null 2>&1; then
+                    log_error "Failed to create worktree for $repo_id"
+                    ((failed++))
+                    continue
+                fi
+            fi
+        fi
+
+        # Create .ru directory for artifacts
+        ensure_dir "$wt_path/.ru"
+
+        # Record mapping for later phases
+        record_worktree_mapping "$repo_id" "$wt_path" "$wt_branch"
+
+        log_verbose "Created worktree: $repo_id → $wt_path"
+        ((prepared++))
+    done
+
+    log_info "Worktrees: $prepared prepared, $skipped skipped, $failed failed"
+
+    [[ $failed -gt 0 ]] && return 1
+    return 0
+}
+
+# Clean up review worktrees
+# Args: run_id (optional, defaults to REVIEW_RUN_ID)
+cleanup_review_worktrees() {
+    local run_id="${1:-${REVIEW_RUN_ID:-}}"
+
+    if [[ -z "$run_id" ]]; then
+        log_error "No run ID specified for cleanup"
+        return 1
+    fi
+
+    local base="${RU_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ru}/worktrees/$run_id"
+
+    [[ ! -d "$base" ]] && return 0
+
+    local mapping_file="$base/mapping.json"
+    local removed=0
+
+    if [[ -f "$mapping_file" ]] && command -v jq &>/dev/null; then
+        # Remove each worktree properly
+        while IFS= read -r repo_id; do
+            [[ -z "$repo_id" ]] && continue
+
+            local wt_path wt_branch
+            wt_path=$(jq -r --arg repo "$repo_id" '.[$repo].path // ""' "$mapping_file")
+            wt_branch=$(jq -r --arg repo "$repo_id" '.[$repo].branch // ""' "$mapping_file")
+
+            if [[ -d "$wt_path" ]]; then
+                # Try to find main repo from worktree
+                local main_repo
+                main_repo=$(git -C "$wt_path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's/\.git$//')
+
+                if [[ -n "$main_repo" ]] && [[ -d "$main_repo" ]]; then
+                    # Use git worktree remove for clean removal
+                    if git -C "$main_repo" worktree remove --force "$wt_path" 2>/dev/null; then
+                        log_verbose "Removed worktree: $wt_path"
+                        ((removed++))
+
+                        # Also try to delete the branch
+                        if [[ -n "$wt_branch" ]]; then
+                            git -C "$main_repo" branch -D "$wt_branch" 2>/dev/null || true
+                        fi
+                    else
+                        # Fall back to direct removal
+                        rm -rf "$wt_path"
+                        log_verbose "Force removed worktree: $wt_path"
+                        ((removed++))
+                    fi
+                else
+                    # Can't find main repo, just remove directory
+                    rm -rf "$wt_path"
+                    log_verbose "Removed orphan worktree: $wt_path"
+                    ((removed++))
+                fi
+            fi
+        done < <(jq -r 'keys[]' "$mapping_file" 2>/dev/null)
+    fi
+
+    # Remove the run directory
+    rm -rf "$base"
+
+    log_info "Cleanup: $removed worktrees removed"
+    return 0
+}
+
+# List all worktrees for a run
+# Args: run_id (optional)
+# Output: JSON array of worktree info
+list_review_worktrees() {
+    local run_id="${1:-${REVIEW_RUN_ID:-}}"
+    local base="${RU_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ru}/worktrees/$run_id"
+    local mapping_file="$base/mapping.json"
+
+    if [[ -f "$mapping_file" ]]; then
+        cat "$mapping_file"
+    else
+        echo '{}'
+    fi
+}
+
+# Check if a worktree exists and is valid
+# Args: repo_id
+# Returns: 0 if valid, 1 if not
+worktree_exists() {
+    local repo_id="$1"
+    local wt_path
+
+    if get_worktree_path "$repo_id" wt_path; then
+        [[ -d "$wt_path" ]] && [[ -d "$wt_path/.git" || -f "$wt_path/.git" ]]
+        return $?
+    fi
+
+    return 1
+}
+
+#------------------------------------------------------------------------------
 # GRAPHQL BATCHED REPOSITORY DISCOVERY (bd-ff8h)
 #
 # Efficiently discovers open issues and PRs across all configured repos

@@ -197,10 +197,7 @@ test_detect_os_matches_system() {
 }
 
 test_detect_os_darwin() {
-    # Mock OSTYPE
-    local old_ostype="${OSTYPE:-}"
-
-    # Create a local scope with mocked OSTYPE
+    # Create a local scope with mocked OSTYPE (subshell isolates the change)
     (
         OSTYPE="darwin21.0"
         # Re-source detect_os with new OSTYPE

@@ -888,6 +888,8 @@ parse_repo_spec() {
     # Extract 'as <name>' if present (must be last)
     if [[ "$spec" =~ ^(.+)[[:space:]]+as[[:space:]]+([^[:space:]]+)$ ]]; then
         spec="${BASH_REMATCH[1]}"
+        # Trim trailing whitespace from spec (greedy .+ may capture trailing spaces)
+        spec="${spec%"${spec##*[![:space:]]}"}"
         _prs_local_name="${BASH_REMATCH[2]}"
     else
         _prs_local_name=""
@@ -1641,6 +1643,10 @@ parse_args() {
                 shift
                 ;;
             --dir)
+                if [[ $# -lt 2 ]]; then
+                    log_error "--dir requires a path argument"
+                    exit 4
+                fi
                 PROJECTS_DIR="$2"
                 shift 2
                 ;;
@@ -1661,14 +1667,26 @@ parse_args() {
                 shift
                 ;;
             --timeout)
+                if [[ $# -lt 2 ]]; then
+                    log_error "--timeout requires a value in seconds"
+                    exit 4
+                fi
                 GIT_TIMEOUT="$2"
                 shift 2
                 ;;
             --parallel)
+                if [[ $# -lt 2 ]]; then
+                    log_error "--parallel requires a number of workers"
+                    exit 4
+                fi
                 PARALLEL="$2"
                 shift 2
                 ;;
             -j)
+                if [[ $# -lt 2 ]]; then
+                    log_error "-j requires a number of workers"
+                    exit 4
+                fi
                 PARALLEL="$2"
                 shift 2
                 ;;
@@ -1680,7 +1698,7 @@ parse_args() {
                 COMMAND="$1"
                 shift
                 ;;
-            --paths|--print|--set=*|--check|--archive|--delete)
+            --paths|--print|--set=*|--check|--archive|--delete|--private|--public|--from-cwd)
                 # Subcommand-specific options - pass through to ARGS
                 ARGS+=("$1")
                 shift
@@ -2076,7 +2094,7 @@ cmd_sync() {
 
     # No arguments - check for configured repos
     local repos_file="$RU_CONFIG_DIR/repos.d/repos.txt"
-    if [[ ! -f "$repos_file" ]] || [[ ! -s "$repos_file" ]] || ! grep -qv '^\s*#\|^\s*$' "$repos_file" 2>/dev/null; then
+    if [[ ! -f "$repos_file" ]] || [[ ! -s "$repos_file" ]] || ! grep -Eqv '^[[:space:]]*#|^[[:space:]]*$' "$repos_file" 2>/dev/null; then
         log_info "No repositories configured yet."
         echo "" >&2
         log_info "To add repos:"
@@ -2193,6 +2211,18 @@ cmd_sync() {
 
     # Check for parallel mode
     local parallel_count="${PARALLEL:-1}"
+
+    # Check for flock availability before entering parallel mode
+    if [[ -n "$PARALLEL" && "$parallel_count" -gt 1 ]]; then
+        if ! command -v flock &>/dev/null; then
+            log_warn "Parallel sync requires 'flock' which is not installed"
+            log_warn "Falling back to sequential sync"
+            log_info "To enable parallel sync on macOS: brew install flock"
+            PARALLEL=""
+            parallel_count="1"
+        fi
+    fi
+
     if [[ -n "$PARALLEL" && "$parallel_count" -gt 1 ]]; then
         # Parallel mode: use worker pool
         if [[ $resumed -gt 0 ]]; then
@@ -2362,7 +2392,7 @@ cmd_status() {
 
     # Check for configured repos
     local repos_file="$RU_CONFIG_DIR/repos.d/repos.txt"
-    if [[ ! -f "$repos_file" ]] || [[ ! -s "$repos_file" ]] || ! grep -qv '^\s*#\|^\s*$' "$repos_file" 2>/dev/null; then
+    if [[ ! -f "$repos_file" ]] || [[ ! -s "$repos_file" ]] || ! grep -Eqv '^[[:space:]]*#|^[[:space:]]*$' "$repos_file" 2>/dev/null; then
         log_info "No repositories configured."
         log_info "Add repos with: ru add owner/repo"
         exit 0
@@ -2494,20 +2524,60 @@ cmd_init() {
 }
 
 cmd_add() {
-    if [[ ${#ARGS[@]} -eq 0 ]]; then
+    # Parse command-specific options
+    local use_private="false"
+    local from_cwd="false"
+    local repo_args=()
+
+    for arg in "${ARGS[@]}"; do
+        case "$arg" in
+            --private) use_private="true" ;;
+            --from-cwd) from_cwd="true" ;;
+            *) repo_args+=("$arg") ;;
+        esac
+    done
+
+    # Handle --from-cwd: detect repo from current directory
+    if [[ "$from_cwd" == "true" ]]; then
+        if ! is_git_repo "."; then
+            log_error "Current directory is not a git repository"
+            exit 1
+        fi
+        local remote_url
+        remote_url=$(git remote get-url origin 2>/dev/null)
+        if [[ -z "$remote_url" ]]; then
+            log_error "No 'origin' remote found in current directory"
+            exit 1
+        fi
+        repo_args+=("$remote_url")
+    fi
+
+    if [[ ${#repo_args[@]} -eq 0 ]]; then
         log_error "Usage: ru add <repo> [repo2] ..."
         log_info "Examples:"
         log_info "  ru add owner/repo"
         log_info "  ru add https://github.com/owner/repo"
+        log_info "  ru add --from-cwd          # Add current directory's repo"
+        log_info "  ru add --private owner/repo  # Add to private list"
         exit 4
     fi
 
     # Ensure config exists
     ensure_config_exists >/dev/null
 
-    local repos_file="$RU_CONFIG_DIR/repos.d/repos.txt"
+    # Select repos file based on --private flag
+    local repos_file
+    if [[ "$use_private" == "true" ]]; then
+        repos_file="$RU_CONFIG_DIR/repos.d/private.txt"
+        # Create private.txt if it doesn't exist
+        if [[ ! -f "$repos_file" ]]; then
+            echo "# Private repositories" > "$repos_file"
+        fi
+    else
+        repos_file="$RU_CONFIG_DIR/repos.d/repos.txt"
+    fi
 
-    for repo in "${ARGS[@]}"; do
+    for repo in "${repo_args[@]}"; do
         # Validate the repo URL can be parsed
         local host owner repo_name
         if ! parse_repo_url "$repo" host owner repo_name; then
@@ -2523,7 +2593,9 @@ cmd_add() {
 
         # Add to file
         echo "$repo" >> "$repos_file"
-        log_success "Added: $repo"
+        local file_label=""
+        [[ "$use_private" == "true" ]] && file_label=" (private)"
+        log_success "Added: $repo$file_label"
     done
 }
 
@@ -2617,16 +2689,45 @@ cmd_list() {
     fi
 
     local show_paths="false"
+    local filter_public="false"
+    local filter_private="false"
     for arg in "${ARGS[@]}"; do
         case "$arg" in
             --paths) show_paths="true" ;;
+            --public) filter_public="true" ;;
+            --private) filter_private="true" ;;
         esac
     done
 
+    # Validate mutually exclusive flags
+    if [[ "$filter_public" == "true" && "$filter_private" == "true" ]]; then
+        log_error "--public and --private are mutually exclusive"
+        exit 4
+    fi
+
     local repos=()
-    while IFS= read -r line; do
-        [[ -n "$line" ]] && repos+=("$line")
-    done < <(get_all_repos)
+    if [[ "$filter_public" == "true" ]]; then
+        # Only repos from repos.txt (public)
+        local repos_file="$RU_CONFIG_DIR/repos.d/repos.txt"
+        if [[ -f "$repos_file" ]]; then
+            while IFS= read -r line; do
+                [[ -n "$line" ]] && repos+=("$line")
+            done < <(load_repo_list "$repos_file")
+        fi
+    elif [[ "$filter_private" == "true" ]]; then
+        # Only repos from private.txt
+        local private_file="$RU_CONFIG_DIR/repos.d/private.txt"
+        if [[ -f "$private_file" ]]; then
+            while IFS= read -r line; do
+                [[ -n "$line" ]] && repos+=("$line")
+            done < <(load_repo_list "$private_file")
+        fi
+    else
+        # All repos (default behavior)
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && repos+=("$line")
+        done < <(get_all_repos)
+    fi
 
     if [[ ${#repos[@]} -eq 0 ]]; then
         log_info "No repositories configured."
@@ -3008,7 +3109,8 @@ cmd_prune() {
     # Build list of expected paths from config
     local configured_paths
     configured_paths=$(mktemp)
-    trap "rm -f '$configured_paths'" RETURN
+    # shellcheck disable=SC2064  # Immediate expansion is intentional - path is already known
+    trap "rm -f \"$configured_paths\"" RETURN
 
     while IFS= read -r spec; do
         [[ -z "$spec" ]] && continue

@@ -399,11 +399,10 @@ test_parse_spec_https_url_with_branch() {
 #==============================================================================
 
 test_parse_spec_extra_spaces() {
-    # The regex captures spaces before 'as' in the URL
-    # This is documented behavior - URLs may have trailing spaces preserved
+    # Extra spaces around 'as' should be trimmed from the URL portion
     assert_parse_spec "owner/repo   as   myname" \
-        "owner/repo  " "" "myname" \
-        "Spec with extra spaces around 'as' (trailing space preserved)"
+        "owner/repo" "" "myname" \
+        "Spec with extra spaces around 'as' (trailing spaces trimmed)"
 }
 
 test_parse_spec_case_sensitive_as() {

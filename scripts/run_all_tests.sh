@@ -158,7 +158,7 @@ print_test_result() {
         else
             echo "not ok $test_num - $test_name (${duration}s)"
             # Print output as TAP diagnostics (indent with #)
-            echo "$output" | head -20 | while IFS= read -r line; do
+            printf '%s\n' "$output" | head -20 | while IFS= read -r line; do
                 echo "# $line"
             done
         fi
@@ -168,7 +168,7 @@ print_test_result() {
         else
             printf "  ${RED}FAIL${RESET} %s (%ds, exit code %d)\n" "$test_name" "$duration" "$exit_code"
             # Show first few lines of output for failures
-            echo "$output" | head -10 | while IFS= read -r line; do
+            printf '%s\n' "$output" | head -10 | while IFS= read -r line; do
                 echo "    $line"
             done
             echo ""

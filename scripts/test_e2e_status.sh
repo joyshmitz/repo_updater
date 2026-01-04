@@ -114,7 +114,7 @@ assert_output_contains() {
     local output="$1"
     local pattern="$2"
     local msg="$3"
-    if echo "$output" | grep -q "$pattern"; then
+    if printf '%s\n' "$output" | grep -q "$pattern"; then
         pass "$msg"
     else
         fail "$msg (pattern '$pattern' not found in output)"
@@ -125,7 +125,7 @@ assert_output_not_contains() {
     local output="$1"
     local pattern="$2"
     local msg="$3"
-    if ! echo "$output" | grep -q "$pattern"; then
+    if ! printf '%s\n' "$output" | grep -q "$pattern"; then
         pass "$msg"
     else
         fail "$msg (pattern '$pattern' unexpectedly found in output)"

@@ -315,6 +315,7 @@ ru [command] [options]
 | `status` | Show repository status without making changes |
 | `init` | Initialize configuration directory and files |
 | `add <repo>` | Add a repository to your list |
+| `remove <repo>` | Remove a repository from your list |
 | `list` | Show configured repositories |
 | `doctor` | Run system diagnostics |
 | `self-update` | Update ru to the latest version |
@@ -348,6 +349,11 @@ ru [command] [options]
 | `--resume` | Resume an interrupted sync from where it left off |
 | `--restart` | Discard interrupted sync state and start fresh |
 
+**Ad-hoc sync:** You can also pass repo URLs directly without adding them to config:
+```bash
+ru sync owner/repo1 owner/repo2 https://github.com/owner/repo3
+```
+
 **`ru status`**
 | Flag | Description |
 |------|-------------|
@@ -358,7 +364,15 @@ ru [command] [options]
 | Flag | Description |
 |------|-------------|
 | `--private` | Add to private repos list |
-| `--from-cwd` | Add the current directory's repo |
+| `--public` | Add to public repos list (default) |
+| `--from-cwd` | Detect repo from current directory's git remote |
+
+**`ru remove`**
+| Flag | Description |
+|------|-------------|
+| `--private` | Remove from private repos list only |
+| `--public` | Remove from public repos list only |
+| (none) | Search and remove from all repo lists |
 
 **`ru list`**
 | Flag | Description |
@@ -366,6 +380,11 @@ ru [command] [options]
 | `--public` | Show only public repos |
 | `--private` | Show only private repos |
 | `--paths` | Show local paths instead of URLs |
+
+**`ru init`**
+| Flag | Description |
+|------|-------------|
+| `--example` | Populate repos.txt with example repositories |
 
 **`ru self-update`**
 | Flag | Description |
@@ -1373,11 +1392,36 @@ Run diagnostics:
 ru doctor
 ```
 
-Output includes:
-- gh CLI installation and auth status
-- Configuration file locations
-- Directory permissions
-- Network connectivity
+**Checks performed:**
+
+| Check | What It Verifies |
+|-------|------------------|
+| Git | Installation and version |
+| GitHub CLI (gh) | Installation, version, and authentication status |
+| gh auth | Shows logged-in GitHub username |
+| Config directory | Existence of `~/.config/ru/` |
+| Repo count | Number of repositories configured |
+| Projects directory | Existence and write permissions |
+| gum (optional) | Availability for prettier terminal UI |
+| flock (optional) | Availability for parallel sync |
+
+**Example output:**
+```
+╭─────────────────────────────────────────────────────────────╮
+│                    🔍 ru doctor                              │
+╰─────────────────────────────────────────────────────────────╯
+
+✓ git: 2.43.0
+✓ gh: 2.40.1 (authenticated as yourname)
+✓ Config: ~/.config/ru/ (47 repos configured)
+✓ Projects: /data/projects (writable)
+✓ gum: 0.13.0 (optional)
+✓ flock: available (optional)
+
+All checks passed!
+```
+
+**Exit code:** Returns 3 if critical issues found, 0 otherwise
 
 ---
 
@@ -1434,6 +1478,7 @@ Output includes:
 |------------|---------|
 | gum | Beautiful terminal UI |
 | jq | JSON processing (for scripts) |
+| flock | Parallel sync coordination (Linux default, `brew install util-linux` on macOS) |
 
 ### System Requirements
 

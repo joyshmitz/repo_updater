@@ -354,6 +354,15 @@ STATUS OPTIONS:
 INIT OPTIONS:
     --example            Include example repositories in initial config
 
+ADD OPTIONS:
+    --private            Add to private.txt instead of repos.txt
+    --from-cwd           Detect repo from current working directory
+
+LIST OPTIONS:
+    --paths              Show local paths instead of URLs
+    --public             Show only repos from repos.txt
+    --private            Show only repos from private.txt
+
 PRUNE OPTIONS:
     (no options)         List orphan repositories (dry run)
     --archive            Move orphans to archive directory
@@ -1107,13 +1116,17 @@ is_timeout_error() {
 }
 
 # Clone repository using gh
+# Args: url target_dir repo_name [branch]
 do_clone() {
     local url="$1"
     local target_dir="$2"
     local repo_name="$3"
+    local branch="${4:-}"
 
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would clone: $url -> $target_dir"
+        local branch_info=""
+        [[ -n "$branch" ]] && branch_info=" (branch: $branch)"
+        log_info "[DRY RUN] Would clone: $url -> $target_dir$branch_info"
         write_result "$repo_name" "clone" "dry_run" "0" "" "$target_dir"
         return 0
     fi
@@ -1133,7 +1146,23 @@ do_clone() {
     local output
     if output=$(gh repo clone "$clone_target" "$target_dir" -- --quiet 2>&1); then
         local duration=$(($(date +%s) - start_time))
-        log_success "Cloned: $repo_name (${duration}s)"
+
+        # If a specific branch was requested, check it out
+        if [[ -n "$branch" ]]; then
+            local checkout_output
+            if ! checkout_output=$(git -C "$target_dir" checkout "$branch" 2>&1); then
+                # Branch might be a remote branch, try fetching and checking out
+                if ! checkout_output=$(git -C "$target_dir" checkout -b "$branch" "origin/$branch" 2>&1); then
+                    log_warn "Cloned $repo_name but could not checkout branch '$branch'"
+                    log_verbose "  $checkout_output"
+                    write_result "$repo_name" "clone" "ok" "$duration" "branch checkout failed: $checkout_output" "$target_dir"
+                    return 0
+                fi
+            fi
+            log_success "Cloned: $repo_name@$branch (${duration}s)"
+        else
+            log_success "Cloned: $repo_name (${duration}s)"
+        fi
         write_result "$repo_name" "clone" "ok" "$duration" "" "$target_dir"
         return 0
     else
@@ -1152,20 +1181,43 @@ do_clone() {
 
 # Pull updates with strategy support
 # Strategies: ff-only (safe default), rebase, merge
+# Args: repo_path repo_name [strategy] [autostash] [branch]
 do_pull() {
     local repo_path="$1"
     local repo_name="$2"
     local strategy="${3:-ff-only}"
     local autostash="${4:-false}"
+    local branch="${5:-}"
 
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would pull: $repo_name (strategy: $strategy)"
+        local branch_info=""
+        [[ -n "$branch" ]] && branch_info=" branch: $branch,"
+        log_info "[DRY RUN] Would pull: $repo_name (${branch_info}strategy: $strategy)"
         write_result "$repo_name" "pull" "dry_run" "0" "" "$repo_path"
         return 0
     fi
 
     local start_time
     start_time=$(date +%s)
+
+    # If a specific branch was requested, ensure we're on it
+    if [[ -n "$branch" ]]; then
+        local current_branch
+        current_branch=$(git -C "$repo_path" symbolic-ref --short HEAD 2>/dev/null || echo "")
+        if [[ "$current_branch" != "$branch" ]]; then
+            local checkout_output
+            if ! checkout_output=$(git -C "$repo_path" checkout "$branch" 2>&1); then
+                # Try to checkout as tracking branch
+                if ! checkout_output=$(git -C "$repo_path" checkout -b "$branch" "origin/$branch" 2>&1); then
+                    log_warn "Could not switch to branch '$branch' for $repo_name"
+                    log_verbose "  $checkout_output"
+                    write_result "$repo_name" "pull" "branch_error" "0" "branch checkout failed: $checkout_output" "$repo_path"
+                    return 1
+                fi
+            fi
+            log_verbose "Switched to branch: $branch"
+        fi
+    fi
 
     # Set up timeout environment
     setup_git_timeout
@@ -1405,7 +1457,7 @@ process_single_repo_worker() {
             return 0
         fi
 
-        if do_clone "$url" "$local_path" "$repo_name" >/dev/null 2>&1; then
+        if do_clone "$url" "$local_path" "$repo_name" "$branch" >/dev/null 2>&1; then
             echo "OK:cloned:$repo_name"
         else
             echo "FAIL:failed:$repo_name"
@@ -2538,13 +2590,13 @@ cmd_add() {
     if [[ "$from_cwd" == "true" ]]; then
         if ! is_git_repo "."; then
             log_error "Current directory is not a git repository"
-            exit 1
+            exit 4
         fi
         local remote_url
         remote_url=$(git remote get-url origin 2>/dev/null)
         if [[ -z "$remote_url" ]]; then
             log_error "No 'origin' remote found in current directory"
-            exit 1
+            exit 4
         fi
         repo_args+=("$remote_url")
     fi
@@ -2608,13 +2660,13 @@ cmd_remove() {
     # Ensure config exists
     if [[ ! -d "$RU_CONFIG_DIR" ]]; then
         log_error "No configuration found. Run: ru init"
-        exit 1
+        exit 3
     fi
 
     local repos_dir="$RU_CONFIG_DIR/repos.d"
     if [[ ! -d "$repos_dir" ]]; then
         log_error "No repositories configured"
-        exit 1
+        exit 3
     fi
 
     local removed=0 not_found=0

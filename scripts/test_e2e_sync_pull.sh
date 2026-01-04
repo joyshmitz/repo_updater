@@ -93,7 +93,7 @@ assert_output_contains() {
     local output="$1"
     local pattern="$2"
     local msg="$3"
-    if echo "$output" | grep -q "$pattern"; then
+    if printf '%s\n' "$output" | grep -q "$pattern"; then
         pass "$msg"
     else
         fail "$msg (pattern '$pattern' not found in output)"
@@ -235,7 +235,7 @@ test_pull_clean_repo_current() {
     # Pull should succeed (exit 0)
     if [[ $exit_code -eq 0 ]]; then
         # Should report already up to date since we just cloned
-        if echo "$output" | grep -qi "already up to date\|Already up-to-date"; then
+        if printf '%s\n' "$output" | grep -qi "already up to date\|Already up-to-date"; then
             pass "Clean repo reports already up to date"
         else
             # Pull succeeded but didn't report "up to date" - still valid
@@ -317,7 +317,7 @@ test_autostash_dirty_repo() {
     output=$(git -C "$TEST_PROJECTS_DIR/stashrepo" pull --autostash 2>&1)
 
     # Check if autostash worked
-    if echo "$output" | grep -qi "autostash"; then
+    if printf '%s\n' "$output" | grep -qi "autostash"; then
         pass "Autostash was used during pull"
     else
         # Some git versions may succeed without explicit message
@@ -351,7 +351,7 @@ test_dirty_repo_fails_without_autostash() {
     local exit_code=$?
 
     # Should fail or warn about dirty state
-    if [[ $exit_code -ne 0 ]] || echo "$output" | grep -qi "uncommitted\|dirty\|stash\|overwritten\|conflict"; then
+    if [[ $exit_code -ne 0 ]] || printf '%s\n' "$output" | grep -qi "uncommitted\|dirty\|stash\|overwritten\|conflict"; then
         pass "Pull correctly fails or warns with dirty repo"
     else
         # Some git versions may have different behavior

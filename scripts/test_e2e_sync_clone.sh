@@ -124,7 +124,7 @@ assert_output_contains() {
     local output="$1"
     local pattern="$2"
     local msg="$3"
-    if echo "$output" | grep -q "$pattern"; then
+    if printf '%s\n' "$output" | grep -q "$pattern"; then
         pass "$msg"
     else
         fail "$msg (pattern '$pattern' not found in output)"
@@ -136,13 +136,13 @@ assert_json_valid() {
     local msg="$2"
     # Try jq first (fast), then python3, then basic pattern check
     if command -v jq >/dev/null 2>&1; then
-        if echo "$json" | jq . >/dev/null 2>&1; then
+        if printf '%s\n' "$json" | jq . >/dev/null 2>&1; then
             pass "$msg"
         else
             fail "$msg (invalid JSON)"
         fi
     elif command -v python3 >/dev/null 2>&1; then
-        if echo "$json" | python3 -c "import sys, json; json.load(sys.stdin)" 2>/dev/null; then
+        if printf '%s\n' "$json" | python3 -c "import sys, json; json.load(sys.stdin)" 2>/dev/null; then
             pass "$msg"
         else
             fail "$msg (invalid JSON)"
@@ -150,7 +150,7 @@ assert_json_valid() {
     else
         # Fallback: basic structure check (starts with { or [, ends with } or ])
         local trimmed
-        trimmed=$(echo "$json" | tr -d '[:space:]')
+        trimmed=$(printf '%s' "$json" | tr -d '[:space:]')
         if [[ "$trimmed" =~ ^[\{\[] && "$trimmed" =~ [\}\]]$ ]]; then
             pass "$msg (basic check - install jq for full validation)"
         else
@@ -165,20 +165,20 @@ assert_json_has_field() {
     local msg="$3"
     # Try jq first, then python3, then grep fallback
     if command -v jq >/dev/null 2>&1; then
-        if echo "$json" | jq -e ".$field" >/dev/null 2>&1; then
+        if printf '%s\n' "$json" | jq -e ".$field" >/dev/null 2>&1; then
             pass "$msg"
         else
             fail "$msg (field '$field' not found in JSON)"
         fi
     elif command -v python3 >/dev/null 2>&1; then
-        if echo "$json" | python3 -c "import sys, json; d=json.load(sys.stdin); assert '$field' in d" 2>/dev/null; then
+        if printf '%s\n' "$json" | python3 -c "import sys, json; d=json.load(sys.stdin); assert '$field' in d" 2>/dev/null; then
             pass "$msg"
         else
             fail "$msg (field '$field' not found in JSON)"
         fi
     else
         # Fallback: grep for the field name (not precise but works for simple cases)
-        if echo "$json" | grep -q "\"$field\""; then
+        if printf '%s\n' "$json" | grep -q "\"$field\""; then
             pass "$msg (basic check)"
         else
             fail "$msg (field '$field' not found in JSON)"
@@ -379,16 +379,16 @@ test_sync_json_summary_counts() {
     # Check summary contains count fields (with fallbacks for different tools)
     local has_total="false"
     if command -v jq >/dev/null 2>&1; then
-        if echo "$json_output" | jq -e '.summary.total' >/dev/null 2>&1; then
+        if printf '%s\n' "$json_output" | jq -e '.summary.total' >/dev/null 2>&1; then
             has_total="true"
         fi
     elif command -v python3 >/dev/null 2>&1; then
-        if echo "$json_output" | python3 -c "import sys, json; d=json.load(sys.stdin); assert 'total' in d.get('summary', {})" 2>/dev/null; then
+        if printf '%s\n' "$json_output" | python3 -c "import sys, json; d=json.load(sys.stdin); assert 'total' in d.get('summary', {})" 2>/dev/null; then
             has_total="true"
         fi
     else
         # Fallback: grep for pattern
-        if echo "$json_output" | grep -q '"total"'; then
+        if printf '%s\n' "$json_output" | grep -q '"total"'; then
             has_total="true"
         fi
     fi

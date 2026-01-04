@@ -511,12 +511,30 @@ get_config_value() {
     # Priority 3: Config file
     local config_file="$RU_CONFIG_DIR/config"
     if [[ -f "$config_file" ]]; then
-        local file_value
-        # Read value and strip SURROUNDING quotes only (preserve internal quotes)
-        file_value=$(grep "^${key}=" "$config_file" 2>/dev/null | cut -d'=' -f2- | sed -E 's/^"//; s/"$//; s/^'\''//; s/'\''$//')
+        local line file_value=""
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ "$line" == "${key}="* ]] || continue
+            # Last matching key wins
+            file_value="${line#*=}"
+        done < "$config_file"
+
         if [[ -n "$file_value" ]]; then
-            echo "$file_value"
-            return
+            # Strip CRLF
+            file_value="${file_value%$'\r'}"
+
+            # Strip only matching *surrounding* quotes (preserve internal quotes)
+            if [[ ${#file_value} -ge 2 ]]; then
+                local first="${file_value:0:1}"
+                local last="${file_value: -1}"
+                if [[ "$first" == "$last" && ( "$first" == '"' || "$first" == "'" ) ]]; then
+                    file_value="${file_value:1:${#file_value}-2}"
+                fi
+            fi
+
+            if [[ -n "$file_value" ]]; then
+                echo "$file_value"
+                return
+            fi
         fi
     fi
 
@@ -5007,12 +5025,21 @@ validate_agent_command() {
     local raw_cmd="$1"
     local mode="${2:-execute}"
 
-    # Normalize whitespace to single spaces
-    local cmd
-    cmd=$(echo "$raw_cmd" | xargs)
+    # Trim leading/trailing whitespace (preserve internal whitespace/quoting as-is)
+    local cmd="$raw_cmd"
+    cmd="${cmd#"${cmd%%[![:space:]]*}"}"
+    cmd="${cmd%"${cmd##*[![:space:]]}"}"
 
-    # Extract the base command (first word)
-    local base_cmd="${cmd%% *}"
+    # Extract the base command (first token)
+    local base_cmd="${cmd%%[[:space:]]*}"
+    if [[ -z "$base_cmd" ]]; then
+        jq -n \
+            --arg cmd "$cmd" \
+            --arg status "needs_approval" \
+            --arg reason "Empty command" \
+            '{command: $cmd, status: $status, reason: $reason}'
+        return 2
+    fi
 
     # Check blocked commands first (highest priority)
     local blocked
@@ -5075,9 +5102,9 @@ validate_agent_command() {
 
     # Special check for git push variants (security bypass prevention)
     if [[ "$base_cmd" == "git" ]]; then
-        # Check for 'push' token anywhere in the command
-        # This covers: git push, git -C path push, git push --force, etc.
-        if [[ " $cmd " == *" push "* ]]; then
+        # Check for 'push' token anywhere in the command.
+        # Covers: git push, git -C path push, git push --force, etc.
+        if [[ "$cmd" =~ (^|[[:space:]])push($|[[:space:]]) ]]; then
             jq -n \
                 --arg cmd "$cmd" \
                 --arg base "$base_cmd" \
@@ -5560,6 +5587,7 @@ DASH_BLUE=$'\033[34m'
 DASH_CYAN=$'\033[36m'
 DASH_BG_BLUE=$'\033[44m'
 DASH_BG_GRAY=$'\033[100m'
+DASHBOARD_OLD_STTY=""
 
 # Get terminal dimensions
 get_terminal_size() {
@@ -5578,14 +5606,25 @@ get_terminal_size() {
 enter_alt_screen() {
     printf '\033[?1049h'  # Enter alternate screen
     printf '\033[?25l'    # Hide cursor
-    stty -echo -icanon   # Disable echo and canonical mode
+
+    if [[ -t 0 ]]; then
+        DASHBOARD_OLD_STTY=$(stty -g 2>/dev/null || true)
+        stty -echo -icanon min 0 time 1 2>/dev/null || true
+    fi
 }
 
 # Exit alternate screen buffer
 exit_alt_screen() {
     printf '\033[?25h'    # Show cursor
     printf '\033[?1049l'  # Exit alternate screen
-    stty echo icanon     # Restore terminal settings
+
+    if [[ -t 0 ]]; then
+        if [[ -n "${DASHBOARD_OLD_STTY:-}" ]]; then
+            stty "$DASHBOARD_OLD_STTY" 2>/dev/null || true
+        else
+            stty echo icanon 2>/dev/null || true
+        fi
+    fi
 }
 
 # Clear screen and move cursor to top-left
@@ -5952,12 +5991,17 @@ handle_dashboard_keypress() {
 
 # Read a keypress (handles escape sequences for arrow keys)
 read_keypress() {
-    local key
-    IFS= read -rsn1 key 2>/dev/null || return 1
+    local timeout_seconds="${1:-}"
+    local key seq
+
+    if [[ -n "$timeout_seconds" ]]; then
+        IFS= read -rsn1 -t "$timeout_seconds" key 2>/dev/null || return 1
+    else
+        IFS= read -rsn1 key 2>/dev/null || return 1
+    fi
 
     # Check for escape sequence
     if [[ "$key" == $'\x1b' ]]; then
-        local seq
         IFS= read -rsn2 -t 0.1 seq 2>/dev/null || true
         key+="$seq"
     fi
@@ -5971,10 +6015,19 @@ read_keypress() {
 run_dashboard() {
     local run_id="$1"
     local start_time="$2"
+    local interrupted="false"
+
+    # Save/override traps while dashboard is active
+    local old_trap_int old_trap_term old_trap_winch
+    old_trap_int=$(trap -p INT || true)
+    old_trap_term=$(trap -p TERM || true)
+    old_trap_winch=$(trap -p SIGWINCH || true)
 
     # Set up terminal
     enter_alt_screen
-    trap 'exit_alt_screen; exit' EXIT INT TERM
+
+    # Handle interrupts: restore terminal and bubble up after cleanup
+    trap 'interrupted="true"; DASHBOARD_STATE[running]="false"' INT TERM
 
     # Handle resize
     trap 'DASHBOARD_STATE[refresh_needed]="true"' SIGWINCH
@@ -6003,9 +6056,11 @@ run_dashboard() {
 
         # Wait for keypress with timeout (for periodic refresh)
         local key
-        if key=$(timeout 1 bash -c 'read -rsn1 key 2>/dev/null && echo "$key"'); then
-            local questions_count
-            questions_count=$(echo "${DASHBOARD_QUESTIONS:-[]}" | jq 'length')
+        if key=$(read_keypress 1); then
+            local questions_count=0
+            if command -v jq &>/dev/null; then
+                questions_count=$(echo "${DASHBOARD_QUESTIONS:-[]}" | jq 'length' 2>/dev/null || echo 0)
+            fi
 
             local action
             action=$(handle_dashboard_keypress "$key" "$questions_count")
@@ -6045,6 +6100,16 @@ run_dashboard() {
     done
 
     exit_alt_screen
+
+    # Restore previous traps
+    trap - INT TERM SIGWINCH
+    [[ -n "$old_trap_int" ]] && eval "$old_trap_int"
+    [[ -n "$old_trap_term" ]] && eval "$old_trap_term"
+    [[ -n "$old_trap_winch" ]] && eval "$old_trap_winch"
+
+    if [[ "$interrupted" == "true" ]]; then
+        return 130
+    fi
 }
 
 # Initialize dashboard with data
@@ -6071,6 +6136,311 @@ update_dashboard_sessions() {
 update_dashboard_stats() {
     DASHBOARD_STATS="$1"
     DASHBOARD_STATE[refresh_needed]="true"
+}
+
+#------------------------------------------------------------------------------
+# REVIEW POLICY CONFIGURATION (bd-cutq)
+# Per-repo customization of review behavior via configuration files
+#------------------------------------------------------------------------------
+
+# Get path to review policies directory
+get_review_policy_dir() {
+    echo "${RU_CONFIG_DIR}/review-policies.d"
+}
+
+# Load policy for a specific repo, merging defaults with overrides
+# Args: $1 = repo_id (owner/repo format)
+# Outputs: Sourced policy variables to stdout as KEY=VALUE pairs
+load_policy_for_repo() {
+    local repo_id="$1"
+    local policy_dir
+    policy_dir=$(get_review_policy_dir)
+
+    # Initialize with hardcoded defaults
+    local -A policy=(
+        [REVIEW_TEST_CMD]=""
+        [REVIEW_TEST_TIMEOUT]="300"
+        [REVIEW_LINT_CMD]=""
+        [REVIEW_LINT_REQUIRED]="false"
+        [REVIEW_SECRET_SCAN]="true"
+        [REVIEW_SECRET_PATTERNS]=""
+        [REVIEW_ALLOW_PUSH]="true"
+        [REVIEW_REQUIRE_APPROVAL]="false"
+        [REVIEW_BASE_PRIORITY]="0"
+        [REVIEW_LABELS_BOOST]=""
+        [REVIEW_MAX_ITEMS]="20"
+        [REVIEW_SKIP_PRS]="false"
+        [REVIEW_DEEP_MODE]="false"
+    )
+
+    # 1. Load _default.conf if exists
+    local default_policy="${policy_dir}/_default.conf"
+    if [[ -f "$default_policy" ]]; then
+        # shellcheck disable=SC1090
+        while IFS='=' read -r key value; do
+            [[ -z "$key" || "$key" == \#* ]] && continue
+            key=$(echo "$key" | xargs)  # Trim whitespace
+            value=$(echo "$value" | xargs | sed 's/^["'"'"']//;s/["'"'"']$//')
+            [[ -n "$key" ]] && policy["$key"]="$value"
+        done < <(grep -E '^[[:space:]]*REVIEW_' "$default_policy" 2>/dev/null)
+    fi
+
+    # 2. Find and load repo-specific policy (exact match or glob)
+    local safe_repo_id="${repo_id//\//_}"  # owner/repo -> owner_repo
+    local repo_policy="${policy_dir}/${safe_repo_id}.conf"
+
+    if [[ -f "$repo_policy" ]]; then
+        # Exact match found
+        while IFS='=' read -r key value; do
+            [[ -z "$key" || "$key" == \#* ]] && continue
+            key=$(echo "$key" | xargs)
+            value=$(echo "$value" | xargs | sed 's/^["'"'"']//;s/["'"'"']$//')
+            [[ -n "$key" ]] && policy["$key"]="$value"
+        done < <(grep -E '^[[:space:]]*REVIEW_' "$repo_policy" 2>/dev/null)
+    else
+        # Try glob patterns (e.g., myorg_*.conf)
+        local owner="${repo_id%%/*}"
+        local glob_pattern="${policy_dir}/${owner}_*.conf"
+        # shellcheck disable=SC2086
+        for glob_file in $glob_pattern; do
+            if [[ -f "$glob_file" && "$glob_file" != *"_*.conf" ]]; then
+                while IFS='=' read -r key value; do
+                    [[ -z "$key" || "$key" == \#* ]] && continue
+                    key=$(echo "$key" | xargs)
+                    value=$(echo "$value" | xargs | sed 's/^["'"'"']//;s/["'"'"']$//')
+                    [[ -n "$key" ]] && policy["$key"]="$value"
+                done < <(grep -E '^[[:space:]]*REVIEW_' "$glob_file" 2>/dev/null)
+                break  # Use first matching glob
+            fi
+        done
+    fi
+
+    # Output as JSON for easy consumption
+    jq -n \
+        --arg test_cmd "${policy[REVIEW_TEST_CMD]}" \
+        --arg test_timeout "${policy[REVIEW_TEST_TIMEOUT]}" \
+        --arg lint_cmd "${policy[REVIEW_LINT_CMD]}" \
+        --arg lint_required "${policy[REVIEW_LINT_REQUIRED]}" \
+        --arg secret_scan "${policy[REVIEW_SECRET_SCAN]}" \
+        --arg secret_patterns "${policy[REVIEW_SECRET_PATTERNS]}" \
+        --arg allow_push "${policy[REVIEW_ALLOW_PUSH]}" \
+        --arg require_approval "${policy[REVIEW_REQUIRE_APPROVAL]}" \
+        --arg base_priority "${policy[REVIEW_BASE_PRIORITY]}" \
+        --arg labels_boost "${policy[REVIEW_LABELS_BOOST]}" \
+        --arg max_items "${policy[REVIEW_MAX_ITEMS]}" \
+        --arg skip_prs "${policy[REVIEW_SKIP_PRS]}" \
+        --arg deep_mode "${policy[REVIEW_DEEP_MODE]}" \
+        '{
+            test_cmd: $test_cmd,
+            test_timeout: ($test_timeout | tonumber),
+            lint_cmd: $lint_cmd,
+            lint_required: ($lint_required == "true"),
+            secret_scan: ($secret_scan == "true"),
+            secret_patterns: $secret_patterns,
+            allow_push: ($allow_push == "true"),
+            require_approval: ($require_approval == "true"),
+            base_priority: ($base_priority | tonumber),
+            labels_boost: $labels_boost,
+            max_items: ($max_items | tonumber),
+            skip_prs: ($skip_prs == "true"),
+            deep_mode: ($deep_mode == "true")
+        }'
+}
+
+# Apply priority boost from policy to a work item score
+# Args: $1 = repo_id, $2 = current_score, $3 = labels (comma-separated)
+# Outputs: New score
+apply_policy_priority_boost() {
+    local repo_id="$1"
+    local current_score="$2"
+    local labels="$3"
+
+    local policy
+    policy=$(load_policy_for_repo "$repo_id")
+
+    # Get base priority boost
+    local base_boost
+    base_boost=$(echo "$policy" | jq -r '.base_priority // 0')
+    current_score=$((current_score + base_boost))
+
+    # Get label boosts (format: "label1:30,label2:20")
+    local labels_boost
+    labels_boost=$(echo "$policy" | jq -r '.labels_boost // ""')
+
+    if [[ -n "$labels_boost" && -n "$labels" ]]; then
+        # Parse label boosts
+        IFS=',' read -ra boost_pairs <<< "$labels_boost"
+        for pair in "${boost_pairs[@]}"; do
+            local label="${pair%%:*}"
+            local boost="${pair#*:}"
+            # Check if this label is in the item's labels
+            if [[ ",$labels," == *",$label,"* ]]; then
+                current_score=$((current_score + boost))
+            fi
+        done
+    fi
+
+    echo "$current_score"
+}
+
+# Validate a policy file for syntax and value errors
+# Args: $1 = path to policy file
+# Returns: 0 if valid, 1 if invalid (with error message to stderr)
+validate_policy_file() {
+    local file="$1"
+
+    if [[ ! -f "$file" ]]; then
+        log_error "Policy file not found: $file"
+        return 1
+    fi
+
+    # Check bash syntax (the file should be sourceable)
+    if ! bash -n "$file" 2>/dev/null; then
+        log_error "Syntax error in policy file: $file"
+        return 1
+    fi
+
+    # Check for valid variable assignments
+    local line_num=0
+    while IFS= read -r line; do
+        ((line_num++))
+        # Skip empty lines and comments
+        [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+
+        # Check for REVIEW_ variable assignments
+        if [[ "$line" =~ ^[[:space:]]*REVIEW_ ]]; then
+            # Validate it's a proper assignment
+            if ! [[ "$line" =~ ^[[:space:]]*REVIEW_[A-Z_]+=.* ]]; then
+                log_error "Invalid assignment at line $line_num in $file: $line"
+                return 1
+            fi
+
+            # Extract key and value for validation
+            local key value
+            key=$(echo "$line" | sed 's/=.*//' | xargs)
+            value=$(echo "$line" | sed 's/^[^=]*=//' | xargs | sed 's/^["'"'"']//;s/["'"'"']$//')
+
+            # Validate numeric fields
+            case "$key" in
+                REVIEW_TEST_TIMEOUT|REVIEW_BASE_PRIORITY|REVIEW_MAX_ITEMS)
+                    if ! [[ "$value" =~ ^-?[0-9]+$ ]]; then
+                        log_error "$key must be numeric at line $line_num in $file"
+                        return 1
+                    fi
+                    ;;
+                REVIEW_LINT_REQUIRED|REVIEW_SECRET_SCAN|REVIEW_ALLOW_PUSH|REVIEW_REQUIRE_APPROVAL|REVIEW_SKIP_PRS|REVIEW_DEEP_MODE)
+                    if ! [[ "$value" =~ ^(true|false)$ ]]; then
+                        log_error "$key must be true or false at line $line_num in $file"
+                        return 1
+                    fi
+                    ;;
+            esac
+        fi
+    done < "$file"
+
+    return 0
+}
+
+# Initialize review policies directory with example configuration
+init_review_policies() {
+    local policy_dir
+    policy_dir=$(get_review_policy_dir)
+
+    if [[ ! -d "$policy_dir" ]]; then
+        mkdir -p "$policy_dir"
+        log_info "Created review policies directory: $policy_dir"
+    fi
+
+    # Create example default policy if no config exists
+    local default_policy="${policy_dir}/_default.conf"
+    local example_policy="${policy_dir}/_default.conf.example"
+
+    if [[ ! -f "$default_policy" && ! -f "$example_policy" ]]; then
+        cat > "$example_policy" << 'POLICY_EOF'
+# Default Review Policy (rename to _default.conf to activate)
+# These settings apply to all repos unless overridden by a repo-specific policy.
+#
+# To override for a specific repo, create a file named after the repo:
+#   owner_reponame.conf (e.g., myorg_backend.conf)
+#
+# For organization-wide settings, use glob patterns:
+#   myorg_*.conf (matches all repos in myorg)
+
+# Test Configuration
+# Auto-detect test command if empty (looks for Makefile, package.json, etc.)
+REVIEW_TEST_CMD=""
+REVIEW_TEST_TIMEOUT=300
+
+# Lint Configuration
+REVIEW_LINT_CMD=""
+REVIEW_LINT_REQUIRED=false
+
+# Secret Scanning
+# Scan for secrets before allowing push
+REVIEW_SECRET_SCAN=true
+# Additional patterns to detect (regex, pipe-separated)
+REVIEW_SECRET_PATTERNS=""
+
+# Push Policy
+# Allow pushing changes (false = never push for this repo)
+REVIEW_ALLOW_PUSH=true
+# Always ask before pushing (even with --apply)
+REVIEW_REQUIRE_APPROVAL=false
+
+# Priority Configuration
+# Base priority boost for all items from this repo
+REVIEW_BASE_PRIORITY=0
+# Label-based priority boosts (format: "label:boost,label:boost")
+# Example: "urgent:30,security:40,bug:20"
+REVIEW_LABELS_BOOST=""
+
+# Review Behavior
+# Maximum items to review per session
+REVIEW_MAX_ITEMS=20
+# Skip pull requests (only review issues)
+REVIEW_SKIP_PRS=false
+# Deep mode (comprehensive review, slower)
+REVIEW_DEEP_MODE=false
+POLICY_EOF
+        log_info "Created example policy file: $example_policy"
+        log_info "Rename to _default.conf to activate default policies"
+    fi
+}
+
+# Get policy value for a repo
+# Args: $1 = repo_id, $2 = policy_key
+# Outputs: The value for that key
+get_policy_value() {
+    local repo_id="$1"
+    local key="$2"
+
+    local policy
+    policy=$(load_policy_for_repo "$repo_id")
+    echo "$policy" | jq -r ".$key // empty"
+}
+
+# Check if a repo allows push based on policy
+# Args: $1 = repo_id
+# Returns: 0 if push allowed, 1 if not
+repo_allows_push() {
+    local repo_id="$1"
+    local policy
+    policy=$(load_policy_for_repo "$repo_id")
+    local allow_push
+    allow_push=$(echo "$policy" | jq -r '.allow_push // true')
+    [[ "$allow_push" == "true" ]]
+}
+
+# Check if a repo requires approval before push
+# Args: $1 = repo_id
+# Returns: 0 if approval required, 1 if not
+repo_requires_approval() {
+    local repo_id="$1"
+    local policy
+    policy=$(load_policy_for_repo "$repo_id")
+    local require_approval
+    require_approval=$(echo "$policy" | jq -r '.require_approval // false')
+    [[ "$require_approval" == "true" ]]
 }
 
 # Parse review-specific arguments

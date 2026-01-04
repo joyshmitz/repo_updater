@@ -164,6 +164,59 @@ test_get_config_value_handles_quoted_values() {
     log_test_pass "$test_name"
 }
 
+test_get_config_value_preserves_internal_quotes() {
+    local test_name="get_config_value: Preserves internal quote characters"
+    log_test_start "$test_name"
+    local test_env
+    test_env=$(create_test_env)
+
+    export RU_CONFIG_DIR="$test_env/config/ru"
+    mkdir -p "$RU_CONFIG_DIR"
+
+    cat > "$RU_CONFIG_DIR/config" <<'EOF'
+INTERNAL_QUOTES=foo"bar'baz
+EOF
+
+    unset RU_INTERNAL_QUOTES 2>/dev/null || true
+
+    local result
+    result=$(get_config_value "INTERNAL_QUOTES" "" "")
+
+    assert_equals "foo\"bar'baz" "$result" "Internal quotes should be preserved"
+
+    log_test_pass "$test_name"
+}
+
+test_get_config_value_strips_only_matching_outer_quotes() {
+    local test_name="get_config_value: Strips only matching surrounding quotes"
+    log_test_start "$test_name"
+    local test_env
+    test_env=$(create_test_env)
+
+    export RU_CONFIG_DIR="$test_env/config/ru"
+    mkdir -p "$RU_CONFIG_DIR"
+
+    cat > "$RU_CONFIG_DIR/config" <<'EOF'
+SINGLE_QUOTED='quoted "value"'
+MISMATCHED_START="foo
+MISMATCHED_END=bar"
+EOF
+
+    unset RU_SINGLE_QUOTED RU_MISMATCHED_START RU_MISMATCHED_END 2>/dev/null || true
+
+    local result
+    result=$(get_config_value "SINGLE_QUOTED" "" "")
+    assert_equals 'quoted "value"' "$result" "Matching surrounding single quotes should be stripped"
+
+    result=$(get_config_value "MISMATCHED_START" "" "")
+    assert_equals '"foo' "$result" "Mismatched starting quote should not be stripped"
+
+    result=$(get_config_value "MISMATCHED_END" "" "")
+    assert_equals 'bar"' "$result" "Mismatched trailing quote should not be stripped"
+
+    log_test_pass "$test_name"
+}
+
 test_get_config_value_handles_paths_with_slashes() {
     local test_name="get_config_value: Handles paths with slashes"
     log_test_start "$test_name"
@@ -491,6 +544,8 @@ run_test test_get_config_value_env_priority
 run_test test_get_config_value_file_priority
 run_test test_get_config_value_default_fallback
 run_test test_get_config_value_handles_quoted_values
+run_test test_get_config_value_preserves_internal_quotes
+run_test test_get_config_value_strips_only_matching_outer_quotes
 run_test test_get_config_value_handles_paths_with_slashes
 run_test test_get_config_value_no_config_file
 

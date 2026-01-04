@@ -9184,10 +9184,10 @@ gh_action_already_executed() {
     [[ -f "$log_file" ]] || return 1
     command -v jq &>/dev/null || return 1
 
-    jq -s \
+    jq -e -s \
         --arg repo "$repo_id" \
         --arg action "$action_canon" \
-        'map(select(.repo == $repo and .action == $action and .status == "ok")) | length > 0' \
+        'any(.[]; .repo == $repo and .action == $action and .status == "ok")' \
         "$log_file" >/dev/null 2>&1
 }
 

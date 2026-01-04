@@ -6602,17 +6602,241 @@ discover_work_items() {
     log_verbose "Discovered ${#_items_ref[@]} work item(s)"
 }
 
-# Stub: Show discovery summary (will be enhanced in later phases)
+#------------------------------------------------------------------------------
+# DISCOVERY SUMMARY DISPLAY (bd-73ys)
+# Format and display discovered work items in a user-friendly summary
+#------------------------------------------------------------------------------
+
+# Format a priority level with color (ANSI or plain)
+# Args: level (CRITICAL/HIGH/NORMAL/LOW)
+# Output: Formatted string
+format_priority_badge() {
+    local level="$1"
+    local use_color="${2:-true}"
+
+    if [[ "$use_color" != "true" ]]; then
+        echo "[$level]"
+        return
+    fi
+
+    # ANSI color codes
+    local RED="\033[31m"
+    local ORANGE="\033[33m"
+    local YELLOW="\033[93m"
+    local GRAY="\033[90m"
+    local RESET="\033[0m"
+    local BOLD="\033[1m"
+
+    case "$level" in
+        CRITICAL) echo -e "${BOLD}${RED}[CRITICAL]${RESET}" ;;
+        HIGH)     echo -e "${ORANGE}[HIGH]${RESET}" ;;
+        NORMAL)   echo -e "${YELLOW}[NORMAL]${RESET}" ;;
+        LOW)      echo -e "${GRAY}[LOW]${RESET}" ;;
+        *)        echo "[$level]" ;;
+    esac
+}
+
+# Show discovery summary using ANSI formatting
+# Args: total issues prs critical high normal low max_display items_array_ref
+show_discovery_summary_ansi() {
+    local total="$1" issues="$2" prs="$3"
+    local critical="$4" high="$5" normal="$6" low="$7"
+    local max_display="$8"
+    local -n _items_ansi=$9
+
+    local BOLD="\033[1m"
+    local RED="\033[31m"
+    local ORANGE="\033[33m"
+    local YELLOW="\033[93m"
+    local GRAY="\033[90m"
+    local CYAN="\033[36m"
+    local RESET="\033[0m"
+
+    echo "" >&2
+    echo -e "${BOLD}━━━ Discovery Summary ━━━${RESET}" >&2
+    echo "" >&2
+    echo -e "Total work items: ${BOLD}$total${RESET}" >&2
+    echo -e "  Issues: ${CYAN}$issues${RESET} | PRs: ${CYAN}$prs${RESET}" >&2
+    echo "" >&2
+    echo -e "${BOLD}By priority:${RESET}" >&2
+    [[ $critical -gt 0 ]] && echo -e "  ${RED}CRITICAL: $critical${RESET}" >&2
+    [[ $high -gt 0 ]] && echo -e "  ${ORANGE}HIGH: $high${RESET}" >&2
+    [[ $normal -gt 0 ]] && echo -e "  ${YELLOW}NORMAL: $normal${RESET}" >&2
+    [[ $low -gt 0 ]] && echo -e "  ${GRAY}LOW: $low${RESET}" >&2
+    echo "" >&2
+
+    if [[ ${#_items_ansi[@]} -gt 0 ]]; then
+        local display_count=$max_display
+        [[ $display_count -gt ${#_items_ansi[@]} ]] && display_count=${#_items_ansi[@]}
+
+        echo -e "${BOLD}Top $display_count items to review:${RESET}" >&2
+        local i=0
+        for item in "${_items_ansi[@]:0:$display_count}"; do
+            ((i++))
+            IFS="|" read -r repo_id item_type number title labels created_at updated_at is_draft <<< "$item"
+
+            # Calculate score and level for display
+            local score level
+            score=$(calculate_item_priority_score "$item_type" "$labels" "$created_at" "$updated_at" "$is_draft" "$repo_id" "$number")
+            level=$(get_priority_level "$score")
+            local badge
+            badge=$(format_priority_badge "$level" "true")
+
+            # Truncate title if too long
+            local short_title="${title:0:45}"
+            [[ ${#title} -gt 45 ]] && short_title="${short_title}..."
+
+            echo -e "  $i. $badge ${CYAN}${repo_id}${RESET}#${number}: $short_title" >&2
+        done
+        echo "" >&2
+    fi
+}
+
+# Show discovery summary using gum (if available)
+# Args: total issues prs critical high normal low max_display items_array_ref
+show_discovery_summary_gum() {
+    local total="$1" issues="$2" prs="$3"
+    local critical="$4" high="$5" normal="$6" low="$7"
+    local max_display="$8"
+    local -n _items_gum=$9
+
+    # Header
+    gum style --border rounded --padding "0 2" --border-foreground "#fab387" \
+        "$(gum style --bold 'Discovery Summary')" >&2
+
+    echo "" >&2
+    gum style "Total work items: $total" >&2
+    gum style "  Issues: $issues | PRs: $prs" >&2
+    echo "" >&2
+
+    # Priority breakdown with colors
+    gum style --bold "By priority:" >&2
+    [[ $critical -gt 0 ]] && gum style --foreground "#f38ba8" "  CRITICAL: $critical" >&2
+    [[ $high -gt 0 ]] && gum style --foreground "#fab387" "  HIGH: $high" >&2
+    [[ $normal -gt 0 ]] && gum style --foreground "#f9e2af" "  NORMAL: $normal" >&2
+    [[ $low -gt 0 ]] && gum style --foreground "#6c7086" "  LOW: $low" >&2
+    echo "" >&2
+
+    if [[ ${#_items_gum[@]} -gt 0 ]]; then
+        local display_count=$max_display
+        [[ $display_count -gt ${#_items_gum[@]} ]] && display_count=${#_items_gum[@]}
+
+        gum style --bold "Top $display_count items to review:" >&2
+        local i=0
+        for item in "${_items_gum[@]:0:$display_count}"; do
+            ((i++))
+            IFS="|" read -r repo_id item_type number title labels created_at updated_at is_draft <<< "$item"
+
+            local score level badge_color
+            score=$(calculate_item_priority_score "$item_type" "$labels" "$created_at" "$updated_at" "$is_draft" "$repo_id" "$number")
+            level=$(get_priority_level "$score")
+
+            case "$level" in
+                CRITICAL) badge_color="#f38ba8" ;;
+                HIGH) badge_color="#fab387" ;;
+                NORMAL) badge_color="#f9e2af" ;;
+                *) badge_color="#6c7086" ;;
+            esac
+
+            local short_title="${title:0:45}"
+            [[ ${#title} -gt 45 ]] && short_title="${short_title}..."
+
+            echo -n "  $i. " >&2
+            gum style --foreground "$badge_color" --inline "[$level]" >&2
+            echo " ${repo_id}#${number}: $short_title" >&2
+        done
+        echo "" >&2
+    fi
+}
+
+# Show discovery summary as JSON (for automation)
+# Args: total issues prs critical high normal low max_display items_array_ref
+show_discovery_summary_json() {
+    local total="$1" issues="$2" prs="$3"
+    local critical="$4" high="$5" normal="$6" low="$7"
+    local max_display="$8"
+    local -n _items_json=$9
+
+    local items_json="[]"
+
+    if [[ ${#_items_json[@]} -gt 0 ]]; then
+        local display_count=$max_display
+        [[ $display_count -gt ${#_items_json[@]} ]] && display_count=${#_items_json[@]}
+
+        local item_list=""
+        for item in "${_items_json[@]:0:$display_count}"; do
+            IFS="|" read -r repo_id item_type number title labels created_at updated_at is_draft <<< "$item"
+
+            local score level
+            score=$(calculate_item_priority_score "$item_type" "$labels" "$created_at" "$updated_at" "$is_draft" "$repo_id" "$number")
+            level=$(get_priority_level "$score")
+
+            # Escape title for JSON
+            local escaped_title
+            escaped_title=$(echo "$title" | jq -Rs '.')
+
+            [[ -n "$item_list" ]] && item_list+=","
+            item_list+="{\"repo\":\"$repo_id\",\"type\":\"$item_type\",\"number\":$number,\"title\":$escaped_title,\"score\":$score,\"level\":\"$level\"}"
+        done
+        items_json="[$item_list]"
+    fi
+
+    cat <<EOF
+{
+  "total": $total,
+  "by_type": {"issues": $issues, "prs": $prs},
+  "by_priority": {"critical": $critical, "high": $high, "normal": $normal, "low": $low},
+  "top_items": $items_json
+}
+EOF
+}
+
+# Main discovery summary function
+# Args: work_items (pipe-separated strings)
 show_discovery_summary() {
     local items=("$@")
+    local max_display="${REVIEW_PARALLEL:-5}"
 
     if [[ ${#items[@]} -eq 0 ]]; then
         log_info "No work items to review"
         return
     fi
 
-    log_info "Found ${#items[@]} work item(s) to review"
-    # Real implementation will show priority breakdown, repo counts, etc.
+    # Count totals and priority breakdown
+    local total=${#items[@]}
+    local critical=0 high=0 normal=0 low=0
+    local issues=0 prs=0
+
+    for item in "${items[@]}"; do
+        IFS="|" read -r repo_id item_type number title labels created_at updated_at is_draft <<< "$item"
+
+        # Count by type
+        case "$item_type" in
+            issue) ((issues++)) ;;
+            pr) ((prs++)) ;;
+        esac
+
+        # Calculate score and count by priority level
+        local score level
+        score=$(calculate_item_priority_score "$item_type" "$labels" "$created_at" "$updated_at" "$is_draft" "$repo_id" "$number")
+        level=$(get_priority_level "$score")
+
+        case "$level" in
+            CRITICAL) ((critical++)) ;;
+            HIGH) ((high++)) ;;
+            NORMAL) ((normal++)) ;;
+            LOW) ((low++)) ;;
+        esac
+    done
+
+    # Display based on output mode
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        show_discovery_summary_json "$total" "$issues" "$prs" "$critical" "$high" "$normal" "$low" "$max_display" items
+    elif [[ "$GUM_AVAILABLE" == "true" ]] && [[ -t 2 ]]; then
+        show_discovery_summary_gum "$total" "$issues" "$prs" "$critical" "$high" "$normal" "$low" "$max_display" items
+    else
+        show_discovery_summary_ansi "$total" "$issues" "$prs" "$critical" "$high" "$normal" "$low" "$max_display" items
+    fi
 }
 
 #------------------------------------------------------------------------------

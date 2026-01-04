@@ -411,6 +411,9 @@ AUTOSTASH=false
 # Parallel operations (1 = serial)
 PARALLEL=1
 
+# Network timeout in seconds (for slow connections)
+TIMEOUT=30
+
 # Check for ru updates on run
 CHECK_UPDATES=false
 ```
@@ -539,6 +542,101 @@ For each repository in your lists:
 6. **Get status** — Using git plumbing (ahead/behind/dirty)
 7. **Take action** — Pull if behind, skip if current, warn if diverged
 8. **Log result** — Per-repo log file + NDJSON result
+
+### Parallel Sync
+
+When syncing many repositories, parallel execution can significantly reduce total sync time:
+
+```bash
+# Sync 4 repos at a time
+ru sync --parallel 4
+
+# Or use the short form
+ru sync -j 8
+```
+
+**How it works:**
+
+1. **Worker pool** — ru spawns N worker processes (specified by `--parallel` or `-j`)
+2. **Job queue** — Repositories are distributed among workers as they become available
+3. **flock coordination** — File-based locking prevents race conditions in shared resources
+4. **Aggregated results** — All worker results are collected and reported in a unified summary
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     ru sync --parallel 4                         │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+               ┌──────────────┼──────────────┐
+               ▼              ▼              ▼              ▼
+        ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
+        │ Worker 1 │   │ Worker 2 │   │ Worker 3 │   │ Worker 4 │
+        │ repo A   │   │ repo B   │   │ repo C   │   │ repo D   │
+        │ repo E   │   │ repo F   │   │ repo G   │   │ repo H   │
+        │   ...    │   │   ...    │   │   ...    │   │   ...    │
+        └──────────┘   └──────────┘   └──────────┘   └──────────┘
+               │              │              │              │
+               └──────────────┴──────────────┴──────────────┘
+                              │
+                              ▼
+                    ┌─────────────────┐
+                    │  Unified        │
+                    │  Summary        │
+                    └─────────────────┘
+```
+
+**Configuration:**
+```bash
+# Set default parallelism in config
+ru config --set PARALLEL=4
+
+# Or use environment variable
+export RU_PARALLEL=4
+```
+
+**Requirements:**
+- Parallel sync requires `flock` (available by default on Linux; install via Homebrew on macOS)
+- ru automatically falls back to serial execution if flock is unavailable
+
+### Resuming Interrupted Syncs
+
+If a sync is interrupted (Ctrl+C, network failure, etc.), ru saves progress state and can resume where it left off:
+
+```bash
+# Start a large sync
+ru sync
+# ^C (interrupted)
+# Exit code: 5
+
+# Resume from where you left off
+ru sync --resume
+
+# Or discard state and start fresh
+ru sync --restart
+```
+
+**How state tracking works:**
+
+1. **State file** — Progress is saved to `~/.local/state/ru/sync_state.json`
+2. **Atomic updates** — State is updated after each repo completes
+3. **Safe resume** — On `--resume`, already-completed repos are skipped
+4. **Clean restart** — `--restart` clears state and processes all repos fresh
+
+**State file contents:**
+```json
+{
+  "started_at": "2025-01-03T14:30:00Z",
+  "repos_completed": ["repo1", "repo2", "repo3"],
+  "repos_pending": ["repo4", "repo5", "..."],
+  "last_repo": "repo3",
+  "interrupted": true
+}
+```
+
+**Best practices:**
+- Use `--resume` when you want to continue after an interruption
+- Use `--restart` when the repo list has changed significantly
+- In CI, prefer `--restart` to ensure consistent runs
 
 ---
 
@@ -740,6 +838,7 @@ case $exit_code in
     2) echo "Conflicts detected - manual resolution required" ;;
     3) echo "Missing dependencies - run 'ru doctor'" ;;
     4) echo "Invalid configuration" ;;
+    5) echo "Sync interrupted - run 'ru sync --resume' to continue" ;;
 esac
 ```
 
@@ -1067,6 +1166,10 @@ Output includes:
 |----------|-------------|---------|
 | `RU_PROJECTS_DIR` | Base directory for repos | `/data/projects` |
 | `RU_LAYOUT` | Path layout (flat/owner-repo/full) | `flat` |
+| `RU_PARALLEL` | Number of parallel workers | `1` |
+| `RU_TIMEOUT` | Network timeout in seconds | `30` |
+| `RU_AUTOSTASH` | Auto-stash before pull | `false` |
+| `RU_UPDATE_STRATEGY` | Pull strategy (ff-only/rebase/merge) | `ff-only` |
 | `RU_CONFIG_DIR` | Configuration directory | `~/.config/ru` |
 | `RU_LOG_DIR` | Log directory | `~/.local/state/ru/logs` |
 | `GH_TOKEN` | GitHub token for authentication | (from gh CLI) |

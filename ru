@@ -1949,9 +1949,6 @@ print_conflict_help() {
                 echo -e "     ${GREEN}b)${RESET} Check GitHub authentication:" >&2
                 echo -e "        ${CYAN}gh auth status${RESET}" >&2
                 echo "" >&2
-                echo -e "     ${GREEN}c)${RESET} View detailed log:" >&2
-                echo -e "        ${CYAN}cat \"$RU_LOG_DIR/latest/repos/${repo}.log\"${RESET}" >&2
-                echo "" >&2
                 ;;
         esac
     done < "$RESULTS_FILE"
@@ -2614,8 +2611,8 @@ cmd_remove() {
         exit 1
     fi
 
-    local repos_file="$RU_CONFIG_DIR/repos.d/repos.txt"
-    if [[ ! -f "$repos_file" ]]; then
+    local repos_dir="$RU_CONFIG_DIR/repos.d"
+    if [[ ! -d "$repos_dir" ]]; then
         log_error "No repositories configured"
         exit 1
     fi
@@ -2630,48 +2627,60 @@ cmd_remove() {
             continue
         fi
 
-        # Parse each line and compare owner/repo to avoid substring matching issues
-        # (e.g., "owner/repo" should not match "owner/repo-extra")
-        local tmp_file="${repos_file}.tmp.$$"
-        local found="false"
+        local found_in_any="false"
 
-        while IFS= read -r line || [[ -n "$line" ]]; do
-            # Skip empty lines and preserve them
-            if [[ -z "$line" ]] || [[ "$line" =~ ^[[:space:]]*# ]]; then
-                echo "$line" >> "$tmp_file"
-                continue
-            fi
+        # Search all .txt files in repos.d/
+        for repos_file in "$repos_dir"/*.txt; do
+            [[ -f "$repos_file" ]] || continue
 
-            # Parse the line to extract URL and compare owner/repo
-            # shellcheck disable=SC2034  # line_branch and line_custom_name are set by nameref but unused here
-            local line_url line_branch line_custom_name
-            parse_repo_spec "$line" line_url line_branch line_custom_name
+            # Parse each line and compare owner/repo to avoid substring matching issues
+            local tmp_file="${repos_file}.tmp.$$"
+            local found="false"
 
-            # shellcheck disable=SC2034  # line_host is set by nameref but unused here
-            local line_host line_owner line_repo
-            local should_remove="false"
-            if parse_repo_url "$line_url" line_host line_owner line_repo; then
-                # Match if owner and repo name are exactly the same
-                if [[ "$line_owner" == "$owner" && "$line_repo" == "$repo_name" ]]; then
-                    should_remove="true"
+            while IFS= read -r line || [[ -n "$line" ]]; do
+                # Skip empty lines and preserve them
+                if [[ -z "$line" ]] || [[ "$line" =~ ^[[:space:]]*# ]]; then
+                    echo "$line" >> "$tmp_file"
+                    continue
                 fi
-            fi
 
-            if [[ "$should_remove" == "true" ]]; then
-                found="true"
-                # Don't add to tmp file (remove it)
+                # Parse the line to extract URL and compare owner/repo
+                # shellcheck disable=SC2034  # line_branch and line_custom_name are set by nameref but unused here
+                local line_url line_branch line_custom_name
+                parse_repo_spec "$line" line_url line_branch line_custom_name
+
+                # shellcheck disable=SC2034  # line_host is set by nameref but unused here
+                local line_host line_owner line_repo
+                local should_remove="false"
+                if parse_repo_url "$line_url" line_host line_owner line_repo; then
+                    # Match if owner and repo name are exactly the same
+                    if [[ "$line_owner" == "$owner" && "$line_repo" == "$repo_name" ]]; then
+                        should_remove="true"
+                    fi
+                fi
+
+                if [[ "$should_remove" == "true" ]]; then
+                    found="true"
+                    # Don't add to tmp file (remove it)
+                else
+                    echo "$line" >> "$tmp_file"
+                fi
+            done < "$repos_file"
+
+            if [[ "$found" == "true" ]]; then
+                mv "$tmp_file" "$repos_file"
+                local file_name
+                file_name=$(basename "$repos_file" .txt)
+                log_success "Removed: $repo (from $file_name)"
+                found_in_any="true"
+                ((removed++))
             else
-                echo "$line" >> "$tmp_file"
+                rm -f "$tmp_file"
             fi
-        done < "$repos_file"
+        done
 
-        if [[ "$found" == "true" ]]; then
-            mv "$tmp_file" "$repos_file"
-            log_success "Removed: $repo"
-            ((removed++))
-        else
-            rm -f "$tmp_file"
-            log_warn "Not found in list: $repo"
+        if [[ "$found_in_any" != "true" ]]; then
+            log_warn "Not found in any list: $repo"
             ((not_found++))
         fi
     done

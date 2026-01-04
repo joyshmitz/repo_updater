@@ -194,6 +194,7 @@ FETCH_REMOTES="true"
 
 # Results tracking (NDJSON temp file)
 RESULTS_FILE=""
+RESULTS_LOCK_FILE=""
 
 # Resume support
 RESUME="false"
@@ -253,6 +254,24 @@ mktemp_dir() {
     printf '%s\n' "$tmp"
 }
 
+# Expand a leading "~" (bash doesn't expand tildes in variables)
+# shellcheck disable=SC2088  # Tilde is used as literal pattern, not expansion
+expand_tilde() {
+    local path="$1"
+    if [[ "$path" == "~" ]]; then
+        printf '%s\n' "$HOME"
+    elif [[ "$path" == "~/"* ]]; then
+        printf '%s\n' "$HOME/${path:2}"
+    else
+        printf '%s\n' "$path"
+    fi
+}
+
+# Validation helpers
+is_positive_int() { [[ "${1:-}" =~ ^[0-9]+$ ]] && (( 10#${1:-0} > 0 )); }
+is_boolean() { [[ "${1:-}" == "true" || "${1:-}" == "false" ]]; }
+is_valid_config_key() { [[ "${1:-}" =~ ^[A-Z][A-Z0-9_]*$ ]]; }
+
 # Escape a string for JSON (handles quotes, backslashes, control characters)
 json_escape() {
     local str="$1"
@@ -278,13 +297,28 @@ write_result() {
 
     if [[ -n "$RESULTS_FILE" ]]; then
         # Escape all string fields for JSON safety
-        local safe_repo safe_message safe_path
+        local safe_repo safe_message safe_path safe_action safe_status
         safe_repo=$(json_escape "$repo_name")
         safe_message=$(json_escape "$message")
         safe_path=$(json_escape "$local_path")
-        printf '{"repo":"%s","path":"%s","action":"%s","status":"%s","duration":%s,"message":"%s","timestamp":"%s"}\n' \
-            "$safe_repo" "$safe_path" "$action" "$status" "${duration:-0}" "$safe_message" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            >> "$RESULTS_FILE"
+        safe_action=$(json_escape "$action")
+        safe_status=$(json_escape "$status")
+
+        # Validate duration is numeric
+        local duration_num="${duration:-0}"
+        [[ "$duration_num" =~ ^[0-9]+$ ]] || duration_num=0
+
+        local ts line
+        ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        printf -v line '{"repo":"%s","path":"%s","action":"%s","status":"%s","duration":%s,"message":"%s","timestamp":"%s"}\n' \
+            "$safe_repo" "$safe_path" "$safe_action" "$safe_status" "$duration_num" "$safe_message" "$ts"
+
+        # In parallel mode multiple processes append concurrently; lock if flock is available
+        if [[ -n "${RESULTS_LOCK_FILE:-}" ]] && command -v flock &>/dev/null; then
+            { flock -x 200; printf '%s' "$line" >> "$RESULTS_FILE"; } 200>"$RESULTS_LOCK_FILE"
+        else
+            printf '%s' "$line" >> "$RESULTS_FILE"
+        fi
     fi
 }
 
@@ -763,9 +797,10 @@ _is_safe_path_segment() {
     [[ "$segment" =~ ^\.+$ ]] && return 1
     # Reject leading dash (could be confused with git options)
     [[ "$segment" == -* ]] && return 1
-    # Reject slashes (path traversal via subdirectories)
-    [[ "$segment" == */* ]] && return 1
-    [[ "$segment" == *\\* ]] && return 1
+    # Reject path separators (path traversal via subdirectories)
+    [[ "$segment" == */* || "$segment" == *\\* ]] && return 1
+    # Reject control characters (security: prevent terminal escape sequences)
+    [[ "$segment" =~ [[:cntrl:]] ]] && return 1
     return 0
 }
 
@@ -785,17 +820,23 @@ parse_repo_url() {
 
     local matched="false"
 
-    # SSH format: git@host:owner/repo
-    if [[ "$url" =~ ^git@([^:]+):([^/]+)/(.+)$ ]]; then
+    # SSH scp-like format: git@host:owner/repo (repo must not contain /)
+    if [[ "$url" =~ ^git@([^:]+):([^/]+)/([^/]+)$ ]]; then
         _host="${BASH_REMATCH[1]}"
         _owner="${BASH_REMATCH[2]}"
         _repo="${BASH_REMATCH[3]}"
         matched="true"
-    # HTTPS format: https://host/owner/repo
-    elif [[ "$url" =~ ^https?://([^/]+)/([^/]+)/([^/]+)$ ]]; then
-        _host="${BASH_REMATCH[1]}"
-        _owner="${BASH_REMATCH[2]}"
-        _repo="${BASH_REMATCH[3]}"
+    # SSH URL format: ssh://git@host/owner/repo (optional user part)
+    elif [[ "$url" =~ ^ssh://([^@/]+@)?([^/]+)/([^/]+)/([^/]+)$ ]]; then
+        _host="${BASH_REMATCH[2]}"
+        _owner="${BASH_REMATCH[3]}"
+        _repo="${BASH_REMATCH[4]}"
+        matched="true"
+    # HTTPS format: https://host/owner/repo (optional user@ for auth)
+    elif [[ "$url" =~ ^https?://([^@/]+@)?([^/]+)/([^/]+)/([^/]+)$ ]]; then
+        _host="${BASH_REMATCH[2]}"
+        _owner="${BASH_REMATCH[3]}"
+        _repo="${BASH_REMATCH[4]}"
         matched="true"
     # Host/owner/repo format (no protocol): github.com/owner/repo
     elif [[ "$url" =~ ^([^/]+)/([^/]+)/([^/]+)$ ]]; then
@@ -813,6 +854,8 @@ parse_repo_url() {
 
     # Validate parsed components for path safety
     if [[ "$matched" == "true" ]]; then
+        # Strip optional :port from host (avoid filesystem-unfriendly ':' in full layout)
+        _host="${_host%%:*}"
         if ! _is_safe_path_segment "$_owner" || ! _is_safe_path_segment "$_repo"; then
             return 1
         fi
@@ -1146,6 +1189,8 @@ get_remote_url() {
 }
 
 # Check if local repo's remote matches expected URL
+# Returns 0 (true) if there IS a mismatch or missing remote
+# Returns 1 (false) if remotes match correctly
 check_remote_mismatch() {
     local repo_path="$1"
     local expected_url="$2"
@@ -1153,13 +1198,19 @@ check_remote_mismatch() {
     local actual_url
     actual_url=$(get_remote_url "$repo_path")
     if [[ -z "$actual_url" ]]; then
-        return 1  # No remote
+        return 0  # No remote = treat as mismatch
     fi
 
     # Normalize both URLs for comparison
     local expected_normalized actual_normalized
-    expected_normalized=$(normalize_url "$expected_url")
-    actual_normalized=$(normalize_url "$actual_url")
+    if ! expected_normalized=$(normalize_url "$expected_url"); then
+        log_verbose "Could not normalize expected URL: $expected_url"
+        return 0  # Can't normalize = treat as mismatch
+    fi
+    if ! actual_normalized=$(normalize_url "$actual_url"); then
+        log_verbose "Could not normalize actual URL: $actual_url"
+        return 0  # Can't normalize = treat as mismatch
+    fi
 
     [[ "$expected_normalized" != "$actual_normalized" ]]
 }
@@ -1195,6 +1246,13 @@ do_clone() {
         log_info "[DRY RUN] Would clone: $url -> $target_dir$branch_info"
         write_result "$repo_name" "clone" "dry_run" "0" "" "$target_dir"
         return 0
+    fi
+
+    # Check for gh (required for cloning)
+    if ! command -v gh &>/dev/null; then
+        log_error "Cannot clone: gh is not installed"
+        write_result "$repo_name" "clone" "dep_error" "0" "gh not installed" "$target_dir"
+        return 3
     fi
 
     local clone_target
@@ -1855,10 +1913,10 @@ parse_args() {
 # Returns: space-separated key=value pairs for counts
 # Works without jq by using grep/sed fallback
 aggregate_results() {
-    local cloned=0 updated=0 current=0 failed=0 conflicts=0 skipped=0
+    local cloned=0 updated=0 current=0 failed=0 conflicts=0 skipped=0 system_errors=0
 
     if [[ ! -f "$RESULTS_FILE" ]] || [[ ! -s "$RESULTS_FILE" ]]; then
-        echo "CLONED=0 UPDATED=0 CURRENT=0 FAILED=0 CONFLICTS=0 SKIPPED=0"
+        echo "CLONED=0 UPDATED=0 CURRENT=0 SKIPPED=0 FAILED=0 CONFLICTS=0 SYSTEM_ERRORS=0"
         return
     fi
 
@@ -1877,26 +1935,28 @@ aggregate_results() {
             ok)          ((cloned++)) ;;
             updated)     ((updated++)) ;;
             current)     ((current++)) ;;
+            skipped|dry_run) ((skipped++)) ;;
+            dep_error|auth_error) ((system_errors++)) ;;
             failed|timeout)  ((failed++)) ;;
-            diverged|dirty|conflict|mismatch|not_git) ((conflicts++)) ;;
-            skipped)     ((skipped++)) ;;
+            diverged|dirty|conflict|mismatch|not_git|branch_error|no_remote|no_upstream|invalid) ((conflicts++)) ;;
             *)           ((skipped++)) ;;
         esac
     done < "$RESULTS_FILE"
 
-    echo "CLONED=$cloned UPDATED=$updated CURRENT=$current FAILED=$failed CONFLICTS=$conflicts SKIPPED=$skipped"
+    echo "CLONED=$cloned UPDATED=$updated CURRENT=$current SKIPPED=$skipped FAILED=$failed CONFLICTS=$conflicts SYSTEM_ERRORS=$system_errors"
 }
 
 # Print a beautiful summary box with gum or ANSI fallback
-# Args: $1=cloned $2=updated $3=current $4=conflicts $5=failed $6=duration_seconds
+# Args: $1=cloned $2=updated $3=current $4=skipped $5=conflicts $6=failed $7=duration_seconds
 print_summary() {
     local cloned="${1:-0}"
     local updated="${2:-0}"
     local current="${3:-0}"
-    local conflicts="${4:-0}"
-    local failed="${5:-0}"
-    local duration="${6:-0}"
-    local total=$((cloned + updated + current + conflicts + failed))
+    local skipped="${4:-0}"
+    local conflicts="${5:-0}"
+    local failed="${6:-0}"
+    local duration="${7:-0}"
+    local total=$((cloned + updated + current + skipped + conflicts + failed))
 
     # Format duration
     local duration_str
@@ -1917,6 +1977,7 @@ print_summary() {
         [[ $cloned -gt 0 ]] && summary_text+="  ✅ Cloned:     $cloned repos\n"
         [[ $updated -gt 0 ]] && summary_text+="  ✅ Updated:    $updated repos\n"
         [[ $current -gt 0 ]] && summary_text+="  ⏭️  Current:    $current repos (already up to date)\n"
+        [[ $skipped -gt 0 ]] && summary_text+="  ⏭️  Skipped:    $skipped repos\n"
         [[ $conflicts -gt 0 ]] && summary_text+="  ⚠️  Conflicts:  $conflicts repos (need attention)\n"
         [[ $failed -gt 0 ]] && summary_text+="  ❌ Failed:     $failed repos\n"
         summary_text+="─────────────────────────────────────────\n"
@@ -1932,6 +1993,7 @@ print_summary() {
         [[ $cloned -gt 0 ]] && echo -e "${BOLD}│${RESET}  ${GREEN}✅${RESET} Cloned:     $cloned repos                                   ${BOLD}│${RESET}" >&2
         [[ $updated -gt 0 ]] && echo -e "${BOLD}│${RESET}  ${GREEN}✅${RESET} Updated:    $updated repos                                   ${BOLD}│${RESET}" >&2
         [[ $current -gt 0 ]] && echo -e "${BOLD}│${RESET}  ⏭️  Current:    $current repos (already up to date)           ${BOLD}│${RESET}" >&2
+        [[ $skipped -gt 0 ]] && echo -e "${BOLD}│${RESET}  ⏭️  Skipped:    $skipped repos                                   ${BOLD}│${RESET}" >&2
         [[ $conflicts -gt 0 ]] && echo -e "${BOLD}│${RESET}  ${YELLOW}⚠️${RESET}  Conflicts:  $conflicts repos (need attention)              ${BOLD}│${RESET}" >&2
         [[ $failed -gt 0 ]] && echo -e "${BOLD}│${RESET}  ${RED}❌${RESET} Failed:     $failed repos                                   ${BOLD}│${RESET}" >&2
         echo -e "${BOLD}├─────────────────────────────────────────────────────────────┤${RESET}" >&2
@@ -2082,10 +2144,11 @@ generate_json_report() {
     local cloned="${1:-0}"
     local updated="${2:-0}"
     local current="${3:-0}"
-    local conflicts="${4:-0}"
-    local failed="${5:-0}"
-    local duration="${6:-0}"
-    local total=$((cloned + updated + current + conflicts + failed))
+    local skipped="${4:-0}"
+    local conflicts="${5:-0}"
+    local failed="${6:-0}"
+    local duration="${7:-0}"
+    local total=$((cloned + updated + current + skipped + conflicts + failed))
 
     local timestamp
     timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -2139,6 +2202,7 @@ generate_json_report() {
     "cloned": $cloned,
     "updated": $updated,
     "current": $current,
+    "skipped": $skipped,
     "conflicts": $conflicts,
     "failed": $failed
   },
@@ -2148,13 +2212,16 @@ EOF
 }
 
 # Compute appropriate exit code based on results
-# Args: $1=failed $2=conflicts
-# Returns: exit code (0, 1, or 2)
+# Args: $1=failed $2=conflicts $3=system_errors
+# Returns: exit code (0, 1, 2, or 3)
 compute_exit_code() {
     local failed="${1:-0}"
     local conflicts="${2:-0}"
+    local system_errors="${3:-0}"
 
-    if [[ "$failed" -gt 0 ]]; then
+    if [[ "$system_errors" -gt 0 ]]; then
+        return 3  # Dependency/system error (git/gh missing, etc.)
+    elif [[ "$failed" -gt 0 ]]; then
         return 1  # Partial failure (network, auth, etc.)
     elif [[ "$conflicts" -gt 0 ]]; then
         return 2  # Conflicts exist (need manual resolution)
@@ -2168,6 +2235,12 @@ compute_exit_code() {
 #==============================================================================
 
 cmd_sync() {
+    # Check for required dependencies
+    if ! command -v git &>/dev/null; then
+        log_error "git is not installed"
+        exit 3
+    fi
+
     # Track start time for duration reporting
     local start_time
     start_time=$(date +%s)
@@ -2484,22 +2557,22 @@ cmd_sync() {
     end_time=$(date +%s)
     duration=$((end_time - start_time))
 
-    # Use current (skipped) count for display
-    local current_count=$skipped
+    # Get aggregated counts from results file
+    eval "$(aggregate_results)"
 
     # Print summary using the new reporting functions
-    print_summary "$cloned" "$updated" "$current_count" "$conflicts" "$failed" "$duration"
+    print_summary "$CLONED" "$UPDATED" "$CURRENT" "$SKIPPED" "$CONFLICTS" "$FAILED" "$duration"
 
     # Print conflict resolution help if there are issues
     print_conflict_help
 
     # Output JSON report if --json flag is set
     if [[ "$JSON_OUTPUT" == "true" ]]; then
-        generate_json_report "$cloned" "$updated" "$current_count" "$conflicts" "$failed" "$duration"
+        generate_json_report "$CLONED" "$UPDATED" "$CURRENT" "$SKIPPED" "$CONFLICTS" "$FAILED" "$duration"
     fi
 
     # Compute and use appropriate exit code
-    compute_exit_code "$failed" "$conflicts"
+    compute_exit_code "$FAILED" "$CONFLICTS" "$SYSTEM_ERRORS"
     exit $?
 }
 
@@ -3685,6 +3758,7 @@ main() {
 
     # Create results file for this run
     RESULTS_FILE=$(mktemp_file) || { log_error "Failed to create temp file"; exit 3; }
+    RESULTS_LOCK_FILE="${RESULTS_FILE}.lock"
 
     # Dispatch to command
     case "$COMMAND" in

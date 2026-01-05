@@ -120,8 +120,14 @@ ru sync
 - [AI-Assisted Code Review](#-ai-assisted-code-review)
   - [Priority Scoring Algorithm](#priority-scoring-algorithm)
   - [Session Drivers](#session-drivers)
+  - [Claude Code Integration](#claude-code-integration)
   - [Git Worktree Isolation](#git-worktree-isolation)
+  - [GitHub Actions Execution](#github-actions-execution)
   - [Review Policies](#review-policies)
+  - [GraphQL Batch Querying](#graphql-batch-querying)
+  - [Rate-Limit Governor](#rate-limit-governor)
+  - [Quality Gates](#quality-gates)
+  - [Session Health Monitoring](#session-health-monitoring)
 - [Exit Codes](#-exit-codes)
 - [Architecture](#-architecture)
   - [NDJSON Results Logging](#ndjson-results-logging)
@@ -266,6 +272,18 @@ curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/repo_updater/mai
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/repo_updater/main/install.sh?ru_cb=$(date +%s).$$" | bash
 ```
+
+**How cache-busting works:**
+
+GitHub's raw content is served through a CDN that caches aggressively. The `?ru_cb=...` query parameter ensures fresh content:
+
+| Technique | Cache Bypass |
+|-----------|-------------|
+| `$(date +%s)` | Unix timestamp (changes every second) |
+| `$(date +%s).$$` | Timestamp + PID (unique per invocation) |
+| `RU_CACHE_BUST_TOKEN=xyz` | Custom token override |
+
+The installer also self-refreshes: when piped from curl, it detects if a newer version is available and re-executes with the latest code.
 
 <details>
 <summary><strong>Manual installation</strong></summary>
@@ -1189,6 +1207,56 @@ ru review --mode=ntm --plan
 ru review -j 4 --plan
 ```
 
+### Claude Code Integration
+
+ru orchestrates AI review sessions using Claude Code with stream-json output parsing:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    Claude Code Session                           │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+                    ┌─────────────────┐
+                    │  stream-json    │
+                    │  NDJSON output  │
+                    └────────┬────────┘
+                             │
+         ┌───────────────────┼───────────────────┐
+         ▼                   ▼                   ▼
+   ┌──────────┐       ┌──────────┐       ┌──────────┐
+   │  system  │       │ assistant│       │  result  │
+   │  events  │       │  events  │       │  events  │
+   └──────────┘       └──────────┘       └──────────┘
+```
+
+**Event types parsed:**
+
+| Event | Data Extracted |
+|-------|----------------|
+| `system.init` | Session ID, available tools, working directory |
+| `assistant` | Tool uses, text responses, thinking |
+| `result` | Status, duration, cost (USD) |
+
+**Interactive question detection:**
+
+When Claude Code uses `AskUserQuestion`, ru detects and surfaces these for human input:
+
+```bash
+# Session asks: "Should I refactor this function?"
+# ru detects and shows:
+#   [Session owner/repo] Question pending: "Should I refactor this function?"
+#   Options: 1) Yes  2) No  3) Skip
+```
+
+**Cost tracking:**
+
+Each session reports cost, enabling budget enforcement:
+
+```json
+{"type":"result","status":"success","duration_ms":45000,"cost_usd":0.0234}
+```
+
 ### Git Worktree Isolation
 
 Each review session operates in an isolated git worktree, ensuring:
@@ -1253,12 +1321,93 @@ View statistics on past reviews:
 ru review --analytics
 ```
 
+**Metrics tracked:**
+
+```
+~/.local/state/ru/metrics/
+├── 2025-01.json              # Monthly aggregates
+├── 2025-02.json
+└── decisions.jsonl           # Per-decision audit log
+```
+
+**Monthly metrics:**
+
+| Metric | Description |
+|--------|-------------|
+| `reviews.total` | Total review sessions started |
+| `reviews.repos_reviewed` | Unique repositories reviewed |
+| `reviews.issues_processed` | Issues examined by AI |
+| `reviews.issues_resolved` | Issues closed or fixed |
+| `reviews.questions_asked` | AI questions to human |
+| `reviews.questions_answered` | Human responses |
+| `timing.total_duration_minutes` | Cumulative review time |
+| `timing.avg_session_minutes` | Average session length |
+| `outcomes.changes_applied` | Commits made |
+| `outcomes.changes_rejected` | Changes discarded |
+
+**Decision logging:**
+
+Every significant action is logged to `decisions.jsonl` for auditability:
+
+```json
+{"timestamp":"2025-01-05T14:30:00Z","repo":"owner/repo","issue":42,"action":"close","reason":"Fixed by commit abc123","actor":"ai"}
+{"timestamp":"2025-01-05T14:31:00Z","repo":"owner/repo","issue":43,"action":"label","label":"wontfix","actor":"human"}
+```
+
+**Analytics dashboard:**
+
+```bash
+ru review --analytics
+```
+
 Shows:
 - Total reviews completed
 - Average resolution time
 - Most active repositories
 - Issue type distribution
 - Review velocity trends
+- Success/rejection ratios
+
+### GitHub Actions Execution
+
+After review sessions complete, ru can execute planned GitHub actions from the review plan:
+
+```bash
+# Actions are proposed during --plan, executed during --apply
+ru review --apply
+```
+
+**Supported actions:**
+
+| Action | Command | Description |
+|--------|---------|-------------|
+| `comment` | `gh issue comment` | Add comment to issue/PR |
+| `close` | `gh issue close` | Close an issue |
+| `label` | `gh issue edit --add-label` | Add labels to issue |
+
+**Idempotent execution:**
+
+Actions are logged and deduplicated to prevent repeated execution:
+
+```
+~/.local/state/ru/review/gh_actions.jsonl
+```
+
+```json
+{"timestamp":"2025-01-05T14:30:00Z","repo":"owner/repo","target":"issue/42","action":"close","status":"success"}
+{"timestamp":"2025-01-05T14:30:01Z","repo":"owner/repo","target":"issue/43","action":"comment","status":"success"}
+```
+
+If a session is restarted, already-executed actions are skipped automatically.
+
+**Action parsing:**
+
+Actions are extracted from review plan files with canonicalization:
+
+```
+owner/repo#42    → repo: owner/repo, type: issue, number: 42
+owner/repo/pull/5 → repo: owner/repo, type: pr, number: 5
+```
 
 ### Review Policies
 
@@ -1284,6 +1433,155 @@ Configure review behavior with policy files:
 | `REVIEW_REQUIRE_APPROVAL` | `true` | Require explicit approval |
 | `REVIEW_SKIP_PRS` | `false` | Skip PRs (issues only) |
 | `REVIEW_DEEP_MODE` | `false` | Enable deep analysis |
+
+### GraphQL Batch Querying
+
+ru uses efficient GraphQL alias batching to minimize API calls when discovering work items across many repositories:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                   GraphQL Batch Query                            │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+         ┌────────────────────┼────────────────────┐
+         ▼                    ▼                    ▼
+   ┌──────────┐         ┌──────────┐         ┌──────────┐
+   │  repo0:  │         │  repo1:  │         │  repo24: │
+   │  issues  │   ...   │  issues  │   ...   │  issues  │
+   │  + PRs   │         │  + PRs   │         │  + PRs   │
+   └──────────┘         └──────────┘         └──────────┘
+         │                    │                    │
+         └────────────────────┼────────────────────┘
+                              ▼
+                    ┌─────────────────┐
+                    │  Single API     │
+                    │  Response       │
+                    └─────────────────┘
+```
+
+**How it works:**
+
+1. **Alias batching** — Up to 25 repositories per GraphQL query using named aliases (`repo0`, `repo1`, ...)
+2. **Parallel field fetching** — Issues, PRs, and labels retrieved in one request per batch
+3. **Automatic chunking** — Large repo lists split into optimal batch sizes
+4. **Retry on failure** — Failed batches retried with exponential backoff
+
+**Efficiency comparison:**
+
+| Approach | 100 Repos | API Calls |
+|----------|-----------|-----------|
+| Individual REST | 100 repos × 2 (issues + PRs) | 200 calls |
+| GraphQL batched | 100 repos ÷ 25 per batch | 4 calls |
+
+### Rate-Limit Governor
+
+ru includes an adaptive parallelism governor that adjusts concurrency based on GitHub API rate limits and error patterns:
+
+```bash
+# The governor tracks:
+#   - GitHub API remaining quota
+#   - Model rate limit (429) responses
+#   - Error frequency within sliding window
+#   - Circuit breaker state
+```
+
+**Adaptive behavior:**
+
+| Condition | Action |
+|-----------|--------|
+| GitHub remaining < 100 | Reduce parallelism to 1 |
+| GitHub remaining < 500 | Reduce parallelism by 50% |
+| Model 429 detected | Pause new sessions for 60s |
+| Error rate > 50% (5min window) | Open circuit breaker |
+| Circuit open > 2 minutes + no errors | Close circuit breaker |
+
+**Circuit breaker pattern:**
+
+```
+Normal Operation → Errors Spike → Circuit OPEN → Cool-down → Half-Open → Test → CLOSED
+                       ↑                              │
+                       └──────── More Errors ─────────┘
+```
+
+The governor runs as a background monitor during review sessions, checking rate limits every 30 seconds and adjusting `REVIEW_PARALLEL` dynamically.
+
+### Quality Gates
+
+Before applying changes, ru runs automated quality gates to catch issues early:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                      Quality Gates                               │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+         ┌────────────────────┼────────────────────┐
+         ▼                    ▼                    ▼
+   ┌──────────┐         ┌──────────┐         ┌──────────┐
+   │   Test   │         │   Lint   │         │  Secret  │
+   │   Gate   │         │   Gate   │         │   Scan   │
+   └──────────┘         └──────────┘         └──────────┘
+         │                    │                    │
+         ▼                    ▼                    ▼
+   ┌──────────┐         ┌──────────┐         ┌──────────┐
+   │  Auto-   │         │  Auto-   │         │  Pattern │
+   │  detect  │         │  detect  │         │  Match   │
+   └──────────┘         └──────────┘         └──────────┘
+```
+
+**Auto-detection by project type:**
+
+| Project Type | Test Command | Lint Command |
+|--------------|--------------|--------------|
+| npm/yarn | `npm test` / `yarn test` | `npm run lint` / `eslint` |
+| Cargo (Rust) | `cargo test` | `cargo clippy` |
+| Go | `go test ./...` | `golangci-lint run` |
+| Python | `pytest` / `python -m pytest` | `ruff check` / `flake8` |
+| Makefile | `make test` | `make lint` |
+| Shell scripts | (none) | `shellcheck *.sh` |
+
+**Secret scanning patterns:**
+
+The secret scanner checks for accidentally committed credentials:
+- API keys and tokens (`sk-`, `ghp_`, `xox`, `AKIA`)
+- Private keys (`BEGIN RSA PRIVATE KEY`, `BEGIN OPENSSH PRIVATE KEY`)
+- Connection strings and passwords
+- Cloud provider credentials
+
+```bash
+# Run quality gates on a specific directory
+ru review --apply  # Gates run automatically before pushing
+
+# Skip gates (not recommended)
+REVIEW_LINT_REQUIRED=false REVIEW_SECRET_SCAN=false ru review --apply
+```
+
+### Session Health Monitoring
+
+ru monitors review sessions for external prompts and blocking conditions:
+
+**Detected wait reasons:**
+
+| Pattern | Risk Level | Description |
+|---------|------------|-------------|
+| `Password:` | High | Credential prompt |
+| `Enter passphrase` | High | SSH key passphrase |
+| `Enter OTP` | High | Two-factor authentication |
+| `CONFLICT.*Merge` | Medium | Git merge conflict |
+| `(yes/no)` | Medium | Host key verification |
+| `Please enter.*commit` | Low | Git commit message prompt |
+
+**Risk classification:**
+
+- **High risk** — Credentials, authentication, permissions (requires human intervention)
+- **Medium risk** — Merge conflicts, host verification (may need review)
+- **Low risk** — Informational prompts (often auto-resolvable)
+
+When a blocking prompt is detected, the session is marked as waiting and the reason is logged for review:
+
+```bash
+ru review --status
+# Shows: Session owner/repo waiting on "Password:" (high risk)
+```
 
 ---
 

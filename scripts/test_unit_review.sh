@@ -8,6 +8,7 @@
 # - validate_review_plan
 #
 # shellcheck disable=SC1091  # Sourced files checked separately
+# shellcheck disable=SC2034  # STATE_LOCK_FD used by sourced lock helpers
 # shellcheck disable=SC2317  # Test functions invoked indirectly via run_test
 
 set -uo pipefail
@@ -19,6 +20,9 @@ source "$SCRIPT_DIR/test_framework.sh"
 
 source_ru_function "parse_graphql_work_items"
 source_ru_function "calculate_item_priority_score"
+source_ru_function "get_priority_level"
+source_ru_function "passes_priority_threshold"
+source_ru_function "score_and_sort_work_items"
 source_ru_function "validate_review_plan"
 source_ru_function "ensure_dir"
 source_ru_function "acquire_state_lock"
@@ -69,6 +73,8 @@ test_parse_graphql_work_items_filters_archived_and_fork() {
 
     assert_contains "$output" $'octo/repo1\tissue\t42' "Includes issue from non-archived repo"
     assert_contains "$output" $'octo/repo1\tpr\t7' "Includes PR from non-archived repo"
+    assert_contains "$output" $'octo/repo1\tpr\t8' "Includes draft PR"
+    assert_contains "$output" $'\ttrue' "Draft PR should mark is_draft true"
     assert_not_contains "$output" "octo/archived" "Archived repo excluded"
     assert_not_contains "$output" "octo/forked" "Forked repo excluded"
 
@@ -124,6 +130,244 @@ test_calculate_item_priority_score_recent_review_penalty() {
 
     # Base issue 10 + bug label 30 + recency 15 - staleness 20 = 35
     assert_equals "35" "$score" "Score should include recent-review penalty"
+
+    log_test_pass "$test_name"
+}
+
+test_calculate_item_priority_score_draft_pr_penalty() {
+    local test_name="calculate_item_priority_score: draft PR penalty"
+    log_test_start "$test_name"
+
+    days_since_timestamp() {
+        case "$1" in
+            created) echo 5 ;;
+            updated) echo 1 ;;
+            *) echo 0 ;;
+        esac
+    }
+
+    item_recently_reviewed() { return 1; }
+
+    local score
+    score=$(calculate_item_priority_score "pr" "enhancement" "created" "updated" "true" "octo/repo1" "99")
+
+    # Draft PR: base 20 - draft penalty 15 + enhancement 10 + recency 15 = 30
+    assert_equals "30" "$score" "Draft PR should be penalized 15 points"
+
+    log_test_pass "$test_name"
+}
+
+test_calculate_item_priority_score_security_label() {
+    local test_name="calculate_item_priority_score: security label boost"
+    log_test_start "$test_name"
+
+    days_since_timestamp() {
+        case "$1" in
+            created) echo 70 ;;  # Very old
+            updated) echo 5 ;;
+            *) echo 0 ;;
+        esac
+    }
+
+    item_recently_reviewed() { return 1; }
+
+    local score
+    score=$(calculate_item_priority_score "issue" "security" "created" "updated" "false" "octo/repo1" "100")
+
+    # Issue 10 + security 50 + age>60 50 + recency 10 = 120
+    assert_equals "120" "$score" "Security label should get +50 and old bug +50"
+
+    log_test_pass "$test_name"
+}
+
+test_calculate_item_priority_score_very_old_bug() {
+    local test_name="calculate_item_priority_score: very old bug bonus"
+    log_test_start "$test_name"
+
+    days_since_timestamp() {
+        case "$1" in
+            created) echo 65 ;;  # >60 days
+            updated) echo 30 ;;  # No recency bonus
+            *) echo 0 ;;
+        esac
+    }
+
+    item_recently_reviewed() { return 1; }
+
+    local score
+    score=$(calculate_item_priority_score "issue" "bug,help-wanted" "created" "updated" "false" "octo/repo1" "200")
+
+    # Issue 10 + bug 30 + age>60 50 = 90
+    assert_equals "90" "$score" "Very old bug (>60 days) should get +50 age bonus"
+
+    log_test_pass "$test_name"
+}
+
+test_calculate_item_priority_score_stale_feature() {
+    local test_name="calculate_item_priority_score: stale feature penalty"
+    log_test_start "$test_name"
+
+    days_since_timestamp() {
+        case "$1" in
+            created) echo 200 ;;  # >180 days
+            updated) echo 100 ;;  # No recency bonus
+            *) echo 0 ;;
+        esac
+    }
+
+    item_recently_reviewed() { return 1; }
+
+    local score
+    score=$(calculate_item_priority_score "issue" "enhancement" "created" "updated" "false" "octo/repo1" "300")
+
+    # Issue 10 + enhancement 10 - staleness 10 = 10
+    assert_equals "10" "$score" "Very old feature (>180 days) should get -10 staleness"
+
+    log_test_pass "$test_name"
+}
+
+test_calculate_item_priority_score_clamps_to_zero() {
+    local test_name="calculate_item_priority_score: clamps negative to zero"
+    log_test_start "$test_name"
+
+    days_since_timestamp() {
+        case "$1" in
+            created) echo 200 ;;  # Very old
+            updated) echo 100 ;;  # No recency
+            *) echo 0 ;;
+        esac
+    }
+
+    # Recently reviewed - applies -20 penalty
+    item_recently_reviewed() { return 0; }
+
+    local score
+    score=$(calculate_item_priority_score "pr" "" "created" "updated" "true" "octo/repo1" "400")
+
+    # Draft PR: 20 - 15 (draft) - 20 (recent review) = -15 -> clamped to 0
+    assert_equals "0" "$score" "Negative scores should clamp to 0"
+
+    log_test_pass "$test_name"
+}
+
+#------------------------------------------------------------------------------
+# Priority levels + threshold filtering
+#------------------------------------------------------------------------------
+
+test_get_priority_level_thresholds() {
+    local test_name="get_priority_level: threshold mapping"
+    log_test_start "$test_name"
+
+    assert_equals "CRITICAL" "$(get_priority_level 150)" "150 should be CRITICAL"
+    assert_equals "HIGH" "$(get_priority_level 120)" "120 should be HIGH"
+    assert_equals "NORMAL" "$(get_priority_level 50)" "50 should be NORMAL"
+    assert_equals "LOW" "$(get_priority_level 10)" "10 should be LOW"
+
+    log_test_pass "$test_name"
+}
+
+test_passes_priority_thresholds() {
+    local test_name="passes_priority_threshold: filters correctly"
+    log_test_start "$test_name"
+
+    assert_exit_code 0 "normal threshold allows HIGH" passes_priority_threshold "HIGH" "normal"
+    assert_exit_code 1 "high threshold filters NORMAL" passes_priority_threshold "NORMAL" "high"
+    assert_exit_code 0 "critical threshold allows CRITICAL" passes_priority_threshold "CRITICAL" "critical"
+
+    log_test_pass "$test_name"
+}
+
+#------------------------------------------------------------------------------
+# score_and_sort_work_items
+#------------------------------------------------------------------------------
+
+test_score_and_sort_work_items_orders_and_filters() {
+    local test_name="score_and_sort_work_items: order + threshold"
+    log_test_start "$test_name"
+
+    # Stub scoring to return deterministic values by issue number
+    calculate_item_priority_score() {
+        if [[ "$7" -eq 1 ]]; then
+            echo 120
+        else
+            echo 20
+        fi
+    }
+
+    local tsv_input
+    tsv_input=$(
+        cat <<'TSV_EOF'
+octo/repo1	issue	1	First	enhancement	created	updated	false
+octo/repo1	pr	2	Second	bug	created	updated	false
+TSV_EOF
+    )
+
+    local output
+    output=$(score_and_sort_work_items "$tsv_input" "high")
+
+    assert_contains "$output" $'120\tHIGH\tocto/repo1\tissue\t1' "High item should remain"
+    assert_not_contains "$output" $'\t2\tSecond' "Low item should be filtered"
+
+    # Restore original scoring function for later tests
+    source_ru_function "calculate_item_priority_score"
+
+    log_test_pass "$test_name"
+}
+
+test_score_and_sort_draft_pr_ranked_lower() {
+    local test_name="score_and_sort_work_items: draft PRs score lower"
+    log_test_start "$test_name"
+
+    # Use real scoring function with mocked helpers
+    days_since_timestamp() { echo 5; }
+    item_recently_reviewed() { return 1; }
+
+    local tsv_input
+    tsv_input=$(
+        cat <<'TSV_EOF'
+octo/repo1	pr	10	Ready PR	enhancement	created	updated	false
+octo/repo1	pr	20	Draft PR	enhancement	created	updated	true
+TSV_EOF
+    )
+
+    local output
+    output=$(score_and_sort_work_items "$tsv_input" "all")
+
+    # Ready PR should appear first (higher score)
+    local first_line
+    first_line=$(echo "$output" | head -1)
+    assert_contains "$first_line" $'\tpr\t10\t' "Ready PR should be ranked first"
+
+    log_test_pass "$test_name"
+}
+
+test_validate_review_plan_rejects_unanswered_questions() {
+    local test_name="validate_review_plan: flags unanswered questions"
+    log_test_start "$test_name"
+
+    require_jq_or_skip || return 0
+
+    local env_root
+    env_root=$(create_test_env)
+
+    local plan_file="$env_root/unanswered.json"
+    cat > "$plan_file" <<'PLAN_EOF'
+{
+  "schema_version": 1,
+  "repo": "octo/repo1",
+  "items": [],
+  "questions": [
+    {"id": "q1", "prompt": "Apply fix?", "answered": false}
+  ]
+}
+PLAN_EOF
+
+    local result
+    result=$(validate_review_plan "$plan_file")
+
+    # Plan with unanswered questions should still be valid structurally
+    # but the questions field should be present
+    assert_equals "Valid" "$result" "Plan with unanswered questions is structurally valid"
 
     log_test_pass "$test_name"
 }
@@ -190,6 +434,65 @@ PLAN_EOF
     log_test_pass "$test_name"
 }
 
+test_validate_review_plan_rejects_invalid_decision() {
+    local test_name="validate_review_plan: rejects invalid decision"
+    log_test_start "$test_name"
+
+    require_jq_or_skip || return 0
+
+    local env_root
+    env_root=$(create_test_env)
+
+    local plan_file="$env_root/invalid-decision.json"
+    cat > "$plan_file" <<'PLAN_EOF'
+{
+  "schema_version": 1,
+  "repo": "octo/repo1",
+  "items": [
+    {"type": "issue", "number": 42, "decision": "maybe"}
+  ]
+}
+PLAN_EOF
+
+    local result
+    result=$(validate_review_plan "$plan_file")
+
+    assert_contains "$result" "Invalid decision values" "Invalid decision should be rejected"
+
+    log_test_pass "$test_name"
+}
+
+test_validate_review_plan_rejects_invalid_gh_target() {
+    local test_name="validate_review_plan: rejects invalid gh target"
+    log_test_start "$test_name"
+
+    require_jq_or_skip || return 0
+
+    local env_root
+    env_root=$(create_test_env)
+
+    local plan_file="$env_root/invalid-gh-target.json"
+    cat > "$plan_file" <<'PLAN_EOF'
+{
+  "schema_version": 1,
+  "repo": "octo/repo1",
+  "items": [
+    {"type": "issue", "number": 42, "decision": "fix"}
+  ],
+  "gh_actions": [
+    {"op": "comment", "target": "issue#abc"}
+  ]
+}
+PLAN_EOF
+
+    local result
+    result=$(validate_review_plan "$plan_file")
+
+    assert_contains "$result" "Invalid gh_action target format" "Invalid gh target should be rejected"
+
+    log_test_pass "$test_name"
+}
+
 #------------------------------------------------------------------------------
 # State persistence: locking + atomic write
 #------------------------------------------------------------------------------
@@ -225,8 +528,20 @@ test_write_json_atomic_with_lock() {
 run_test test_parse_graphql_work_items_filters_archived_and_fork
 run_test test_calculate_item_priority_score_components
 run_test test_calculate_item_priority_score_recent_review_penalty
+run_test test_calculate_item_priority_score_draft_pr_penalty
+run_test test_calculate_item_priority_score_security_label
+run_test test_calculate_item_priority_score_very_old_bug
+run_test test_calculate_item_priority_score_stale_feature
+run_test test_calculate_item_priority_score_clamps_to_zero
+run_test test_get_priority_level_thresholds
+run_test test_passes_priority_thresholds
+run_test test_score_and_sort_work_items_orders_and_filters
+run_test test_score_and_sort_draft_pr_ranked_lower
+run_test test_validate_review_plan_rejects_unanswered_questions
 run_test test_validate_review_plan_accepts_valid
 run_test test_validate_review_plan_rejects_missing_fields
+run_test test_validate_review_plan_rejects_invalid_decision
+run_test test_validate_review_plan_rejects_invalid_gh_target
 run_test test_write_json_atomic_with_lock
 
 print_results

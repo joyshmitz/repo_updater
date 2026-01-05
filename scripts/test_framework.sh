@@ -365,6 +365,308 @@ _tap_summary() {
 }
 
 #==============================================================================
+# JSON Logging (Machine-Readable Output)
+#==============================================================================
+# Structured JSON logging for automated test result aggregation.
+# Enable with TF_JSON_LOG_FILE or enable_json_output.
+# JSON lines format (one JSON object per line) for easy parsing with jq.
+
+# JSON log file path (set to enable JSON logging)
+TF_JSON_LOG_FILE="${TF_JSON_LOG_FILE:-}"
+
+# JSON mode toggle
+TF_JSON_MODE="${TF_JSON_MODE:-false}"
+
+# Current test context for JSON output
+TF_JSON_SUITE_NAME=""
+TF_JSON_TEST_CONTEXT="{}"
+
+# Enable JSON output mode
+# Usage: enable_json_output ["/path/to/log.jsonl"]
+enable_json_output() {
+    TF_JSON_MODE="true"
+    if [[ -n "${1:-}" ]]; then
+        TF_JSON_LOG_FILE="$1"
+        local log_dir
+        log_dir=$(dirname "$TF_JSON_LOG_FILE")
+        mkdir -p "$log_dir"
+    fi
+}
+
+# Disable JSON output mode
+disable_json_output() {
+    TF_JSON_MODE="false"
+}
+
+# Check if JSON mode is enabled
+is_json_mode() {
+    [[ "$TF_JSON_MODE" == "true" || -n "$TF_JSON_LOG_FILE" ]]
+}
+
+# Escape string for JSON (handles quotes, backslashes, newlines, tabs)
+# Usage: escaped=$(_json_escape "string with \"quotes\"")
+_json_escape() {
+    local s="$1"
+    # Escape backslashes first, then other special chars
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/\\n}"
+    s="${s//$'\r'/\\r}"
+    s="${s//$'\t'/\\t}"
+    printf '%s' "$s"
+}
+
+# Get microsecond-precision timestamp (falls back to millisecond/second)
+_json_timestamp_us() {
+    local ts
+    ts=$(date +%s%N 2>/dev/null)
+    if [[ "$ts" =~ %N$ || -z "$ts" ]]; then
+        # Fall back to seconds with fake microseconds
+        ts=$(date +%s)000000
+    fi
+    echo "$ts"
+}
+
+# Calculate elapsed time in microseconds
+# Usage: elapsed=$(_json_elapsed_us "$start_time_us")
+_json_elapsed_us() {
+    local start="$1"
+    local now
+    now=$(_json_timestamp_us)
+    if [[ ${#start} -gt 12 && ${#now} -gt 12 ]]; then
+        # Nanoseconds - convert to microseconds
+        echo $(( (now - start) / 1000 ))
+    else
+        # Seconds - convert to microseconds
+        echo $(( (now - start) * 1000000 ))
+    fi
+}
+
+# Get current git state for environment snapshot
+_json_git_state() {
+    local git_info="{}"
+    if command -v git &>/dev/null && git rev-parse --git-dir &>/dev/null 2>&1; then
+        local branch commit dirty
+        branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo "detached")
+        commit=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+        dirty="false"
+        if ! git diff --quiet 2>/dev/null; then
+            dirty="true"
+        fi
+        git_info="{\"branch\":\"$branch\",\"commit\":\"$commit\",\"dirty\":$dirty}"
+    fi
+    echo "$git_info"
+}
+
+# Get environment snapshot (selected env vars)
+_json_env_snapshot() {
+    local env_vars=""
+    local vars_to_capture=(
+        "RU_PROJECTS_DIR" "RU_CONFIG_DIR" "RU_LOG_DIR"
+        "XDG_CONFIG_HOME" "XDG_STATE_HOME" "XDG_CACHE_HOME"
+        "TF_LOG_LEVEL" "TF_TAP_MODE" "TF_JSON_MODE"
+    )
+    for var in "${vars_to_capture[@]}"; do
+        local val="${!var:-}"
+        if [[ -n "$val" ]]; then
+            val=$(_json_escape "$val")
+            if [[ -n "$env_vars" ]]; then
+                env_vars+=","
+            fi
+            env_vars+="\"$var\":\"$val\""
+        fi
+    done
+    echo "{$env_vars}"
+}
+
+# Get simple stack trace (function call chain)
+_json_stack_trace() {
+    local trace=""
+    local i
+    for ((i=2; i<${#FUNCNAME[@]}; i++)); do
+        local func="${FUNCNAME[$i]:-main}"
+        local line="${BASH_LINENO[$((i-1))]:-0}"
+        local src="${BASH_SOURCE[$i]:-unknown}"
+        src=$(basename "$src")
+        if [[ -n "$trace" ]]; then
+            trace+=","
+        fi
+        trace+="{\"function\":\"$func\",\"line\":$line,\"file\":\"$src\"}"
+    done
+    echo "[$trace]"
+}
+
+# Write a JSON log entry
+# Usage: _json_log "event_type" "key1" "val1" "key2" "val2" ...
+_json_log() {
+    if ! is_json_mode; then
+        return 0
+    fi
+
+    local event_type="$1"
+    shift
+
+    local timestamp
+    timestamp=$(_tf_timestamp)
+    local json="{\"timestamp\":\"$timestamp\",\"event\":\"$event_type\""
+
+    # Add test context if available
+    if [[ -n "$TF_CURRENT_TEST" ]]; then
+        json+=",\"test_name\":\"$TF_CURRENT_TEST\""
+    fi
+    if [[ -n "$TF_JSON_SUITE_NAME" ]]; then
+        json+=",\"suite_name\":\"$TF_JSON_SUITE_NAME\""
+    fi
+
+    # Add key-value pairs
+    while [[ $# -ge 2 ]]; do
+        local key="$1"
+        local val="$2"
+        shift 2
+
+        # Detect type: number, boolean, or string
+        if [[ "$val" =~ ^-?[0-9]+$ ]]; then
+            json+=",\"$key\":$val"
+        elif [[ "$val" == "true" || "$val" == "false" ]]; then
+            json+=",\"$key\":$val"
+        elif [[ "$val" == "null" ]]; then
+            json+=",\"$key\":null"
+        elif [[ "$val" =~ ^\{.*\}$ || "$val" =~ ^\[.*\]$ ]]; then
+            # Raw JSON object/array
+            json+=",\"$key\":$val"
+        else
+            val=$(_json_escape "$val")
+            json+=",\"$key\":\"$val\""
+        fi
+    done
+
+    json+="}"
+
+    # Write to JSON log file
+    if [[ -n "$TF_JSON_LOG_FILE" ]]; then
+        echo "$json" >> "$TF_JSON_LOG_FILE"
+    fi
+
+    # Also write to stdout if JSON mode is primary output
+    if [[ "$TF_JSON_MODE" == "true" ]]; then
+        echo "$json"
+    fi
+}
+
+# Log test suite start (JSON)
+# Usage: log_suite_json "Suite Name"
+log_suite_json() {
+    local suite_name="$1"
+    TF_JSON_SUITE_NAME="$suite_name"
+    local git_state env_snapshot
+    git_state=$(_json_git_state)
+    env_snapshot=$(_json_env_snapshot)
+    # Note: suite_name is also added by _json_log when TF_JSON_SUITE_NAME is set
+    _json_log "suite_start" \
+        "git" "$git_state" \
+        "environment" "$env_snapshot"
+}
+
+# Log test suite end (JSON)
+# Usage: log_suite_end_json
+log_suite_end_json() {
+    _json_log "suite_end" \
+        "tests_passed" "$TF_TESTS_PASSED" \
+        "tests_failed" "$TF_TESTS_FAILED" \
+        "tests_skipped" "$TF_TESTS_SKIPPED" \
+        "assertions_passed" "$TF_ASSERTIONS_PASSED" \
+        "assertions_failed" "$TF_ASSERTIONS_FAILED"
+    TF_JSON_SUITE_NAME=""
+}
+
+# Log test start (JSON)
+# Usage: log_test_start_json "test_name"
+log_test_start_json() {
+    local test_name="$1"
+    _json_log "test_start" \
+        "phase" "execute"
+}
+
+# Log test result (JSON)
+# Usage: log_test_result_json "pass|fail|skip" duration_ms ["reason"]
+log_test_result_json() {
+    local result="$1"
+    local duration_ms="$2"
+    local reason="${3:-}"
+
+    local extra_args=()
+    if [[ -n "$reason" ]]; then
+        extra_args+=("reason" "$reason")
+    fi
+    if [[ "$result" == "fail" ]]; then
+        extra_args+=("stack_trace" "$(_json_stack_trace)")
+    fi
+
+    _json_log "test_result" \
+        "result" "$result" \
+        "duration_ms" "$duration_ms" \
+        "${extra_args[@]}"
+}
+
+# Log assertion result (JSON)
+# Usage: log_assertion_json "pass|fail" "message" ["expected"] ["actual"]
+log_assertion_json() {
+    local result="$1"
+    local msg="$2"
+    local expected="${3:-}"
+    local actual="${4:-}"
+
+    local extra_args=("message" "$msg")
+    if [[ -n "$expected" ]]; then
+        extra_args+=("expected" "$expected")
+    fi
+    if [[ -n "$actual" ]]; then
+        extra_args+=("actual" "$actual")
+    fi
+    if [[ "$result" == "fail" ]]; then
+        extra_args+=("stack_trace" "$(_json_stack_trace)")
+    fi
+
+    _json_log "assertion" \
+        "result" "$result" \
+        "${extra_args[@]}"
+}
+
+# Set custom test context (arbitrary key-value pairs for current test)
+# Usage: set_test_context "key1" "val1" "key2" "val2"
+set_test_context() {
+    local ctx="{"
+    local first=true
+    while [[ $# -ge 2 ]]; do
+        local key="$1"
+        local val="$2"
+        shift 2
+        val=$(_json_escape "$val")
+        if [[ "$first" == "true" ]]; then
+            first=false
+        else
+            ctx+=","
+        fi
+        ctx+="\"$key\":\"$val\""
+    done
+    ctx+="}"
+    TF_JSON_TEST_CONTEXT="$ctx"
+}
+
+# Clear test context
+clear_test_context() {
+    TF_JSON_TEST_CONTEXT="{}"
+}
+
+# Log a custom event with context
+# Usage: log_event_json "event_name" "key1" "val1" ...
+log_event_json() {
+    local event_name="$1"
+    shift
+    _json_log "$event_name" "$@"
+}
+
+#==============================================================================
 # Core Assertion Functions
 #==============================================================================
 
@@ -374,6 +676,8 @@ _tf_pass() {
     local msg="$1"
     ((TF_ASSERTIONS_PASSED++))
     echo "${TF_GREEN}PASS${TF_RESET}: $msg"
+    # JSON logging
+    log_assertion_json "pass" "$msg"
 }
 
 # Convenience alias for _tf_pass (used in simple if/else test patterns)
@@ -402,6 +706,8 @@ _tf_fail() {
     if [[ -n "$actual" ]]; then
         echo "       Actual:   ${TF_YELLOW}$actual${TF_RESET}"
     fi
+    # JSON logging
+    log_assertion_json "fail" "$msg" "$expected" "$actual"
 }
 
 # Assert two values are equal
@@ -778,8 +1084,10 @@ reset_test_env() {
 run_test() {
     local test_name="$1"
     local failed_before=$TF_ASSERTIONS_FAILED
+    local test_start_us elapsed_us elapsed_ms
 
     TF_CURRENT_TEST="$test_name"
+    test_start_us=$(_json_timestamp_us)
 
     if ! is_tap_mode; then
         echo ""
@@ -787,8 +1095,13 @@ run_test() {
         echo "----------------------------------------"
     fi
 
+    # JSON: log test start
+    log_test_start_json "$test_name"
+
     # Run the test
     if "$test_name"; then
+        elapsed_us=$(_json_elapsed_us "$test_start_us")
+        elapsed_ms=$((elapsed_us / 1000))
         if [[ $TF_ASSERTIONS_FAILED -eq $failed_before ]]; then
             ((TF_TESTS_PASSED++))
             if is_tap_mode; then
@@ -796,6 +1109,8 @@ run_test() {
             else
                 echo "${TF_GREEN}TEST PASSED${TF_RESET}: $test_name"
             fi
+            # JSON: log test pass
+            log_test_result_json "pass" "$elapsed_ms"
         else
             ((TF_TESTS_FAILED++))
             if is_tap_mode; then
@@ -803,17 +1118,24 @@ run_test() {
             else
                 echo "${TF_RED}TEST FAILED${TF_RESET}: $test_name"
             fi
+            # JSON: log test fail
+            log_test_result_json "fail" "$elapsed_ms" "assertions failed"
         fi
     else
+        elapsed_us=$(_json_elapsed_us "$test_start_us")
+        elapsed_ms=$((elapsed_us / 1000))
         ((TF_TESTS_FAILED++))
         if is_tap_mode; then
             _tap_not_ok "$test_name" "non-zero exit"
         else
             echo "${TF_RED}TEST FAILED${TF_RESET}: $test_name (non-zero exit)"
         fi
+        # JSON: log test fail
+        log_test_result_json "fail" "$elapsed_ms" "non-zero exit"
     fi
 
     TF_CURRENT_TEST=""
+    clear_test_context
 }
 
 # Skip a test
@@ -936,3 +1258,10 @@ export -f enable_tap_output disable_tap_output is_tap_mode tap_plan tap_version 
 export -f _tap_ok _tap_not_ok _tap_skip _tap_todo _tap_summary
 export -f get_project_dir source_ru_function
 export -f create_mock_repo create_bare_repo
+# JSON logging exports
+export -f enable_json_output disable_json_output is_json_mode
+export -f _json_escape _json_timestamp_us _json_elapsed_us
+export -f _json_git_state _json_env_snapshot _json_stack_trace _json_log
+export -f log_suite_json log_suite_end_json
+export -f log_test_start_json log_test_result_json log_assertion_json
+export -f set_test_context clear_test_context log_event_json

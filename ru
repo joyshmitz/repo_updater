@@ -8585,7 +8585,7 @@ acquire_state_lock() {
     state_dir=$(get_review_state_dir)
     if ! command -v flock &>/dev/null; then
         if ! maybe_install_flock; then
-            log_error "flock is required to run ru review (for state locking)"
+            log_error "flock is required for state locking"
             print_flock_install_hints
             return 1
         fi

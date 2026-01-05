@@ -1538,10 +1538,9 @@ All checks passed!
 | `RU_PROJECTS_DIR` | Base directory for repos | `/data/projects` |
 | `RU_LAYOUT` | Path layout (flat/owner-repo/full) | `flat` |
 | `RU_PARALLEL` | Number of parallel workers | `1` |
-| `RU_AUTO_INSTALL_DEPS` | Auto-install optional deps (currently: `flock`) | unset |
+| `RU_AUTO_INSTALL_DEPS` | Auto-install optional deps when missing (currently: `flock`) | unset |
 | `RU_TIMEOUT` | Network timeout in seconds | `30` |
 | `RU_AUTOSTASH` | Auto-stash before pull | `false` |
-| `RU_AUTO_INSTALL_DEPS` | Auto-install optional deps when missing (currently: `flock`) | unset |
 | `RU_UPDATE_STRATEGY` | Pull strategy (ff-only/rebase/merge) | `ff-only` |
 | `RU_CONFIG_DIR` | Configuration directory | `~/.config/ru` |
 | `RU_LOG_DIR` | Log directory | `~/.local/state/ru/logs` |

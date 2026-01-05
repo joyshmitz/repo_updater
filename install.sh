@@ -36,7 +36,7 @@
 #
 #==============================================================================
 
-set -euo pipefail
+set -uo pipefail
 
 #==============================================================================
 # CONSTANTS
@@ -69,23 +69,23 @@ fi
 #==============================================================================
 
 log_info() {
-    echo -e "${BLUE}ℹ${RESET} $*" >&2
+    printf '%b\n' "${BLUE}ℹ${RESET} $*" >&2
 }
 
 log_success() {
-    echo -e "${GREEN}✓${RESET} $*" >&2
+    printf '%b\n' "${GREEN}✓${RESET} $*" >&2
 }
 
 log_warn() {
-    echo -e "${YELLOW}⚠${RESET} $*" >&2
+    printf '%b\n' "${YELLOW}⚠${RESET} $*" >&2
 }
 
 log_error() {
-    echo -e "${RED}✗${RESET} $*" >&2
+    printf '%b\n' "${RED}✗${RESET} $*" >&2
 }
 
 log_step() {
-    echo -e "${BLUE}→${RESET} $*" >&2
+    printf '%b\n' "${BLUE}→${RESET} $*" >&2
 }
 
 #==============================================================================
@@ -228,7 +228,10 @@ install_from_release() {
     local install_dir="$2"
     local temp_dir
 
-    temp_dir=$(mktemp -d)
+    if ! temp_dir=$(mktemp -d 2>/dev/null); then
+        log_error "Failed to create temp directory (mktemp)"
+        return 1
+    fi
     trap 'rm -rf "$temp_dir"' EXIT
 
     local release_base="https://github.com/$REPO_OWNER/$REPO_NAME/releases/download/v$version"
@@ -269,7 +272,10 @@ install_from_main() {
     local install_dir="$1"
     local temp_dir
 
-    temp_dir=$(mktemp -d)
+    if ! temp_dir=$(mktemp -d 2>/dev/null); then
+        log_error "Failed to create temp directory (mktemp)"
+        return 1
+    fi
     trap 'rm -rf "$temp_dir"' EXIT
 
     log_warn "Installing from main branch. This is NOT RECOMMENDED for production use."
@@ -298,20 +304,46 @@ install_script() {
     if [[ ! -d "$install_dir" ]]; then
         log_step "Creating directory: $install_dir"
         if [[ "$install_dir" == "/usr/local/bin" ]]; then
-            sudo mkdir -p "$install_dir"
+            if ! command_exists sudo; then
+                log_error "sudo is required to create $install_dir"
+                return 1
+            fi
+            if ! sudo mkdir -p "$install_dir"; then
+                log_error "Failed to create directory: $install_dir"
+                return 1
+            fi
         else
-            mkdir -p "$install_dir"
+            if ! mkdir -p "$install_dir"; then
+                log_error "Failed to create directory: $install_dir"
+                return 1
+            fi
         fi
     fi
 
     # Install with proper permissions
     log_step "Installing to $dest"
     if [[ "$install_dir" == "/usr/local/bin" ]]; then
-        sudo cp "$source" "$dest"
-        sudo chmod +x "$dest"
+        if ! command_exists sudo; then
+            log_error "sudo is required to install to $install_dir"
+            return 1
+        fi
+        if ! sudo cp "$source" "$dest"; then
+            log_error "Failed to install: $dest"
+            return 1
+        fi
+        if ! sudo chmod +x "$dest"; then
+            log_error "Failed to make executable: $dest"
+            return 1
+        fi
     else
-        cp "$source" "$dest"
-        chmod +x "$dest"
+        if ! cp "$source" "$dest"; then
+            log_error "Failed to install: $dest"
+            return 1
+        fi
+        if ! chmod +x "$dest"; then
+            log_error "Failed to make executable: $dest"
+            return 1
+        fi
     fi
 
     log_success "Installed ru to $dest"
@@ -322,6 +354,11 @@ add_to_path() {
     local dir="$1"
     local shell_config
     shell_config=$(get_shell_config)
+    local shell_config_dir
+    shell_config_dir=$(dirname "$shell_config")
+    if [[ -n "$shell_config_dir" && ! -d "$shell_config_dir" ]]; then
+        mkdir -p "$shell_config_dir" 2>/dev/null || true
+    fi
 
     # Check if already configured
     if grep -q "export PATH=.*$dir" "$shell_config" 2>/dev/null; then
@@ -333,9 +370,9 @@ add_to_path() {
 
     # Add to shell config
     {
-        echo ""
-        echo "# Added by ru installer"
-        echo "export PATH=\"$dir:\$PATH\""
+        printf '\n'
+        printf '%s\n' "# Added by ru installer"
+        printf '%s\n' "export PATH=\"$dir:\$PATH\""
     } >> "$shell_config"
 
     log_success "Added to $shell_config"
@@ -347,10 +384,10 @@ add_to_path() {
 #==============================================================================
 
 main() {
-    echo "" >&2
-    echo -e "${BOLD}ru Installer${RESET}" >&2
-    echo "────────────────────" >&2
-    echo "" >&2
+    printf '\n' >&2
+    printf '%b\n' "${BOLD}ru Installer${RESET}" >&2
+    printf '%s\n' "────────────────────" >&2
+    printf '\n' >&2
 
     # Determine install directory
     local install_dir
@@ -388,10 +425,10 @@ main() {
 
         # Check if we can prompt
         if [[ -t 0 ]]; then
-            echo "" >&2
+            printf '\n' >&2
             read -rp "Add $install_dir to PATH? [y/N] " response
-            case "${response,,}" in
-                y|yes)
+            case "$response" in
+                [yY]|[yY][eE][sS])
                     add_to_path "$install_dir"
                     ;;
                 *)
@@ -407,11 +444,11 @@ main() {
     fi
 
     # Verify installation
-    echo "" >&2
+    printf '\n' >&2
     local installed_path="$install_dir/$SCRIPT_NAME"
     if [[ -x "$installed_path" ]]; then
         log_success "Installation complete!"
-        echo "" >&2
+        printf '\n' >&2
 
         if in_path "$install_dir" || [[ -n "${RU_UNSAFE_MAIN:-}" ]]; then
             log_info "Get started with:"
@@ -424,7 +461,7 @@ main() {
             log_info "  $installed_path --help"
         fi
 
-        echo "" >&2
+        printf '\n' >&2
         log_info "Documentation: https://github.com/$REPO_OWNER/$REPO_NAME"
     else
         log_error "Installation may have failed. Check the output above."

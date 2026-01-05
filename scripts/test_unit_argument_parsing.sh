@@ -360,6 +360,40 @@ test_delete_option_passed_to_args() {
     assert_contains "${ARGS[*]}" "--delete" "--delete passed to ARGS"
 }
 
+test_review_auto_answer_option_passed_to_args() {
+    reset_globals
+    parse_args review --auto-answer=skip
+
+    assert_equals "review" "$COMMAND" "review sets COMMAND=review"
+    assert_contains "${ARGS[*]}" "--auto-answer=skip" "--auto-answer passed to ARGS for review"
+}
+
+test_review_invalidate_cache_option_passed_to_args() {
+    reset_globals
+    parse_args review --invalidate-cache=all
+
+    assert_equals "review" "$COMMAND" "review sets COMMAND=review"
+    assert_contains "${ARGS[*]}" "--invalidate-cache=all" "--invalidate-cache passed to ARGS for review"
+}
+
+test_review_auto_answer_value_form_passed_to_args() {
+    reset_globals
+    parse_args review --auto-answer skip
+
+    assert_equals "review" "$COMMAND" "review sets COMMAND=review"
+    assert_contains "${ARGS[*]}" "--auto-answer" "--auto-answer flag stored in ARGS"
+    assert_contains "${ARGS[*]}" "skip" "--auto-answer value stored in ARGS"
+}
+
+test_review_invalidate_cache_value_form_passed_to_args() {
+    reset_globals
+    parse_args review --invalidate-cache owner/repo
+
+    assert_equals "review" "$COMMAND" "review sets COMMAND=review"
+    assert_contains "${ARGS[*]}" "--invalidate-cache" "--invalidate-cache flag stored in ARGS"
+    assert_contains "${ARGS[*]}" "owner/repo" "--invalidate-cache value stored in ARGS"
+}
+
 #==============================================================================
 # Tests: Positional Arguments
 #==============================================================================

@@ -6623,15 +6623,22 @@ log_skipped_question() {
     ensure_dir "$(dirname "$log_file")"
 
     if command -v jq &>/dev/null; then
+        local question_json="$question_info"
+        if ! echo "$question_info" | jq empty >/dev/null 2>&1; then
+            question_json=$(jq -n --arg raw "$question_info" '{raw:$raw}')
+        fi
+
         jq -n \
             --arg run_id "${REVIEW_RUN_ID:-unknown}" \
             --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             --arg reason "$reason" \
-            --argjson question "$question_info" \
+            --argjson question "$question_json" \
             '{run_id:$run_id,timestamp:$timestamp,reason:$reason,question:$question}' >> "$log_file"
     else
-        printf '{"run_id":"%s","timestamp":"%s","reason":"%s","question":%s}\n' \
-            "${REVIEW_RUN_ID:-unknown}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$reason" "$question_info" >> "$log_file"
+        local escaped
+        escaped=$(json_escape "$question_info")
+        printf '{"run_id":"%s","timestamp":"%s","reason":"%s","question_raw":"%s"}\n' \
+            "${REVIEW_RUN_ID:-unknown}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$reason" "$escaped" >> "$log_file"
     fi
 }
 
@@ -6641,7 +6648,14 @@ handle_question_non_interactive() {
 
     local reason recommended
     reason=$(echo "$question_info" | jq -r '.reason // ""' 2>/dev/null || echo "")
-    recommended=$(echo "$question_info" | jq -r '.recommended // ""' 2>/dev/null || echo "")
+    recommended=$(echo "$question_info" | jq -r '.recommended // .context.questions[0].recommended // ""' 2>/dev/null || echo "")
+
+    # External prompts always require a human (credentials, conflicts, etc.)
+    if [[ "$reason" == "external_prompt" ]]; then
+        log_error "[non-interactive] External prompt requires human input; failing"
+        log_skipped_question "$question_info" "external_prompt"
+        return 3
+    fi
 
     case "$REVIEW_NON_INTERACTIVE_POLICY" in
         fail)
@@ -6665,6 +6679,11 @@ handle_question_non_interactive() {
             log_skipped_question "$question_info" "skip"
             driver_send_to_session "$session_id" "skip"
             return 0
+            ;;
+        *)
+            log_error "[non-interactive] Invalid policy: $REVIEW_NON_INTERACTIVE_POLICY"
+            log_skipped_question "$question_info" "fail"
+            return 3
             ;;
     esac
 }
@@ -7134,14 +7153,14 @@ prepare_repo_digest_for_worktree() {
             if [[ -n "$changes" ]]; then
                 files=$(git -C "$wt_path" diff --name-only "${last_commit}..${current_commit}" 2>/dev/null | head -20 || true)
                 {
-                    echo ""
-                    echo "## Changes Since Last Review"
-                    echo "```"
-                    echo "$changes"
-                    echo "```"
-                    echo ""
-                    echo "**Files Changed:**"
-                    echo "$files"
+                    printf '\n'
+                    printf '%s\n' '## Changes Since Last Review'
+                    printf '%s\n' '```'
+                    printf '%s\n' "$changes"
+                    printf '%s\n' '```'
+                    printf '\n'
+                    printf '%s\n' '**Files Changed:**'
+                    printf '%s\n' "$files"
                 } >> "$digest_file"
             fi
         fi

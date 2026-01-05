@@ -267,7 +267,7 @@ test_parse_gh_action_target_issue() {
         assert_equals "issue" "$target_type" "Type should be 'issue'"
         assert_equals "42" "$number" "Number should be 42"
     else
-        fail_test "Should successfully parse issue#42"
+        fail "Should successfully parse issue#42"
     fi
 
     log_test_pass "$test_name"
@@ -282,7 +282,7 @@ test_parse_gh_action_target_pr() {
         assert_equals "pr" "$target_type" "Type should be 'pr'"
         assert_equals "7" "$number" "Number should be 7"
     else
-        fail_test "Should successfully parse pr#7"
+        fail "Should successfully parse pr#7"
     fi
 
     log_test_pass "$test_name"
@@ -296,7 +296,7 @@ test_parse_gh_action_target_large_number() {
     if parse_gh_action_target "issue#12345" target_type number; then
         assert_equals "12345" "$number" "Should handle large numbers"
     else
-        fail_test "Should handle large issue numbers"
+        fail "Should handle large issue numbers"
     fi
 
     log_test_pass "$test_name"
@@ -308,7 +308,7 @@ test_parse_gh_action_target_invalid_format() {
 
     local target_type="" number=""
     if parse_gh_action_target "invalid" target_type number; then
-        fail_test "Should reject invalid format"
+        fail "Should reject invalid format"
     else
         pass "Invalid format correctly rejected"
     fi
@@ -322,7 +322,7 @@ test_parse_gh_action_target_invalid_type() {
 
     local target_type="" number=""
     if parse_gh_action_target "bug#42" target_type number; then
-        fail_test "Should reject invalid type (bug)"
+        fail "Should reject invalid type (bug)"
     else
         pass "Invalid type correctly rejected"
     fi
@@ -336,7 +336,7 @@ test_parse_gh_action_target_non_numeric() {
 
     local target_type="" number=""
     if parse_gh_action_target "issue#abc" target_type number; then
-        fail_test "Should reject non-numeric"
+        fail "Should reject non-numeric"
     else
         pass "Non-numeric correctly rejected"
     fi

@@ -363,3 +363,7 @@ run_test test_get_main_repo_path_from_worktree_multiple_worktrees
 
 # Print results
 print_results
+
+# Cleanup and exit
+cleanup_temp_dirs
+exit "$TF_TESTS_FAILED"

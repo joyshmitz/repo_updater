@@ -272,6 +272,91 @@ is_positive_int() { [[ "${1:-}" =~ ^[0-9]+$ ]] && (( 10#${1:-0} > 0 )); }
 is_boolean() { [[ "${1:-}" == "true" || "${1:-}" == "false" ]]; }
 is_valid_config_key() { [[ "${1:-}" =~ ^[A-Z][A-Z0-9_]*$ ]]; }
 
+# Retry a command with exponential backoff (+/-25% jitter).
+# Usage: retry_with_backoff [--capture=all|--capture=stdout] MAX_ATTEMPTS BASE_DELAY_SECONDS -- cmd arg...
+# - Logs retries to stderr (via log_warn), returns final exit code.
+# - Prints the command output to stdout (capture mode controls stderr handling).
+retry_with_backoff() {
+    local capture_mode="all"
+    while [[ "${1:-}" == --* ]]; do
+        case "${1:-}" in
+            --capture=all) capture_mode="all" ;;
+            --capture=stdout) capture_mode="stdout" ;;
+            --) shift; break ;;
+            *) log_error "retry_with_backoff: unknown option: ${1:-}"; return 4 ;;
+        esac
+        shift
+    done
+
+    if [[ $# -lt 3 ]]; then
+        log_error "retry_with_backoff: usage: retry_with_backoff [--capture=all|--capture=stdout] MAX_ATTEMPTS BASE_DELAY_SECONDS -- cmd arg..."
+        return 4
+    fi
+
+    local max_attempts="${1:-}"
+    local base_delay="${2:-}"
+    shift 2
+
+    [[ "${1:-}" == "--" ]] && shift
+
+    if ! is_positive_int "$max_attempts"; then
+        log_error "retry_with_backoff: MAX_ATTEMPTS must be a positive integer (got: ${max_attempts:-})"
+        return 4
+    fi
+    if [[ -z "${base_delay:-}" ]] || [[ ! "$base_delay" =~ ^[0-9]+$ ]]; then
+        log_error "retry_with_backoff: BASE_DELAY_SECONDS must be an integer >= 0 (got: ${base_delay:-})"
+        return 4
+    fi
+    if [[ $# -lt 1 ]]; then
+        log_error "retry_with_backoff: missing command"
+        return 4
+    fi
+
+    local attempt=1
+    local output=""
+    local exit_code=0
+
+    while (( attempt <= max_attempts )); do
+        if [[ "$capture_mode" == "stdout" ]]; then
+            if output=$("$@" 2>/dev/null); then
+                printf '%s' "$output"
+                return 0
+            fi
+            exit_code=$?
+        else
+            if output=$("$@" 2>&1); then
+                printf '%s' "$output"
+                return 0
+            fi
+            exit_code=$?
+        fi
+
+        if (( attempt >= max_attempts )); then
+            printf '%s' "$output"
+            return "$exit_code"
+        fi
+
+        local delay=$(( base_delay * (2 ** (attempt - 1)) ))
+        local max_jitter=$(( delay / 4 ))
+        local jitter=0
+        if (( max_jitter > 0 )); then
+            jitter=$(( (RANDOM % (2 * max_jitter + 1)) - max_jitter ))
+        fi
+
+        local sleep_for=$(( delay + jitter ))
+        (( sleep_for < 0 )) && sleep_for=0
+
+        local short_msg="${output%%$'\n'*}"
+        log_warn "Retry $attempt/${max_attempts} failed (exit $exit_code). Sleeping ${sleep_for}s. ${short_msg}"
+        sleep "$sleep_for"
+        ((attempt++))
+    done
+
+    # Unreachable, but keep explicit.
+    printf '%s' "$output"
+    return "$exit_code"
+}
+
 # Escape a string for JSON (handles quotes, backslashes, control characters)
 json_escape() {
     local str="$1"
@@ -5598,7 +5683,10 @@ update_github_rate_limit() {
     fi
 
     local rate_info
-    rate_info=$(gh api rate_limit 2>/dev/null) || return 0
+    if ! rate_info=$(retry_with_backoff --capture=stdout 3 1 -- gh api rate_limit); then
+        log_verbose "GitHub rate_limit query failed (ignored): ${rate_info}"
+        return 0
+    fi
 
     if command -v jq &>/dev/null && [[ -n "$rate_info" ]]; then
         local remaining reset_epoch
@@ -5619,7 +5707,8 @@ update_github_rate_limit() {
 # Sets: GOVERNOR_STATE[model_in_backoff], GOVERNOR_STATE[model_backoff_until]
 check_model_rate_limit() {
     local state_dir="${RU_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ru}"
-    local log_dir="$state_dir/logs/$(date +%Y-%m-%d)"
+    local log_dir
+    log_dir="$state_dir/logs/$(date +%Y-%m-%d)"
 
     if [[ ! -d "$log_dir" ]]; then
         return 0
@@ -5637,7 +5726,7 @@ check_model_rate_limit() {
             local mtime
             mtime=$(stat -c %Y "$log_file" 2>/dev/null || stat -f %m "$log_file" 2>/dev/null || echo 0)
             if [[ "$mtime" -gt "$five_min_ago" ]]; then
-                if grep -q -i "rate.limit\|429\|overloaded" "$log_file" 2>/dev/null; then
+                if grep -qiE 'rate[ .]limit|429|overloaded' "$log_file" 2>/dev/null; then
                     ((recent_429s++))
                 fi
             fi
@@ -7901,7 +7990,7 @@ gh_api_graphql_repo_batch() {
     q+=" }"
 
     # Execute query via gh CLI
-    gh api graphql -f query="$q" 2>/dev/null
+    retry_with_backoff --capture=stdout 3 1 -- gh api graphql -f query="$q"
 }
 
 # Parse GraphQL response into work items (TSV format)

@@ -3600,6 +3600,13 @@ cmd_list() {
 
 cmd_doctor() {
     local issues=0
+    local review_flag="auto"
+
+    for arg in "${ARGS[@]}"; do
+        case "$arg" in
+            --review) review_flag="true" ;;
+        esac
+    done
 
     log_info "System Check"
     echo "────────────────────────────────────────" >&2
@@ -3668,6 +3675,123 @@ cmd_doctor() {
         printf '%b\n' "${GREEN}[OK]${RESET} gum: $gum_version" >&2
     else
         printf '%b\n' "${DIM}[  ]${RESET} gum: not installed (optional, for prettier UI)" >&2
+    fi
+
+    local run_review_checks="false"
+    if [[ "$review_flag" == "true" ]]; then
+        run_review_checks="true"
+    else
+        local review_state_dir review_state_file review_policy_dir review_templates_dir
+        review_state_dir=$(get_review_state_dir)
+        review_state_file=$(get_review_state_file)
+        review_policy_dir=$(get_review_policy_dir)
+        review_templates_dir=$(get_review_templates_dir)
+
+        if [[ -f "$review_state_file" ]]; then
+            run_review_checks="true"
+        elif [[ -d "$review_state_dir" ]]; then
+            if compgen -G "$review_state_dir/*" >/dev/null; then
+                run_review_checks="true"
+            fi
+        fi
+
+        if [[ "$run_review_checks" != "true" ]]; then
+            if [[ -d "$review_policy_dir" || -d "$review_templates_dir" ]]; then
+                run_review_checks="true"
+            fi
+        fi
+    fi
+
+    if [[ "$run_review_checks" == "true" ]]; then
+        echo "" >&2
+        log_info "Review Prerequisites"
+        echo "────────────────────────────────────────" >&2
+
+        local review_issues=0
+
+        if command -v claude &>/dev/null; then
+            local claude_version claude_help
+            claude_version=$(claude --version 2>/dev/null | head -1 || echo "unknown")
+            printf '%b\n' "${GREEN}[OK]${RESET} claude: $claude_version" >&2
+            if claude_help=$(claude --help 2>&1); then
+                if echo "$claude_help" | grep -q "stream-json"; then
+                    printf '%b\n' "${GREEN}[OK]${RESET} claude: stream-json supported" >&2
+                else
+                    printf '%b\n' "${RED}[!!]${RESET} claude: stream-json not supported" >&2
+                    printf '%b\n' "${DIM}      Update: npm update -g @anthropic-ai/claude-code${RESET}" >&2
+                    ((review_issues++))
+                fi
+            else
+                printf '%b\n' "${YELLOW}[??]${RESET} claude: could not check stream-json support" >&2
+            fi
+        else
+            printf '%b\n' "${RED}[!!]${RESET} claude: not installed (required for review)" >&2
+            printf '%b\n' "${DIM}      Install: npm install -g @anthropic-ai/claude-code${RESET}" >&2
+            ((review_issues++))
+        fi
+
+        if command -v jq &>/dev/null; then
+            local jq_version
+            jq_version=$(jq --version 2>/dev/null | head -1 || echo "unknown")
+            printf '%b\n' "${GREEN}[OK]${RESET} jq: $jq_version" >&2
+        else
+            printf '%b\n' "${RED}[!!]${RESET} jq: not installed (required for review)" >&2
+            printf '%b\n' "${DIM}      Install: brew install jq OR sudo apt install jq${RESET}" >&2
+            ((review_issues++))
+        fi
+
+        if command -v tmux &>/dev/null; then
+            local tmux_version
+            tmux_version=$(tmux -V 2>/dev/null | head -1 || echo "unknown")
+            printf '%b\n' "${GREEN}[OK]${RESET} tmux: $tmux_version" >&2
+        else
+            printf '%b\n' "${YELLOW}[??]${RESET} tmux: not installed (required for local driver)" >&2
+        fi
+
+        if command -v ntm &>/dev/null; then
+            if ntm --robot-status &>/dev/null; then
+                printf '%b\n' "${GREEN}[OK]${RESET} ntm: robot mode available" >&2
+            else
+                printf '%b\n' "${YELLOW}[??]${RESET} ntm: installed but robot mode unavailable" >&2
+            fi
+        else
+            printf '%b\n' "${DIM}[  ]${RESET} ntm: not installed (optional)" >&2
+        fi
+
+        if command -v gh &>/dev/null && gh auth status &>/dev/null; then
+            local remaining reset reset_time
+            remaining=$(gh api rate_limit --jq ".resources.core.remaining" 2>/dev/null || echo "")
+            reset=$(gh api rate_limit --jq ".resources.core.reset" 2>/dev/null || echo "")
+            if [[ -n "$remaining" && "$remaining" =~ ^[0-9]+$ ]]; then
+                if [[ "$remaining" -lt 100 ]]; then
+                    reset_time=$(date -d "@$reset" 2>/dev/null || date -r "$reset" 2>/dev/null || echo "$reset")
+                    printf '%b\n' "${YELLOW}[??]${RESET} gh rate limit: $remaining remaining (resets $reset_time)" >&2
+                else
+                    printf '%b\n' "${GREEN}[OK]${RESET} gh rate limit: $remaining remaining" >&2
+                fi
+            else
+                printf '%b\n' "${YELLOW}[??]${RESET} gh rate limit: unavailable" >&2
+            fi
+        else
+            printf '%b\n' "${DIM}[  ]${RESET} gh rate limit: unavailable (gh not authenticated)" >&2
+        fi
+
+        local review_state_dir
+        review_state_dir=$(get_review_state_dir)
+        if [[ -d "$review_state_dir" ]]; then
+            if [[ -w "$review_state_dir" ]]; then
+                printf '%b\n' "${GREEN}[OK]${RESET} review state: $review_state_dir" >&2
+            else
+                printf '%b\n' "${RED}[!!]${RESET} review state: not writable ($review_state_dir)" >&2
+                ((review_issues++))
+            fi
+        else
+            printf '%b\n' "${DIM}[  ]${RESET} review state: $review_state_dir (will be created)" >&2
+        fi
+
+        if [[ $review_issues -gt 0 ]]; then
+            issues=$((issues + review_issues))
+        fi
     fi
 
     echo "" >&2
@@ -4120,7 +4244,7 @@ check_review_prerequisites() {
     # Check for Claude Code (claude command)
     if ! command -v claude &>/dev/null; then
         log_warn "Claude Code CLI not found. Review sessions will not work."
-        log_warn "Install: npm install -g @anthropic-ai/claude-cli"
+        log_warn "Install: npm install -g @anthropic-ai/claude-code"
         # Not a hard error - might be doing discovery only
     fi
 

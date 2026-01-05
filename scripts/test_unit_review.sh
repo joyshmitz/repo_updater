@@ -23,6 +23,7 @@ source_ru_function "calculate_item_priority_score"
 source_ru_function "get_priority_level"
 source_ru_function "passes_priority_threshold"
 source_ru_function "score_and_sort_work_items"
+source_ru_function "discover_work_items"
 source_ru_function "validate_review_plan"
 source_ru_function "summarize_review_plan"
 source_ru_function "get_review_plan_json_summary"
@@ -82,6 +83,74 @@ test_parse_graphql_work_items_filters_archived_and_fork() {
     assert_contains "$output" $'\ttrue' "Draft PR should mark is_draft true"
     assert_not_contains "$output" "octo/archived" "Archived repo excluded"
     assert_not_contains "$output" "octo/forked" "Forked repo excluded"
+
+    log_test_pass "$test_name"
+}
+
+test_parse_graphql_work_items_empty_response_returns_empty() {
+    local test_name="parse_graphql_work_items: empty response"
+    log_test_start "$test_name"
+
+    require_jq_or_skip || return 0
+
+    local output
+    output=$(parse_graphql_work_items '{"data":{}}')
+
+    assert_equals "" "$output" "Empty response should produce no TSV lines"
+
+    log_test_pass "$test_name"
+}
+
+#------------------------------------------------------------------------------
+# discover_work_items (offline / no network)
+#------------------------------------------------------------------------------
+
+test_discover_work_items_builds_items_from_fixture() {
+    local test_name="discover_work_items: parses fixture into array"
+    log_test_start "$test_name"
+
+    require_jq_or_skip || return 0
+
+    # Make gh "exist" for discover_work_items without calling real GitHub.
+    gh() { :; }
+
+    # Avoid pulling repo lists / parsing repo specs: keep this test offline and focused.
+    get_all_repos() { printf '%s\n' "octo/repo1"; }
+    repo_spec_to_github_id() { printf '%s\n' "$1"; }
+
+    local fixture="$PROJECT_DIR/test/fixtures/gh/graphql_batch.json"
+    assert_file_exists "$fixture" "Fixture should exist"
+    gh_api_graphql_repo_batch() { cat "$fixture"; }
+
+    local -a items=()
+    discover_work_items items "all" "" ""
+
+    assert_equals "3" "${#items[@]}" "Should discover 3 items from fixture"
+    assert_contains "${items[*]}" "octo/repo1|issue|42|" "Includes issue 42"
+    assert_contains "${items[*]}" "octo/repo1|pr|7|" "Includes PR 7"
+    assert_contains "${items[*]}" "octo/repo1|pr|8|" "Includes draft PR 8"
+
+    unset -f gh gh_api_graphql_repo_batch get_all_repos repo_spec_to_github_id
+
+    log_test_pass "$test_name"
+}
+
+test_discover_work_items_handles_empty_graphql_response() {
+    local test_name="discover_work_items: empty GraphQL response yields empty array"
+    log_test_start "$test_name"
+
+    require_jq_or_skip || return 0
+
+    gh() { :; }
+    get_all_repos() { printf '%s\n' "octo/repo1"; }
+    repo_spec_to_github_id() { printf '%s\n' "$1"; }
+    gh_api_graphql_repo_batch() { printf '%s\n' '{"data":{}}'; }
+
+    local -a items=()
+    discover_work_items items "all" "" ""
+    assert_equals "0" "${#items[@]}" "Empty response should produce zero items"
+
+    unset -f gh gh_api_graphql_repo_batch get_all_repos repo_spec_to_github_id
 
     log_test_pass "$test_name"
 }
@@ -585,6 +654,9 @@ test_write_json_atomic_with_lock() {
 #------------------------------------------------------------------------------
 
 run_test test_parse_graphql_work_items_filters_archived_and_fork
+run_test test_parse_graphql_work_items_empty_response_returns_empty
+run_test test_discover_work_items_builds_items_from_fixture
+run_test test_discover_work_items_handles_empty_graphql_response
 run_test test_calculate_item_priority_score_components
 run_test test_calculate_item_priority_score_recent_review_penalty
 run_test test_calculate_item_priority_score_draft_pr_penalty

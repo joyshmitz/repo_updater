@@ -365,7 +365,6 @@ get_latest_release() {
         fi
     fi
 
-<<<<<<< HEAD
     if [[ "$api_rc" -ne 0 ]]; then
         # Try a non-API method before failing (avoids API rate limits / weird proxies).
         local redirect_version=""
@@ -431,10 +430,7 @@ get_latest_release() {
 }
 
 # Download a file with cache-busting
-<<<<<<< HEAD
-=======
 # Adds a timestamp query parameter to bypass CDN/proxy caches
->>>>>>> 0c31b4e (fix(test): correct nameref binding in source_ru_function)
 download_file() {
     local url="$1"
     local dest="$2"

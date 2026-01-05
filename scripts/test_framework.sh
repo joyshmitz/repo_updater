@@ -1383,6 +1383,19 @@ source_ru_function() {
     local project_dir
     project_dir=$(get_project_dir)
 
+    # Many ru functions rely on portable directory-lock helpers.
+    # Load them once up front so unit tests don't need to manually list them.
+    if [[ -z "${TF_RU_LOCKS_LOADED:-}" ]]; then
+        local lock_body
+        lock_body=$(sed -n '/^dir_lock_try_acquire()/,/^}/p' "$project_dir/ru")
+        eval "$lock_body"
+        lock_body=$(sed -n '/^dir_lock_release()/,/^}/p' "$project_dir/ru")
+        eval "$lock_body"
+        lock_body=$(sed -n '/^dir_lock_acquire()/,/^}/p' "$project_dir/ru")
+        eval "$lock_body"
+        TF_RU_LOCKS_LOADED="true"
+    fi
+
     # Extract and eval the function (eval preserves nameref bindings)
     local func_body
     func_body=$(sed -n "/^${func_name}()/,/^}/p" "$project_dir/ru")

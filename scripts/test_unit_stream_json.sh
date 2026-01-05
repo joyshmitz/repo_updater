@@ -31,7 +31,7 @@ log_verbose() { :; }
 #==============================================================================
 
 # Use namerefs to avoid variable shadowing when caller passes "event_type"
-# as output variable name (same as current ru implementation)
+# as output variable name (ru uses _set_out_var with prefixed locals instead)
 parse_stream_json_event() {
     local line="$1"
     local -n _pse_event_type=$2

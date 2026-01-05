@@ -2291,6 +2291,25 @@ aggregate_results() {
     echo "CLONED=$cloned UPDATED=$updated CURRENT=$current SKIPPED=$skipped FAILED=$failed CONFLICTS=$conflicts SYSTEM_ERRORS=$system_errors"
 }
 
+# Load aggregate_results into global counters without eval.
+# Sets: CLONED UPDATED CURRENT SKIPPED FAILED CONFLICTS SYSTEM_ERRORS
+load_aggregate_results_globals() {
+    CLONED=0 UPDATED=0 CURRENT=0 SKIPPED=0 FAILED=0 CONFLICTS=0 SYSTEM_ERRORS=0
+
+    local kv key val
+    for kv in $(aggregate_results); do
+        key="${kv%%=*}"
+        val="${kv#*=}"
+        [[ "$val" =~ ^[0-9]+$ ]] || val=0
+
+        case "$key" in
+            CLONED|UPDATED|CURRENT|SKIPPED|FAILED|CONFLICTS|SYSTEM_ERRORS)
+                printf -v "$key" '%s' "$val"
+                ;;
+        esac
+    done
+}
+
 # Print a beautiful summary box with gum or ANSI fallback
 # Args: $1=cloned $2=updated $3=current $4=skipped $5=conflicts $6=failed $7=duration_seconds
 print_summary() {
@@ -2631,7 +2650,7 @@ cmd_sync() {
         done
 
         # Aggregate results and compute proper exit code
-        eval "$(aggregate_results)"
+        load_aggregate_results_globals
         compute_exit_code "$FAILED" "$CONFLICTS" "$SYSTEM_ERRORS"
         exit $?
     fi
@@ -2902,7 +2921,7 @@ cmd_sync() {
     duration=$((end_time - start_time))
 
     # Get aggregated counts from results file
-    eval "$(aggregate_results)"
+    load_aggregate_results_globals
 
     # Print summary using the new reporting functions
     print_summary "$CLONED" "$UPDATED" "$CURRENT" "$SKIPPED" "$CONFLICTS" "$FAILED" "$duration"
@@ -5061,7 +5080,7 @@ extract_inline_options() {
     local output="$1"
 
     # Look for patterns like "a) ...", "1. ...", "- Option A"
-    echo "$output" | grep -E '^\s*[a-z]\)|^\s*[0-9]+\.|^\s*-\s+[A-Z]' | head -5
+    echo "$output" | grep -E '^[[:space:]]*[a-z]\)|^[[:space:]]*[0-9]+\.|^[[:space:]]*-[[:space:]]+[A-Z]' | head -5
 }
 
 # Detect wait reason and classify it
@@ -11604,10 +11623,10 @@ run_secret_scan() {
         # Regex fallback
         log_verbose "Scanning for secrets with regex patterns"
         local patterns=(
-            'password\s*[:=]'
-            'api.?key\s*[:=]'
-            'secret\s*[:=]'
-            'token\s*[:=]'
+            'password[[:space:]]*[:=]'
+            'api.?key[[:space:]]*[:=]'
+            'secret[[:space:]]*[:=]'
+            'token[[:space:]]*[:=]'
             'AWS_ACCESS_KEY'
             'AWS_SECRET_ACCESS_KEY'
             'PRIVATE_KEY'
@@ -11617,9 +11636,13 @@ run_secret_scan() {
 
         local diff_output
         if [[ "$scope" == "staged" ]]; then
-            diff_output=$(git -C "$project_dir" diff --cached 2>/dev/null || true)
+            diff_output=$(git -C "$project_dir" diff --no-color --cached 2>/dev/null || true)
         else
-            diff_output=$(git -C "$project_dir" diff HEAD~1..HEAD 2>/dev/null || true)
+            if git -C "$project_dir" rev-parse --verify HEAD >/dev/null 2>&1; then
+                diff_output=$(git -C "$project_dir" diff --no-color HEAD 2>/dev/null || true)
+            else
+                diff_output=$(git -C "$project_dir" diff --no-color 2>/dev/null || true)
+            fi
         fi
 
         for pattern in "${patterns[@]}"; do

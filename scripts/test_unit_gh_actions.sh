@@ -104,7 +104,7 @@ test_execute_gh_actions_happy_path_and_idempotent() {
 }
 EOF
 
-    assert_exit_code 0 execute_gh_actions "owner/repo" "$plan_file" "execute_gh_actions should succeed"
+    assert_exit_code 0 "execute_gh_actions should succeed" execute_gh_actions "owner/repo" "$plan_file"
 
     assert_file_contains "$GH_LOG" "issue comment 42 -R owner/repo --body-file -" "issue comment should run"
     assert_file_contains "$GH_LOG" "BODY:Hello" "multiline body should be piped"
@@ -116,7 +116,7 @@ EOF
 
     local before_lines after_lines
     before_lines=$(wc -l < "$GH_LOG" | tr -d ' ')
-    assert_exit_code 0 execute_gh_actions "owner/repo" "$plan_file" "second run should still succeed"
+    assert_exit_code 0 "second run should still succeed" execute_gh_actions "owner/repo" "$plan_file"
     after_lines=$(wc -l < "$GH_LOG" | tr -d ' ')
     assert_equals "$before_lines" "$after_lines" "second run should not re-execute gh commands"
 
@@ -157,7 +157,7 @@ test_execute_gh_actions_continues_on_failure() {
 }
 EOF
 
-    assert_exit_code 1 execute_gh_actions "owner/repo" "$plan_file" "should return non-zero when any action fails"
+    assert_exit_code 1 "should return non-zero when any action fails" execute_gh_actions "owner/repo" "$plan_file"
 
     assert_file_contains "$GH_LOG" "issue comment 42 -R owner/repo --body-file -" "comment should run"
     assert_file_contains "$GH_LOG" "issue close 42 -R owner/repo --reason completed" "close attempted"
@@ -168,8 +168,93 @@ EOF
     log_test_pass "$test_name"
 }
 
+test_execute_gh_actions_runs_commands() {
+    local test_name="execute_gh_actions: runs commands from plan"
+    log_test_start "$test_name"
+
+    local env_root
+    env_root=$(create_test_env)
+    export RU_STATE_DIR="$env_root/state/ru"
+
+    export GH_LOG="$env_root/gh.log"
+    : > "$GH_LOG"
+
+    local bin_dir="$env_root/bin"
+    _write_mock_gh "$bin_dir" "ok"
+
+    local old_path="$PATH"
+    export PATH="$bin_dir:$PATH"
+
+    local plan_file="$env_root/plan.json"
+    create_valid_plan_with_actions "$plan_file"
+
+    # Run actions
+    assert_exit_code 0 "execute_gh_actions should succeed" execute_gh_actions "owner/repo" "$plan_file"
+
+    # Verify log file
+    local log_file="$RU_STATE_DIR/review/gh-actions.jsonl"
+    assert_file_exists "$log_file" "Actions log should be created"
+
+    # Check for success entries
+    if grep -q '"status":"ok"' "$log_file"; then
+        pass "Log contains success status"
+    else
+        fail "Log missing success status"
+    fi
+
+    # Verify idempotence
+    assert_exit_code 0 "second run should still succeed" execute_gh_actions "owner/repo" "$plan_file"
+    if grep -q '"status":"skipped"' "$log_file"; then
+        pass "Log contains skipped status on second run"
+    else
+        fail "Log missing skipped status"
+    fi
+
+    export PATH="$old_path"
+    cleanup_temp_dirs
+}
+
+test_execute_gh_actions_handles_errors() {
+    local test_name="execute_gh_actions: handles errors gracefully"
+    log_test_start "$test_name"
+
+    local env_root
+    env_root=$(create_test_env)
+    export RU_STATE_DIR="$env_root/state/ru"
+
+    local plan_file="$env_root/plan.json"
+    create_valid_plan_with_actions "$plan_file"
+
+    # Mock gh failure
+    gh() { return 1; }
+    export -f gh
+
+    assert_exit_code 1 "should return non-zero when any action fails" execute_gh_actions "owner/repo" "$plan_file"
+
+    cleanup_temp_dirs
+}
+
+create_valid_plan_with_actions() {
+    local plan_file="$1"
+    cat > "$plan_file" <<'EOF'
+{
+  "schema_version": 1,
+  "repo": "owner/repo",
+  "items": [],
+  "gh_actions": [
+    {"op":"comment","target":"issue#42","body":"Hello"},
+    {"op":"close","target":"issue#42","reason":"completed"},
+    {"op":"label","target":"issue#42","labels":["fixed-in-main","needs-review"]},
+    {"op":"comment","target":"pr#15","body":"Thanks!"}
+  ]
+}
+EOF
+}
+
 run_test test_execute_gh_actions_happy_path_and_idempotent
 run_test test_execute_gh_actions_continues_on_failure
+run_test test_execute_gh_actions_runs_commands
+run_test test_execute_gh_actions_handles_errors
 
 print_results
 exit $?

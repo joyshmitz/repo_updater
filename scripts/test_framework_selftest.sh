@@ -40,19 +40,19 @@ test_assert_not_contains() {
 }
 
 test_assert_exit_code() {
-    assert_exit_code 0 true "True should exit 0"
-    assert_exit_code 1 false "False should exit 1"
-    assert_exit_code 0 test -d "$SCRIPT_DIR" "Test for existing dir should exit 0"
+    assert_exit_code 0 "True should exit 0" true
+    assert_exit_code 1 "False should exit 1" false
+    assert_exit_code 0 "Test for existing dir should exit 0" test -d "$SCRIPT_DIR"
 }
 
 test_assert_success() {
-    assert_success true "True command should succeed"
-    assert_success test -d "$SCRIPT_DIR" "Test for existing dir should succeed"
+    assert_success "True command should succeed" true
+    assert_success "Test for existing dir should succeed" test -d "$SCRIPT_DIR"
 }
 
 test_assert_fails() {
-    assert_fails false "False command should fail"
-    assert_fails test -d "/nonexistent/path/xyz" "Test for missing dir should fail"
+    assert_fails "False command should fail" false
+    assert_fails "Test for non-existent file should fail" test -f "/nonexistent/file"
 }
 
 test_assert_file_exists() {

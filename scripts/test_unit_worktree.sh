@@ -72,7 +72,7 @@ test_ensure_clean_clean_repo() {
 
     # Clean repo should pass
     ensure_clean_or_fail "$repo_dir" 2>/dev/null
-    assert_exit_code 0 "true" "Clean repo should pass ensure_clean_or_fail"
+    assert_exit_code 0 "Clean repo should pass ensure_clean_or_fail" true
 }
 
 test_ensure_clean_dirty_repo() {
@@ -84,7 +84,7 @@ test_ensure_clean_dirty_repo() {
     echo "uncommitted" > "$repo_dir/dirty.txt"
 
     # Dirty repo should fail
-    assert_fails 'ensure_clean_or_fail "$repo_dir" 2>/dev/null' "Dirty repo should fail ensure_clean_or_fail"
+    assert_fails "Dirty repo should fail ensure_clean_or_fail" ensure_clean_or_fail "$repo_dir"
 }
 
 test_ensure_clean_not_git_repo() {
@@ -93,7 +93,7 @@ test_ensure_clean_not_git_repo() {
     mkdir -p "$not_git"
 
     # Non-git directory should fail
-    assert_fails 'ensure_clean_or_fail "$not_git" 2>/dev/null' "Non-git directory should fail ensure_clean_or_fail"
+    assert_fails "Non-git directory should fail ensure_clean_or_fail" ensure_clean_or_fail "$not_git"
 }
 
 #==============================================================================

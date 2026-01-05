@@ -138,8 +138,8 @@ test_push_worktree_changes_ff_only_and_records_state() {
 }
 EOF
 
-    assert_exit_code 0 verify_push_safe "owner/repo" "$plan_file" "$wt_path" "verify_push_safe should allow push"
-    assert_exit_code 0 push_worktree_changes "owner/repo" "$wt_path" "push_worktree_changes should succeed"
+    assert_exit_code 0 "verify_push_safe should allow push" verify_push_safe "owner/repo" "$plan_file" "$wt_path"
+    assert_exit_code 0 "push_worktree_changes should succeed" push_worktree_changes "owner/repo" "$wt_path"
 
     local head_commit
     head_commit=$(git -C "$main_repo" rev-parse HEAD)

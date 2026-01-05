@@ -469,20 +469,15 @@ assert_not_contains() {
 }
 
 # Assert command exits with expected code
-# Usage: assert_exit_code expected_code command [args...] "message"
-# Note: Message must be the LAST argument
+# Usage: assert_exit_code expected_code message command [args...]
 assert_exit_code() {
     local expected_code="$1"
-    shift
-
-    # Extract message (last argument)
-    local args=("$@")
-    local msg="${args[-1]:-Command should exit with code $expected_code}"
-    unset 'args[-1]'
+    local msg="$2"
+    shift 2
 
     # Run command and capture exit code
     local actual_code=0
-    "${args[@]}" >/dev/null 2>&1 || actual_code=$?
+    "$@" >/dev/null 2>&1 || actual_code=$?
 
     if [[ "$expected_code" -eq "$actual_code" ]]; then
         _tf_pass "$msg"
@@ -494,14 +489,13 @@ assert_exit_code() {
 }
 
 # Assert command succeeds (exit code 0)
-# Usage: assert_success command [args...] "message"
+# Usage: assert_success message command [args...]
 assert_success() {
-    local args=("$@")
-    local msg="${args[-1]:-Command should succeed}"
-    unset 'args[-1]'
+    local msg="$1"
+    shift
 
     local exit_code=0
-    "${args[@]}" >/dev/null 2>&1 || exit_code=$?
+    "$@" >/dev/null 2>&1 || exit_code=$?
 
     if [[ "$exit_code" -eq 0 ]]; then
         _tf_pass "$msg"
@@ -513,14 +507,13 @@ assert_success() {
 }
 
 # Assert command fails (non-zero exit code)
-# Usage: assert_fails command [args...] "message"
+# Usage: assert_fails message command [args...]
 assert_fails() {
-    local args=("$@")
-    local msg="${args[-1]:-Command should fail}"
-    unset 'args[-1]'
+    local msg="$1"
+    shift
 
     local exit_code=0
-    "${args[@]}" >/dev/null 2>&1 || exit_code=$?
+    "$@" >/dev/null 2>&1 || exit_code=$?
 
     if [[ "$exit_code" -ne 0 ]]; then
         _tf_pass "$msg"

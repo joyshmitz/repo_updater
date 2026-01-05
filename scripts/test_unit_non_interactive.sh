@@ -76,7 +76,8 @@ test_handle_question_non_interactive_auto_selects_recommended() {
     local question_info
     question_info=$(jq -n '{reason:"ask_user_question",context:{questions:[{recommended:"Quick fix"}]}}')
 
-    assert_exit_code 0 handle_question_non_interactive "$question_info" "sess-1" "should succeed"
+    assert_exit_code 0 "should succeed" handle_question_non_interactive "$question_info" "sess-1"
+
     assert_equals "Quick fix" "$SENT_TO_SESSION" "should send recommended answer"
 
     local log_file
@@ -101,7 +102,8 @@ test_handle_question_non_interactive_auto_skips_without_recommended() {
     local question_info
     question_info=$(jq -n '{reason:"ask_user_question",context:{questions:[{prompt:"x"}]}}')
 
-    assert_exit_code 0 handle_question_non_interactive "$question_info" "sess-2" "should succeed"
+    assert_exit_code 0 "should succeed" handle_question_non_interactive "$question_info" "sess-2"
+
     assert_equals "skip" "$SENT_TO_SESSION" "should send skip when no recommended"
 
     local log_file
@@ -127,7 +129,8 @@ test_handle_question_non_interactive_external_prompt_fails() {
     local question_info
     question_info=$(jq -n '{reason:"external_prompt",context:"Password:"}')
 
-    assert_exit_code 3 handle_question_non_interactive "$question_info" "sess-3" "external prompt should fail"
+    assert_exit_code 3 "external prompt should fail" handle_question_non_interactive "$question_info" "sess-3"
+
     assert_equals "" "$SENT_TO_SESSION" "should not send response"
 
     local log_file
@@ -153,7 +156,8 @@ test_handle_question_non_interactive_fail_policy_fails() {
     local question_info
     question_info=$(jq -n '{reason:"agent_question_text",context:"Should I refactor?"}')
 
-    assert_exit_code 3 handle_question_non_interactive "$question_info" "sess-4" "fail policy should fail"
+    assert_exit_code 3 "fail policy should fail" handle_question_non_interactive "$question_info" "sess-4"
+
     assert_equals "" "$SENT_TO_SESSION" "should not send response"
 
     local log_file

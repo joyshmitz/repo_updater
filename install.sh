@@ -165,6 +165,73 @@ maybe_cache_bust_url() {
     esac
 }
 
+# Self-refresh the installer when executed from a pipe (/dev/fd/*), to avoid
+# stale CDN/proxy caches when users run:
+#   curl -fsSL https://raw.githubusercontent.com/.../install.sh | bash
+#
+# Behavior:
+# - If refresh succeeds, runs the refreshed installer and exits with its code.
+# - If refresh fails, continues with the current script.
+maybe_self_refresh_installer() {
+    # Opt-out for debugging / pinned installs.
+    if [[ "${RU_INSTALLER_NO_SELF_REFRESH:-}" == "1" ]]; then
+        return 0
+    fi
+    # Prevent recursion when the refreshed script calls main().
+    if [[ "${RU_INSTALLER_REFRESHED:-}" == "1" ]]; then
+        return 0
+    fi
+
+    local src="${BASH_SOURCE[0]:-}"
+    case "$src" in
+        /dev/fd/*|/proc/self/fd/*) ;;
+        *) return 0 ;;
+    esac
+
+    if ! command_exists curl && ! command_exists wget; then
+        return 0
+    fi
+
+    local refresh_url="$GITHUB_RAW/$REPO_OWNER/$REPO_NAME/main/install.sh"
+    refresh_url=$(append_query_param "$refresh_url" "ru_cb" "${RU_CACHE_BUST_TOKEN}.$$")
+
+    local temp_dir=""
+    if ! temp_dir=$(mktemp_dir); then
+        return 0
+    fi
+
+    RU_INSTALLER_TEMP_DIR="$temp_dir"
+    local dest="$temp_dir/install.sh"
+
+    if command_exists curl; then
+        if ! curl -fsSL "$refresh_url" -o "$dest" 2>/dev/null; then
+            cleanup_temp_dir
+            RU_INSTALLER_TEMP_DIR=""
+            return 0
+        fi
+    else
+        if ! wget -q "$refresh_url" -O "$dest" 2>/dev/null; then
+            cleanup_temp_dir
+            RU_INSTALLER_TEMP_DIR=""
+            return 0
+        fi
+    fi
+
+    local first_line=""
+    IFS= read -r first_line < "$dest" 2>/dev/null || true
+    if [[ "$first_line" != "#!/usr/bin/env bash" ]]; then
+        cleanup_temp_dir
+        RU_INSTALLER_TEMP_DIR=""
+        return 0
+    fi
+
+    RU_INSTALLER_REFRESHED=1 bash "$dest" "$@"
+    local rc=$?
+    cleanup_temp_dir
+    RU_INSTALLER_TEMP_DIR=""
+    exit "$rc"
+}
+
 # Attempt to detect the latest release tag without GitHub's API (avoids rate limits/proxies).
 # Returns:
 #   0 with version on stdout - success
@@ -541,6 +608,8 @@ add_to_path() {
 #==============================================================================
 
 main() {
+    maybe_self_refresh_installer "$@"
+
     printf '\n' >&2
     printf '%b\n' "${BOLD}ru Installer${RESET}" >&2
     printf '%s\n' "────────────────────" >&2
@@ -564,8 +633,9 @@ main() {
     else
         # Install from release
         if [[ -n "${RU_VERSION:-}" ]]; then
-            log_info "Installing version: $RU_VERSION"
-            install_from_release "$RU_VERSION" "$install_dir" || exit 1
+            local version="${RU_VERSION#v}"
+            log_info "Installing version: $version"
+            install_from_release "$version" "$install_dir" || exit 1
         else
             log_step "Installing latest release..."
             install_from_latest_release "$install_dir"

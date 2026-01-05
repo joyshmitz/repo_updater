@@ -251,7 +251,7 @@ _make_minimal_path_bin_without_drivers() {
     # printf: Output formatting
     # ln: Various symlink operations
     local -a cmds=(
-        awk basename cat cut date dirname flock grep head jq ln mkdir mktemp
+        awk basename cat cut date dirname grep head jq ln mkdir mktemp
         printf pwd rm sed sort tr uniq wc
     )
 

@@ -53,14 +53,6 @@ require_jq_or_skip() {
     return 0
 }
 
-require_flock_or_skip() {
-    if ! command -v flock &>/dev/null; then
-        skip_test "flock not installed"
-        return 1
-    fi
-    return 0
-}
-
 #------------------------------------------------------------------------------
 # parse_graphql_work_items
 #------------------------------------------------------------------------------
@@ -636,7 +628,6 @@ test_write_json_atomic_with_lock() {
     log_test_start "$test_name"
 
     require_jq_or_skip || return 0
-    require_flock_or_skip || return 0
 
     local env_root
     env_root=$(create_test_env)

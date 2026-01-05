@@ -280,14 +280,6 @@ require_jq_or_skip() {
     return 0
 }
 
-require_flock_or_skip() {
-    if ! command -v flock &>/dev/null; then
-        skip_test "flock not installed"
-        return 1
-    fi
-    return 0
-}
-
 #==============================================================================
 # Tests: Path helpers
 #==============================================================================
@@ -594,7 +586,6 @@ test_record_metrics_from_plan_updates_totals() {
     log_test_start "$test_name"
 
     require_jq_or_skip || return 0
-    require_flock_or_skip || return 0
 
     local env_root
     env_root=$(create_test_env)
@@ -636,7 +627,6 @@ test_record_metrics_from_plan_tracks_decisions() {
     log_test_start "$test_name"
 
     require_jq_or_skip || return 0
-    require_flock_or_skip || return 0
 
     local env_root
     env_root=$(create_test_env)
@@ -678,7 +668,6 @@ test_record_metrics_from_plan_calculates_duration() {
     log_test_start "$test_name"
 
     require_jq_or_skip || return 0
-    require_flock_or_skip || return 0
 
     local env_root
     env_root=$(create_test_env)

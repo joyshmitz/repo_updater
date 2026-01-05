@@ -5,7 +5,7 @@
 # Tests for acquire_review_lock, release_review_lock, check_stale_lock,
 # get_review_lock_file, get_review_lock_info_file.
 #
-# Uses real flock operations in isolated temp directories.
+# Uses ru's portable directory-locking implementation in isolated temp directories.
 #
 # shellcheck disable=SC2034  # Variables used by sourced functions
 # shellcheck disable=SC1091  # Sourced files checked separately
@@ -21,70 +21,14 @@ source "$SCRIPT_DIR/test_framework.sh"
 
 # Source required functions
 source_ru_function "ensure_dir"
+source_ru_function "dir_lock_try_acquire"
+source_ru_function "dir_lock_release"
+source_ru_function "dir_lock_acquire"
 source_ru_function "get_review_lock_file"
 source_ru_function "get_review_lock_info_file"
-
-# check_stale_lock has complex logic but no heredoc, extract directly
-# shellcheck source=/dev/null
-source <(sed -n '/^check_stale_lock()/,/^}$/p' "$PROJECT_DIR/ru")
-
-# acquire_review_lock uses heredoc which breaks source_ru_function
-# Define simplified version for testing
-acquire_review_lock() {
-    local lock_file info_file
-    lock_file=$(get_review_lock_file)
-    info_file=$(get_review_lock_info_file)
-    ensure_dir "$(dirname "$lock_file")"
-
-    if ! command -v flock &>/dev/null; then
-        log_error "flock is required to run ru review (for locking)"
-        return 1
-    fi
-
-    # Check for stale locks first
-    check_stale_lock
-
-    # Open fd 9 for locking
-    exec 9>"$lock_file"
-
-    # Try non-blocking lock
-    if ! flock -n 9 2>/dev/null; then
-        if [[ -f "$info_file" ]]; then
-            local holder_run_id holder_pid
-            holder_run_id=$(jq -r '.run_id // "unknown"' "$info_file" 2>/dev/null)
-            holder_pid=$(jq -r '.pid // "unknown"' "$info_file" 2>/dev/null)
-            log_error "Another review session is active (run_id: $holder_run_id, pid: $holder_pid)"
-        else
-            log_error "Another review is running (no info available)"
-        fi
-        exec 9>&-
-        return 1
-    fi
-
-    # Lock acquired - write info file
-    local run_id="${REVIEW_RUN_ID:-$$}"
-    local mode="${REVIEW_MODE:-plan}"
-    local timestamp
-    timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-    printf '{\n  "run_id": "%s",\n  "started_at": "%s",\n  "pid": %d,\n  "mode": "%s"\n}\n' \
-        "$run_id" "$timestamp" "$$" "$mode" > "$info_file"
-
-    return 0
-}
-
-# release_review_lock - simplified version
-release_review_lock() {
-    local lock_file info_file
-    lock_file=$(get_review_lock_file)
-    info_file=$(get_review_lock_info_file)
-
-    # Remove info file
-    rm -f "$info_file"
-
-    # Release the flock (closing fd 9)
-    exec 9>&- 2>/dev/null || true
-}
+source_ru_function "check_stale_lock"
+source_ru_function "acquire_review_lock"
+source_ru_function "release_review_lock"
 
 # Stub logging functions
 log_verbose() { :; }
@@ -141,12 +85,6 @@ test_acquire_review_lock_success() {
     RU_STATE_DIR="$test_env/state"
     mkdir -p "$RU_STATE_DIR"
 
-    # Check flock is available
-    if ! command -v flock &>/dev/null; then
-        log_test_skip "$test_name" "flock not available"
-        return 0
-    fi
-
     # Acquire lock
     if acquire_review_lock; then
         assert_true "true" "Lock acquisition should succeed"
@@ -167,11 +105,6 @@ test_acquire_review_lock_creates_info_file() {
 
     RU_STATE_DIR="$test_env/state"
     mkdir -p "$RU_STATE_DIR"
-
-    if ! command -v flock &>/dev/null; then
-        log_test_skip "$test_name" "flock not available"
-        return 0
-    fi
 
     REVIEW_RUN_ID="test-run-123"
     REVIEW_MODE="plan"
@@ -205,7 +138,7 @@ test_acquire_review_lock_creates_info_file() {
 }
 
 test_acquire_review_lock_creates_lock_file() {
-    local test_name="acquire_review_lock creates lock file"
+    local test_name="acquire_review_lock creates lock dir"
     log_test_start "$test_name"
     local test_env
     test_env=$(create_test_env)
@@ -213,19 +146,16 @@ test_acquire_review_lock_creates_lock_file() {
     RU_STATE_DIR="$test_env/state"
     mkdir -p "$RU_STATE_DIR"
 
-    if ! command -v flock &>/dev/null; then
-        log_test_skip "$test_name" "flock not available"
-        return 0
-    fi
-
     acquire_review_lock
 
     local lock_file
     lock_file=$(get_review_lock_file)
+    local lock_dir="${lock_file}.d"
 
-    assert_file_exists "$lock_file" "Lock file should be created"
+    assert_dir_exists "$lock_dir" "Lock dir should be created"
 
     release_review_lock
+    assert_dir_not_exists "$lock_dir" "Lock dir should be released"
 
     unset RU_STATE_DIR
     log_test_pass "$test_name"
@@ -243,11 +173,6 @@ test_release_review_lock_removes_info_file() {
 
     RU_STATE_DIR="$test_env/state"
     mkdir -p "$RU_STATE_DIR"
-
-    if ! command -v flock &>/dev/null; then
-        log_test_skip "$test_name" "flock not available"
-        return 0
-    fi
 
     acquire_review_lock
 
@@ -318,6 +243,10 @@ test_check_stale_lock_corrupt_info() {
 
     local info_file
     info_file=$(get_review_lock_info_file)
+    local lock_file lock_dir
+    lock_file=$(get_review_lock_file)
+    lock_dir="${lock_file}.d"
+    mkdir -p "$lock_dir"
 
     # Create corrupt info file (invalid JSON)
     echo "not valid json" > "$info_file"
@@ -325,6 +254,7 @@ test_check_stale_lock_corrupt_info() {
     if check_stale_lock; then
         # Should return 0 (stale) and clean up
         assert_file_not_exists "$info_file" "Corrupt info file should be removed"
+        assert_dir_not_exists "$lock_dir" "Lock dir should be released"
     fi
 
     unset RU_STATE_DIR
@@ -342,6 +272,10 @@ test_check_stale_lock_dead_process() {
 
     local info_file
     info_file=$(get_review_lock_info_file)
+    local lock_file lock_dir
+    lock_file=$(get_review_lock_file)
+    lock_dir="${lock_file}.d"
+    mkdir -p "$lock_dir"
 
     # Create info file with definitely dead PID (99999999)
     cat > "$info_file" << 'EOF'
@@ -356,6 +290,7 @@ EOF
     # check_stale_lock should detect the dead process and clean up
     if check_stale_lock; then
         assert_file_not_exists "$info_file" "Stale info file should be removed"
+        assert_dir_not_exists "$lock_dir" "Lock dir should be released"
     else
         # If it returns 1, check if process exists (unlikely for 99999999)
         if ! kill -0 99999999 2>/dev/null; then
@@ -378,6 +313,10 @@ test_check_stale_lock_valid_lock() {
 
     local info_file
     info_file=$(get_review_lock_info_file)
+    local lock_file lock_dir
+    lock_file=$(get_review_lock_file)
+    lock_dir="${lock_file}.d"
+    mkdir -p "$lock_dir"
 
     # Create info file with current PID (this process is alive)
     cat > "$info_file" << EOF
@@ -395,6 +334,7 @@ EOF
         assert_true "true" "Should return 1 for valid (live process) lock"
         # Info file should still exist
         assert_file_exists "$info_file" "Info file should not be removed for live process"
+        assert_dir_exists "$lock_dir" "Lock dir should remain for live process"
     fi
 
     rm -f "$info_file"
@@ -414,22 +354,15 @@ test_acquire_review_lock_fails_when_held() {
 
     RU_STATE_DIR="$test_env/state"
     mkdir -p "$RU_STATE_DIR"
-
-    if ! command -v flock &>/dev/null; then
-        log_test_skip "$test_name" "flock not available"
-        return 0
-    fi
-
-    local lock_file
+    local lock_file lock_dir
     lock_file=$(get_review_lock_file)
+    lock_dir="${lock_file}.d"
 
     # First, acquire lock in background subprocess that holds it
     (
-        exec 9>"$lock_file"
-        flock -n 9
-        # Hold lock for 2 seconds
+        mkdir "$lock_dir" 2>/dev/null || exit 1
         sleep 2
-        exec 9>&-
+        rmdir "$lock_dir" 2>/dev/null || true
     ) &
     local holder_pid=$!
 
@@ -462,11 +395,9 @@ test_lock_acquire_release_cycle() {
 
     RU_STATE_DIR="$test_env/state"
     mkdir -p "$RU_STATE_DIR"
-
-    if ! command -v flock &>/dev/null; then
-        log_test_skip "$test_name" "flock not available"
-        return 0
-    fi
+    local lock_file lock_dir
+    lock_file=$(get_review_lock_file)
+    lock_dir="${lock_file}.d"
 
     # First acquire
     if ! acquire_review_lock; then
@@ -477,10 +408,12 @@ test_lock_acquire_release_cycle() {
     local info_file
     info_file=$(get_review_lock_info_file)
     assert_file_exists "$info_file" "Info file should exist after acquire"
+    assert_dir_exists "$lock_dir" "Lock dir should exist after acquire"
 
     # Release
     release_review_lock
     assert_file_not_exists "$info_file" "Info file should be gone after release"
+    assert_dir_not_exists "$lock_dir" "Lock dir should be gone after release"
 
     # Second acquire (should work after release)
     if ! acquire_review_lock; then
@@ -508,11 +441,6 @@ test_lock_info_file_has_timestamp() {
 
     RU_STATE_DIR="$test_env/state"
     mkdir -p "$RU_STATE_DIR"
-
-    if ! command -v flock &>/dev/null; then
-        log_test_skip "$test_name" "flock not available"
-        return 0
-    fi
 
     acquire_review_lock
 
@@ -547,11 +475,6 @@ test_lock_info_default_run_id() {
     RU_STATE_DIR="$test_env/state"
     mkdir -p "$RU_STATE_DIR"
 
-    if ! command -v flock &>/dev/null; then
-        log_test_skip "$test_name" "flock not available"
-        return 0
-    fi
-
     # Don't set REVIEW_RUN_ID - should default to $$
     unset REVIEW_RUN_ID
 
@@ -580,12 +503,6 @@ echo "============================================"
 echo "Unit Tests: Review Locking Mechanism"
 echo "============================================"
 echo ""
-
-# Check if flock is available
-if ! command -v flock &>/dev/null; then
-    echo "WARNING: flock not available - some tests will be skipped"
-    echo ""
-fi
 
 # get_review_lock_file tests
 run_test test_get_review_lock_file_path

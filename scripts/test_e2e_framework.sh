@@ -554,7 +554,7 @@ e2e_make_minimal_path_bin() {
 
     # Essential commands needed by ru during operation
     local -a cmds=(
-        awk basename cat cut date dirname flock grep head jq ln mkdir mktemp
+        awk basename cat cut date dirname grep head jq ln mkdir mktemp
         printf pwd rm sed sort tr uniq wc
     )
 

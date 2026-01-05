@@ -4631,6 +4631,7 @@ check_stale_lock() {
         # Corrupt info file, treat as stale
         log_warn "Found corrupt lock info file, cleaning up"
         rm -f "$info_file"
+        dir_lock_release "$lock_dir"
         return 0
     fi
 
@@ -8535,7 +8536,10 @@ acquire_state_lock() {
     if [[ -d "$STATE_LOCK_DIR" && -f "$STATE_LOCK_INFO_FILE" ]]; then
         local lock_pid
         lock_pid=$(jq -r '.pid // empty' "$STATE_LOCK_INFO_FILE" 2>/dev/null)
-        if [[ "$lock_pid" =~ ^[0-9]+$ ]] && ! kill -0 "$lock_pid" 2>/dev/null; then
+        if [[ ! "$lock_pid" =~ ^[0-9]+$ ]]; then
+            rm -f "$STATE_LOCK_INFO_FILE" 2>/dev/null || true
+            dir_lock_release "$STATE_LOCK_DIR"
+        elif ! kill -0 "$lock_pid" 2>/dev/null; then
             rm -f "$STATE_LOCK_INFO_FILE" 2>/dev/null || true
             dir_lock_release "$STATE_LOCK_DIR"
         fi

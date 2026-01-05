@@ -15,6 +15,7 @@
 #   RU_UNSAFE_MAIN=1       Install from main branch (NOT RECOMMENDED)
 #   RU_CACHE_BUST=1        Append cache-busting query params to GitHub downloads (default: 1)
 #   RU_CACHE_BUST_TOKEN=... Cache-bust token override (default: current epoch seconds)
+#   RU_INSTALLER_NO_SELF_REFRESH=1 Disable installer self-refresh when piped (default: 0)
 #
 # Examples:
 #   # Standard installation (recommended)
@@ -188,6 +189,8 @@ maybe_self_refresh_installer() {
         *) return 0 ;;
     esac
 
+    log_step "Refreshing installer (cache-bust)..."
+
     if ! command_exists curl && ! command_exists wget; then
         return 0
     fi
@@ -205,12 +208,14 @@ maybe_self_refresh_installer() {
 
     if command_exists curl; then
         if ! curl -fsSL "$refresh_url" -o "$dest" 2>/dev/null; then
+            log_warn "Installer self-refresh failed; continuing with current installer"
             cleanup_temp_dir
             RU_INSTALLER_TEMP_DIR=""
             return 0
         fi
     else
         if ! wget -q "$refresh_url" -O "$dest" 2>/dev/null; then
+            log_warn "Installer self-refresh failed; continuing with current installer"
             cleanup_temp_dir
             RU_INSTALLER_TEMP_DIR=""
             return 0
@@ -220,6 +225,7 @@ maybe_self_refresh_installer() {
     local first_line=""
     IFS= read -r first_line < "$dest" 2>/dev/null || true
     if [[ "$first_line" != "#!/usr/bin/env bash" ]]; then
+        log_warn "Installer self-refresh downloaded unexpected content; continuing with current installer"
         cleanup_temp_dir
         RU_INSTALLER_TEMP_DIR=""
         return 0

@@ -1559,6 +1559,7 @@ All checks passed!
 | `RU_SYSTEM` | Install to `/usr/local/bin` | unset |
 | `RU_VERSION` | Specific version to install | latest |
 | `RU_UNSAFE_MAIN` | Install from main branch | unset |
+| `RU_INSTALLER_NO_SELF_REFRESH` | Disable installer self-refresh when piped | unset |
 
 ---
 

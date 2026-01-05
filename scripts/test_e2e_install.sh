@@ -167,12 +167,25 @@ done
 url_no_query="${url%%\?*}"
 
 if [[ "$url_no_query" == "https://api.github.com/repos/Dicklesworthstone/repo_updater/releases/latest" ]]; then
-    body='{"message":"Not Found","status":"404"}'
+    # Legacy path: installer no longer uses the GitHub API for latest.
+    echo "mock curl: unexpected GitHub API call: $url" >&2
+    exit 22
+fi
+
+if [[ "$url_no_query" == "https://github.com/Dicklesworthstone/repo_updater/releases/latest/download/ru" ]]; then
+    # Simulate "no releases" (latest download endpoint missing).
+    echo "Not Found" >&2
+    exit 22
+fi
+
+if [[ "$url_no_query" == "https://github.com/Dicklesworthstone/repo_updater/releases/latest" ]]; then
+    # Simulate that /releases/latest does NOT redirect to /tag/vX.Y.Z (no releases exist),
+    # which makes get_latest_release_from_redirect return 1.
     if [[ -n "$write_out" ]]; then
-        printf '%s\n404' "$body"
-    else
-        printf '%s' "$body"
+        printf '%s' "https://github.com/Dicklesworthstone/repo_updater/releases"
+        exit 0
     fi
+    printf '%s' ""  # no body
     exit 0
 fi
 

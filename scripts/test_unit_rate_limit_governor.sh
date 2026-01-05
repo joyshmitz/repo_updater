@@ -423,9 +423,10 @@ test_update_github_rate_limit_handles_no_gh() {
     # Create empty bin dir BEFORE changing PATH (so mkdir command works)
     mkdir -p "$test_env/empty_bin"
 
-    # Empty PATH so gh isn't found (but keep essential commands)
+    # Set PATH to only include empty_bin so gh isn't found.
+    # (command -v is a bash builtin, doesn't need anything in PATH)
     local old_path="$PATH"
-    export PATH="$test_env/empty_bin:/usr/bin:/bin"
+    export PATH="$test_env/empty_bin"
 
     # Should not error, just return
     update_github_rate_limit

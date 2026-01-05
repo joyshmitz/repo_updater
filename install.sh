@@ -323,15 +323,16 @@ install_from_latest_release() {
     log_step "Downloading ru (latest release)..."
     if ! download_file "$script_url" "$temp_dir/$SCRIPT_NAME"; then
         # Best-effort: determine whether there are simply no releases.
-        if get_latest_release_from_redirect >/dev/null; then
-            log_error "Failed to download latest release artifact ($SCRIPT_NAME)"
-            return 1
-        fi
-        if [[ "$?" -eq 1 ]]; then
+        local redirect_rc
+        get_latest_release_from_redirect >/dev/null
+        redirect_rc=$?
+
+        if [[ "$redirect_rc" -eq 1 ]]; then
             cleanup_temp_dir
             RU_INSTALLER_TEMP_DIR=""
             return 2
         fi
+
         log_error "Failed to download latest release artifact ($SCRIPT_NAME)"
         return 1
     fi
@@ -340,16 +341,16 @@ install_from_latest_release() {
     local first_line=""
     IFS= read -r first_line < "$temp_dir/$SCRIPT_NAME" 2>/dev/null || true
     if [[ "$first_line" != "#!/usr/bin/env bash" ]]; then
-        if get_latest_release_from_redirect >/dev/null; then
-            log_error "Downloaded unexpected content instead of ru (latest release)"
-            log_info "First line: $first_line"
-            return 1
-        fi
-        if [[ "$?" -eq 1 ]]; then
+        local redirect_rc
+        get_latest_release_from_redirect >/dev/null
+        redirect_rc=$?
+
+        if [[ "$redirect_rc" -eq 1 ]]; then
             cleanup_temp_dir
             RU_INSTALLER_TEMP_DIR=""
             return 2
         fi
+
         log_error "Downloaded unexpected content instead of ru (latest release)"
         log_info "First line: $first_line"
         return 1
@@ -567,8 +568,9 @@ main() {
             install_from_release "$RU_VERSION" "$install_dir" || exit 1
         else
             log_step "Installing latest release..."
-            if ! install_from_latest_release "$install_dir"; then
-                local rc=$?
+            install_from_latest_release "$install_dir"
+            local rc=$?
+            if [[ "$rc" -ne 0 ]]; then
                 if [[ "$rc" -eq 2 ]]; then
                     log_warn "No releases found for this repository."
                     log_warn "Falling back to installation from main branch."

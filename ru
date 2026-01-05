@@ -1606,7 +1606,9 @@ get_latest_release_from_redirect() {
 
     local tag="${effective_url##*/tag/}"
     tag="${tag%%\?*}"
-    printf '%s\n' "${tag#v}"
+    local version="${tag#v}"
+    [[ -n "$version" ]] || return 2
+    printf '%s\n' "$version"
 }
 
 append_query_param() {
@@ -4180,8 +4182,9 @@ cmd_self_update() {
 
     # Detect latest release without GitHub API (avoids rate limits / proxy interference)
     local latest_version=""
-    if ! latest_version=$(get_latest_release_from_redirect); then
-        local rc=$?
+    latest_version=$(get_latest_release_from_redirect)
+    local rc=$?
+    if [[ "$rc" -ne 0 ]]; then
         if [[ "$rc" -eq 1 ]]; then
             log_info "No releases found on GitHub"
             log_info "You may be running a development version"

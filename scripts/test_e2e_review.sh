@@ -396,13 +396,12 @@ test_review_status_json_includes_lock_and_checkpoint() {
     local state_dir="$XDG_STATE_HOME/ru"
     mkdir -p "$state_dir/review"
 
-    local lock_file="$state_dir/review.lock"
+    local lock_dir="$state_dir/review.lock.d"
     local info_file="$state_dir/review.lock.info"
     local checkpoint_file="$state_dir/review/review-checkpoint.json"
 
-    # Hold the lock in this test process.
-    exec 8>"$lock_file"
-    flock -n 8 2>/dev/null || { fail "failed to acquire test lock"; cleanup_test_env; return; }
+    # Simulate holding the lock by creating the lock directory (portable dir-based locking)
+    mkdir -p "$lock_dir"
 
     cat > "$info_file" <<'EOF'
 {
@@ -432,8 +431,6 @@ EOF
     local out_json="$TEMP_DIR/out.json"
     "$RU_SCRIPT" --json review --status --mode=local --non-interactive >"$out_json" 2>/dev/null
     local exit_code=$?
-
-    exec 8>&-
 
     assert_exit_code 0 "$exit_code" "--json review --status exits 0"
     assert_jq_filter "$out_json" '.mode' "status" "JSON mode is status"

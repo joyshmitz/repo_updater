@@ -243,8 +243,14 @@ elif [[ ! -t 0 ]]; then
     # Read from stdin, extract JSON lines
     input=$(grep -E '^\{' || true)
 else
-    echo "Error: No input file specified and stdin is empty" >&2
-    print_help
+    # No input and no stdin: behave like a normal CLI and show help.
+    # This also allows the script to exist in the test suite without failing discovery.
+    if [[ -z "$INPUT_FILE" ]]; then
+        print_help >&2
+        exit 0
+    fi
+    echo "Error: Input file not found: $INPUT_FILE" >&2
+    print_help >&2
     exit 1
 fi
 

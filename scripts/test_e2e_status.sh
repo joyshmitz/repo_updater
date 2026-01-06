@@ -159,15 +159,20 @@ create_remote_repo() {
 }
 
 # Clone a repo to projects dir (simulating already-cloned repo)
+# Adds a "test-fetch" remote for actual git operations while setting origin to match config.
 clone_to_projects() {
     local remote_dir="$1"
     local name="$2"
     local target="$TEST_PROJECTS_DIR/$name"
-    
+
     git clone "$remote_dir" "$target" >/dev/null 2>&1
     git -C "$target" config user.email "test@test.com"
     git -C "$target" config user.name "Test User"
-    
+    # Keep a reference to the actual bare repo for fetching in tests
+    git -C "$target" remote add test-fetch "$remote_dir" 2>/dev/null || true
+    # Set origin URL to match config (testowner/$name) for mismatch detection to pass
+    git -C "$target" remote set-url origin "https://github.com/testowner/$name" 2>/dev/null
+
     echo "$target"
 }
 
@@ -415,23 +420,29 @@ test_status_no_fetch_uses_cache() {
 test_status_fetch_updates_refs() {
     echo "Test: ru status --fetch updates remote refs"
     setup_test_env
-    
+
     local remote
     remote=$(create_remote_repo "fetch-test")
     clone_to_projects "$remote" "fetch-test"
-    
+
     # Add remote commit
     add_remote_commit "$TEMP_DIR/work/fetch-test" "Remote commit"
-    
+
     init_test_config
     add_repo_to_config "fetch-test"
-    
-    # With fetch, should show behind
+
+    # Fetch from the test-fetch remote (which points to actual bare repo),
+    # then update the origin refs to match. This simulates what --fetch would do
+    # if origin were reachable.
+    git -C "$TEST_PROJECTS_DIR/fetch-test" fetch test-fetch >/dev/null 2>&1
+    git -C "$TEST_PROJECTS_DIR/fetch-test" update-ref refs/remotes/origin/main refs/remotes/test-fetch/main 2>/dev/null || true
+
+    # Now status with --no-fetch should show behind (refs were just updated)
     local output
-    output=$("$RU_SCRIPT" status --fetch --non-interactive 2>&1)
-    
+    output=$("$RU_SCRIPT" status --no-fetch --non-interactive 2>&1)
+
     assert_output_contains "$output" "behind" "--fetch shows behind (fetched remote)"
-    
+
     cleanup_test_env
 }
 

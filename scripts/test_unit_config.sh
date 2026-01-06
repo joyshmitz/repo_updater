@@ -455,7 +455,7 @@ test_ensure_config_exists_creates_config_file() {
 }
 
 test_ensure_config_exists_creates_repos_file() {
-    local test_name="ensure_config_exists: Creates repos.txt template"
+    local test_name="ensure_config_exists: Creates public.txt template"
     log_test_start "$test_name"
     local test_env
     test_env=$(create_temp_dir)
@@ -471,9 +471,9 @@ test_ensure_config_exists_creates_repos_file() {
 
     ensure_config_exists >/dev/null 2>&1
 
-    # repos.txt should exist
-    local repos_file="$RU_CONFIG_DIR/repos.d/repos.txt"
-    assert_file_exists "$repos_file" "repos.txt should be created"
+    # public.txt should exist
+    local repos_file="$RU_CONFIG_DIR/repos.d/public.txt"
+    assert_file_exists "$repos_file" "public.txt should be created"
 
     # Should contain format examples
     assert_file_contains "$repos_file" "owner/repo" "Should have format examples"

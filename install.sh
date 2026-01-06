@@ -405,38 +405,24 @@ install_from_latest_release() {
 
     log_step "Downloading ru (latest release)..."
     if ! download_file "$script_url" "$temp_dir/$SCRIPT_NAME"; then
-        # Best-effort: determine whether there are simply no releases.
-        local redirect_rc
-        get_latest_release_from_redirect >/dev/null
-        redirect_rc=$?
-
-        if [[ "$redirect_rc" -eq 1 ]]; then
-            cleanup_temp_dir
-            RU_INSTALLER_TEMP_DIR=""
-            return 2
-        fi
-
-        log_error "Failed to download latest release artifact ($SCRIPT_NAME)"
-        return 1
+        # Download failed - either no releases exist OR the release doesn't have the artifact.
+        # In either case, fall back to main branch.
+        log_warn "Could not download ru from latest release (artifact may not be uploaded yet)"
+        cleanup_temp_dir
+        RU_INSTALLER_TEMP_DIR=""
+        return 2
     fi
 
     # Sanity check: ensure we downloaded a Bash script, not an HTML error page.
     local first_line=""
     IFS= read -r first_line < "$temp_dir/$SCRIPT_NAME" 2>/dev/null || true
     if [[ "$first_line" != "#!/usr/bin/env bash" ]]; then
-        local redirect_rc
-        get_latest_release_from_redirect >/dev/null
-        redirect_rc=$?
-
-        if [[ "$redirect_rc" -eq 1 ]]; then
-            cleanup_temp_dir
-            RU_INSTALLER_TEMP_DIR=""
-            return 2
-        fi
-
-        log_error "Downloaded unexpected content instead of ru (latest release)"
-        log_info "First line: $first_line"
-        return 1
+        # Downloaded something but it's not the script (likely HTML error page).
+        # Fall back to main branch.
+        log_warn "Downloaded unexpected content from release (not a bash script)"
+        cleanup_temp_dir
+        RU_INSTALLER_TEMP_DIR=""
+        return 2
     fi
 
     log_step "Downloading checksums..."

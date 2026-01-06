@@ -179,7 +179,7 @@ DEFAULT_PROJECTS_DIR="${RU_PROJECTS_DIR:-$HOME/projects}"
 DEFAULT_LAYOUT="flat"           # flat | owner-repo | full
 DEFAULT_UPDATE_STRATEGY="ff-only"  # ff-only | rebase | merge
 DEFAULT_AUTOSTASH="false"
-DEFAULT_PARALLEL="1"
+DEFAULT_PARALLEL="4"
 
 #==============================================================================
 # SECTION 2: ANSI COLOR DEFINITIONS
@@ -593,7 +593,7 @@ SYNC OPTIONS:
     --rebase             Use git pull --rebase
     --dry-run            Show what would happen without making changes
     --dir PATH           Override projects directory
-    --parallel N, -j N   Sync N repos concurrently (default: 1, sequential)
+    --parallel N, -j N   Sync N repos concurrently (default: 4)
     --resume             Resume an interrupted sync from where it left off
     --restart            Discard interrupted sync state and start fresh
     --timeout SECONDS    Network timeout for slow operations (default: 30)
@@ -606,12 +606,12 @@ INIT OPTIONS:
     --example            Include example repositories in initial config
 
 ADD OPTIONS:
-    --private            Add to private.txt instead of repos.txt
+    --private            Add to private.txt instead of public.txt
     --from-cwd           Detect repo from current working directory
 
 LIST OPTIONS:
     --paths              Show local paths instead of URLs
-    --public             Show only repos from repos.txt
+    --public             Show only repos from public.txt
     --private            Show only repos from private.txt
 
 DOCTOR OPTIONS:
@@ -657,7 +657,7 @@ EXAMPLES:
     ru prune             Find orphan repos not in config
     ru doctor --review   Check system and review prerequisites
     ru prune --archive   Archive orphan repos
-    ru import repos.txt  Import repos from file (auto-detects visibility)
+    ru import my_repos.txt  Import repos from file (auto-detects visibility)
     ru review --dry-run  Discover issues/PRs without starting reviews
     ru review --status   Show review lock/checkpoint status
     ru review            Start AI-assisted review of issues/PRs
@@ -667,7 +667,7 @@ EXAMPLES:
 
 CONFIGURATION:
     Config:  ~/.config/ru/config
-    Repos:   ~/.config/ru/repos.d/repos.txt
+    Repos:   ~/.config/ru/repos.d/public.txt (and private.txt)
     Logs:    ~/.local/state/ru/logs/
 
 EXIT CODES:
@@ -971,11 +971,11 @@ EOF
         log_verbose "Created config file: $config_file"
     fi
 
-    # Create repos.txt (simplified single file instead of public.txt/private.txt)
-    local repos_file="$repos_dir/repos.txt"
-    if [[ ! -f "$repos_file" ]]; then
-        cat > "$repos_file" << 'EOF'
-# Repository list for ru
+    # Create public.txt for public repositories
+    local public_file="$repos_dir/public.txt"
+    if [[ ! -f "$public_file" ]]; then
+        cat > "$public_file" << 'EOF'
+# Public repositories
 # Add one repository per line
 #
 # Supported formats:
@@ -990,7 +990,7 @@ EOF
 #   koalaman/shellcheck
 EOF
         created_any="true"
-        log_verbose "Created repos file: $repos_file"
+        log_verbose "Created repos file: $public_file"
     fi
 
     # Create state directories
@@ -2788,13 +2788,16 @@ print_conflict_help() {
                 printf '%b\n' "   Issue:  ${YELLOW}Dirty working tree${RESET} (uncommitted changes)" >&2
                 echo "" >&2
                 printf '%b\n' "   ${DIM}Resolution options:${RESET}" >&2
-                printf '%b\n' "     ${GREEN}a)${RESET} Stash and pull:" >&2
+                printf '%b\n' "     ${GREEN}a)${RESET} Use ru with --autostash (${GREEN}recommended${RESET}):" >&2
+                printf '%b\n' "        ${CYAN}ru sync --autostash${RESET}" >&2
+                echo "" >&2
+                printf '%b\n' "     ${GREEN}b)${RESET} Stash and pull manually:" >&2
                 printf '%b\n' "        ${CYAN}cd \"$path\" && git stash && git pull && git stash pop${RESET}" >&2
                 echo "" >&2
-                printf '%b\n' "     ${GREEN}b)${RESET} Commit your changes:" >&2
+                printf '%b\n' "     ${GREEN}c)${RESET} Commit your changes:" >&2
                 printf '%b\n' "        ${CYAN}cd \"$path\" && git add . && git commit -m \"WIP\"${RESET}" >&2
                 echo "" >&2
-                printf '%b\n' "     ${RED}c)${RESET} Discard local changes (${RED}DESTRUCTIVE${RESET}):" >&2
+                printf '%b\n' "     ${RED}d)${RESET} Discard local changes (${RED}DESTRUCTIVE${RESET}):" >&2
                 printf '%b\n' "        ${CYAN}cd \"$path\" && git checkout . && git clean -fd${RESET}" >&2
                 echo "" >&2
                 ;;
@@ -3030,7 +3033,7 @@ cmd_sync() {
         log_info "To add repos:"
         log_info "  ru add owner/repo              # Add to list"
         log_info "  ru sync owner/repo             # Sync directly (without adding)"
-        log_info "  echo 'owner/repo' >> $RU_CONFIG_DIR/repos.d/repos.txt  # Edit file directly"
+        log_info "  echo 'owner/repo' >> $RU_CONFIG_DIR/repos.d/public.txt  # Edit file directly"
         exit 0
     fi
 
@@ -3322,7 +3325,7 @@ cmd_status() {
             if ! resolve_repo_spec "$repo_spec" "$PROJECTS_DIR" "$LAYOUT" url branch custom_name local_path repo_id; then
                 continue
             fi
-            local status="missing" ahead=0 behind=0 dirty="false" branch_name=""
+            local status="missing" ahead=0 behind=0 dirty="false" mismatch="false" branch_name=""
             if [[ -d "$local_path" ]] && is_git_repo "$local_path"; then
                 local status_info
                 status_info=$(get_repo_status "$local_path" "$FETCH_REMOTES")
@@ -3331,6 +3334,10 @@ cmd_status() {
                 behind=$(echo "$status_info" | sed 's/.*BEHIND=\([^ ]*\).*/\1/')
                 dirty=$(echo "$status_info" | sed 's/.*DIRTY=\([^ ]*\).*/\1/')
                 branch_name=$(echo "$status_info" | sed 's/.*BRANCH=\([^ ]*\).*/\1/')
+                # Check for remote URL mismatch
+                if check_remote_mismatch "$local_path" "$url"; then
+                    mismatch="true"
+                fi
             elif [[ -d "$local_path" ]]; then
                 status="not_git"
             fi
@@ -3340,8 +3347,8 @@ cmd_status() {
             local safe_path safe_branch
             safe_path=$(json_escape "$local_path")
             safe_branch=$(json_escape "$branch_name")
-            printf '{"repo":"%s","path":"%s","status":"%s","branch":"%s","ahead":%d,"behind":%d,"dirty":%s}' \
-                "$repo_id" "$safe_path" "$status" "$safe_branch" "$ahead" "$behind" "$dirty"
+            printf '{"repo":"%s","path":"%s","status":"%s","branch":"%s","ahead":%d,"behind":%d,"dirty":%s,"mismatch":%s}' \
+                "$repo_id" "$safe_path" "$status" "$safe_branch" "$ahead" "$behind" "$dirty" "$mismatch"
         done
         echo "]"
     else
@@ -3349,14 +3356,26 @@ cmd_status() {
         log_info "Repository Status ($total repos)"
         [[ "$FETCH_REMOTES" == "true" ]] && log_info "Fetching remotes for accurate status..."
         echo "" >&2
-        printf "%-30s %-12s %-15s %s\n" "Repository" "Status" "Branch" "Ahead/Behind" >&2
-        printf "%-30s %-12s %-15s %s\n" "------------------------------" "------------" "---------------" "------------" >&2
+
+        # First pass: compute max repo_id length for proper column width
+        local max_repo_len=10
+        for repo_spec in "${repos[@]}"; do
+            local url branch custom_name local_path repo_id
+            if resolve_repo_spec "$repo_spec" "$PROJECTS_DIR" "$LAYOUT" url branch custom_name local_path repo_id; then
+                [[ ${#repo_id} -gt $max_repo_len ]] && max_repo_len=${#repo_id}
+            fi
+        done
+
+        # Print header with dynamic width (no truncation)
+        printf "%-${max_repo_len}s  %-12s %-15s %s\n" "Repository" "Status" "Branch" "Ahead/Behind" >&2
+        printf "%-${max_repo_len}s  %-12s %-15s %s\n" "$(printf '%*s' "$max_repo_len" '' | tr ' ' '-')" "------------" "---------------" "------------" >&2
+
         for repo_spec in "${repos[@]}"; do
             local url branch custom_name local_path repo_id
             if ! resolve_repo_spec "$repo_spec" "$PROJECTS_DIR" "$LAYOUT" url branch custom_name local_path repo_id; then
                 continue
             fi
-            local status="missing" ahead=0 behind=0 dirty="false" branch_name="" status_display
+            local status="missing" ahead=0 behind=0 dirty="false" mismatch="false" branch_name="" status_display
             if [[ -d "$local_path" ]] && is_git_repo "$local_path"; then
                 local status_info
                 status_info=$(get_repo_status "$local_path" "$FETCH_REMOTES")
@@ -3365,24 +3384,33 @@ cmd_status() {
                 behind=$(echo "$status_info" | sed 's/.*BEHIND=\([^ ]*\).*/\1/')
                 dirty=$(echo "$status_info" | sed 's/.*DIRTY=\([^ ]*\).*/\1/')
                 branch_name=$(echo "$status_info" | sed 's/.*BRANCH=\([^ ]*\).*/\1/')
+                # Check for remote URL mismatch
+                if check_remote_mismatch "$local_path" "$url"; then
+                    mismatch="true"
+                fi
             elif [[ -d "$local_path" ]]; then
                 status="not_git"
             fi
-            case "$status" in
-                current)     status_display="${GREEN}current${RESET}" ;;
-                behind)      status_display="${YELLOW}behind${RESET}" ;;
-                ahead)       status_display="${CYAN}ahead${RESET}" ;;
-                diverged)    status_display="${RED}diverged${RESET}" ;;
-                missing)     status_display="${DIM}missing${RESET}" ;;
-                not_git)     status_display="${RED}not_git${RESET}" ;;
-                no_upstream) status_display="${YELLOW}no_upstrm${RESET}" ;;
-                *)           status_display="$status" ;;
-            esac
+            # If there's a mismatch, override status display
+            if [[ "$mismatch" == "true" ]]; then
+                status_display="${RED}mismatch${RESET}"
+            else
+                case "$status" in
+                    current)     status_display="${GREEN}current${RESET}" ;;
+                    behind)      status_display="${YELLOW}behind${RESET}" ;;
+                    ahead)       status_display="${CYAN}ahead${RESET}" ;;
+                    diverged)    status_display="${RED}diverged${RESET}" ;;
+                    missing)     status_display="${DIM}missing${RESET}" ;;
+                    not_git)     status_display="${RED}not_git${RESET}" ;;
+                    no_upstream) status_display="${YELLOW}no_upstrm${RESET}" ;;
+                    *)           status_display="$status" ;;
+                esac
+            fi
             [[ "$dirty" == "true" ]] && status_display="${status_display}${YELLOW}*${RESET}"
-            printf "%-30s %-12b %-15s %d/%d\n" "${repo_id:0:30}" "$status_display" "${branch_name:0:15}" "$ahead" "$behind" >&2
+            printf "%-${max_repo_len}s  %-12b %-15s %d/%d\n" "$repo_id" "$status_display" "$branch_name" "$ahead" "$behind" >&2
         done
         echo "" >&2
-        log_info "Legend: * = uncommitted changes"
+        log_info "Legend: * = uncommitted changes, mismatch = remote URL differs from config"
     fi
 }
 
@@ -3394,16 +3422,16 @@ cmd_init() {
 
     if [[ "$created" == "true" ]]; then
         log_success "Created configuration directory: $RU_CONFIG_DIR"
-        log_success "Created repos file: $RU_CONFIG_DIR/repos.d/repos.txt"
+        log_success "Created repos file: $RU_CONFIG_DIR/repos.d/public.txt"
         log_success "Created config file: $RU_CONFIG_DIR/config"
 
-        # Handle --example flag: copy example repos to repos.txt
+        # Handle --example flag: copy example repos to public.txt
         if [[ "$INIT_EXAMPLE" == "true" ]]; then
             local example_file="$SCRIPT_DIR/examples/public.txt"
-            local repos_file="$RU_CONFIG_DIR/repos.d/repos.txt"
+            local public_file="$RU_CONFIG_DIR/repos.d/public.txt"
             if [[ -f "$example_file" ]]; then
-                # Overwrite the template repos.txt with example content
-                cp "$example_file" "$repos_file"
+                # Overwrite the template public.txt with example content
+                cp "$example_file" "$public_file"
                 log_success "Added example repos from $example_file"
             else
                 log_warn "Example file not found: $example_file"
@@ -3414,11 +3442,11 @@ cmd_init() {
         log_info "Next steps:"
         log_info "  1. Add repos:  ru add owner/repo"
         log_info "  2. Sync:       ru sync"
-        log_info "  3. Or edit:    $RU_CONFIG_DIR/repos.d/repos.txt"
+        log_info "  3. Or edit:    $RU_CONFIG_DIR/repos.d/public.txt"
     else
         log_info "Configuration already exists at: $RU_CONFIG_DIR"
         log_info "  Config:  $RU_CONFIG_DIR/config"
-        log_info "  Repos:   $RU_CONFIG_DIR/repos.d/repos.txt"
+        log_info "  Repos:   $RU_CONFIG_DIR/repos.d/public.txt"
     fi
 }
 
@@ -3473,7 +3501,7 @@ cmd_add() {
             echo "# Private repositories" > "$repos_file"
         fi
     else
-        repos_file="$RU_CONFIG_DIR/repos.d/repos.txt"
+        repos_file="$RU_CONFIG_DIR/repos.d/public.txt"
     fi
 
     for repo in "${repo_args[@]}"; do
@@ -3530,7 +3558,7 @@ cmd_add() {
         # Also check the other repos file (public vs private)
         local other_file other_label
         if [[ "$use_private" == "true" ]]; then
-            other_file="$RU_CONFIG_DIR/repos.d/repos.txt"
+            other_file="$RU_CONFIG_DIR/repos.d/public.txt"
             other_label="public"
         else
             other_file="$RU_CONFIG_DIR/repos.d/private.txt"
@@ -3627,7 +3655,7 @@ cmd_import() {
     local repos_dir="$RU_CONFIG_DIR/repos.d"
     mkdir -p "$repos_dir"
 
-    local public_file="$repos_dir/repos.txt"
+    local public_file="$repos_dir/public.txt"
     local private_file="$repos_dir/private.txt"
 
     # Initialize files if needed
@@ -3936,12 +3964,12 @@ cmd_list() {
 
     local repos=()
     if [[ "$filter_public" == "true" ]]; then
-        # Only repos from repos.txt (public)
-        local repos_file="$RU_CONFIG_DIR/repos.d/repos.txt"
-        if [[ -f "$repos_file" ]]; then
+        # Only repos from public.txt
+        local public_file="$RU_CONFIG_DIR/repos.d/public.txt"
+        if [[ -f "$public_file" ]]; then
             while IFS= read -r line; do
                 [[ -n "$line" ]] && repos+=("$line")
-            done < <(load_repo_list "$repos_file")
+            done < <(load_repo_list "$public_file")
         fi
     elif [[ "$filter_private" == "true" ]]; then
         # Only repos from private.txt
@@ -4409,7 +4437,7 @@ cmd_config() {
     echo "  PARALLEL=$PARALLEL" >&2
     echo "" >&2
     log_info "Config file: $RU_CONFIG_DIR/config"
-    log_info "Repos file:  $RU_CONFIG_DIR/repos.d/repos.txt"
+    log_info "Repos file:  $RU_CONFIG_DIR/repos.d/public.txt (and private.txt)"
 
     if [[ "$print_mode" == "true" && -f "$RU_CONFIG_DIR/config" ]]; then
         echo "" >&2

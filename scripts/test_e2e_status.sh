@@ -217,7 +217,7 @@ init_test_config() {
 # Add repo URL to config (must look like owner/repo for parsing)
 add_repo_to_config() {
     local repo_name="$1"
-    local repos_file="$XDG_CONFIG_HOME/ru/repos.d/repos.txt"
+    local repos_file="$XDG_CONFIG_HOME/ru/repos.d/public.txt"
     echo "testowner/$repo_name" >> "$repos_file"
 }
 

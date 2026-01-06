@@ -219,7 +219,7 @@ init_test_config() {
 # Add a test repo to the config
 add_test_repo() {
     local repo="$1"
-    local repos_file="$XDG_CONFIG_HOME/ru/repos.d/repos.txt"
+    local repos_file="$XDG_CONFIG_HOME/ru/repos.d/public.txt"
     echo "$repo" >> "$repos_file"
 }
 

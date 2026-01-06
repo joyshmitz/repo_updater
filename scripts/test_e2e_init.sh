@@ -6,7 +6,7 @@
 # Test coverage:
 #   - Creates ~/.config/ru/ directory structure
 #   - Creates config file with default values
-#   - Creates repos.d/repos.txt with template
+#   - Creates repos.d/public.txt with template
 #   - Subsequent runs detect existing config (idempotent)
 #   - Works on fresh system (no prior config)
 #
@@ -81,20 +81,20 @@ test_init_creates_config_file() {
 }
 
 test_init_creates_repos_file() {
-    log_test_start "ru init creates repos.txt template"
+    log_test_start "ru init creates public.txt template"
     e2e_setup
 
     rm -rf "$XDG_CONFIG_HOME/ru"
-    local repos_file="$XDG_CONFIG_HOME/ru/repos.d/repos.txt"
+    local repos_file="$XDG_CONFIG_HOME/ru/repos.d/public.txt"
 
     "$E2E_RU_SCRIPT" init >/dev/null 2>&1
 
-    assert_file_exists "$repos_file" "repos.txt file created"
-    assert_file_contains "$repos_file" "owner/repo" "repos.txt contains format examples"
-    assert_file_contains "$repos_file" "@branch" "repos.txt documents branch pinning"
+    assert_file_exists "$repos_file" "public.txt file created"
+    assert_file_contains "$repos_file" "owner/repo" "public.txt contains format examples"
+    assert_file_contains "$repos_file" "@branch" "public.txt documents branch pinning"
 
     e2e_cleanup
-    log_test_pass "ru init creates repos.txt template"
+    log_test_pass "ru init creates public.txt template"
 }
 
 test_init_idempotent() {
@@ -177,19 +177,19 @@ test_init_example_flag() {
     e2e_setup
 
     rm -rf "$XDG_CONFIG_HOME/ru"
-    local repos_file="$XDG_CONFIG_HOME/ru/repos.d/repos.txt"
+    local repos_file="$XDG_CONFIG_HOME/ru/repos.d/public.txt"
 
     # Run init with --example flag
     local output exit_code=0
     output=$("$E2E_RU_SCRIPT" init --example 2>&1) || exit_code=$?
 
     assert_equals "0" "$exit_code" "ru init --example exits with code 0"
-    assert_file_exists "$repos_file" "repos.txt file created with --example"
+    assert_file_exists "$repos_file" "public.txt file created with --example"
 
     # Verify example repos are present (from examples/public.txt)
-    assert_file_contains "$repos_file" "charmbracelet/gum" "repos.txt contains charmbracelet/gum"
-    assert_file_contains "$repos_file" "cli/cli" "repos.txt contains cli/cli"
-    assert_file_contains "$repos_file" "koalaman/shellcheck" "repos.txt contains koalaman/shellcheck"
+    assert_file_contains "$repos_file" "charmbracelet/gum" "public.txt contains charmbracelet/gum"
+    assert_file_contains "$repos_file" "cli/cli" "public.txt contains cli/cli"
+    assert_file_contains "$repos_file" "koalaman/shellcheck" "public.txt contains koalaman/shellcheck"
     assert_contains "$output" "Added example repos" "Output confirms example repos added"
 
     e2e_cleanup

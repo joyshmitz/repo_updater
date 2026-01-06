@@ -45,7 +45,7 @@ test_load_repo_list_basic() {
     local test_env
     test_env=$(create_test_env)
 
-    local list_file="$test_env/repos.txt"
+    local list_file="$test_env/public.txt"
     cat > "$list_file" << 'EOF'
 owner/repo1
 owner/repo2
@@ -68,7 +68,7 @@ test_load_repo_list_skips_comments() {
     local test_env
     test_env=$(create_test_env)
 
-    local list_file="$test_env/repos.txt"
+    local list_file="$test_env/public.txt"
     cat > "$list_file" << 'EOF'
 # This is a comment
 owner/repo1
@@ -92,7 +92,7 @@ test_load_repo_list_skips_empty_lines() {
     local test_env
     test_env=$(create_test_env)
 
-    local list_file="$test_env/repos.txt"
+    local list_file="$test_env/public.txt"
     cat > "$list_file" << 'EOF'
 owner/repo1
 
@@ -116,7 +116,7 @@ test_load_repo_list_trims_whitespace() {
     local test_env
     test_env=$(create_test_env)
 
-    local list_file="$test_env/repos.txt"
+    local list_file="$test_env/public.txt"
     cat > "$list_file" << 'EOF'
   owner/repo1
 	owner/repo2
@@ -156,7 +156,7 @@ test_load_repo_list_with_branch_and_name() {
     local test_env
     test_env=$(create_test_env)
 
-    local list_file="$test_env/repos.txt"
+    local list_file="$test_env/public.txt"
     cat > "$list_file" << 'EOF'
 owner/repo@develop
 owner/other as myname
@@ -574,7 +574,7 @@ test_get_all_repos_loads_single_file() {
     LAYOUT="flat"
 
     mkdir -p "$RU_CONFIG_DIR/repos.d"
-    cat > "$RU_CONFIG_DIR/repos.d/repos.txt" << 'EOF'
+    cat > "$RU_CONFIG_DIR/repos.d/public.txt" << 'EOF'
 owner/repo1
 owner/repo2
 EOF
@@ -658,9 +658,9 @@ test_get_all_repos_ignores_non_txt() {
     mkdir -p "$RU_CONFIG_DIR/repos.d"
 
     # Mix of .txt and other files
-    echo "owner/wanted" > "$RU_CONFIG_DIR/repos.d/repos.txt"
+    echo "owner/wanted" > "$RU_CONFIG_DIR/repos.d/public.txt"
     echo "owner/ignored1" > "$RU_CONFIG_DIR/repos.d/repos.md"
-    echo "owner/ignored2" > "$RU_CONFIG_DIR/repos.d/repos.txt.bak"
+    echo "owner/ignored2" > "$RU_CONFIG_DIR/repos.d/public.txt.bak"
 
     local result
     result=$(get_all_repos)

@@ -818,6 +818,12 @@ load_agent_sweep_state() {
     saved_run_id=$(json_get_field "$state_json" "run_id")
     saved_status=$(json_get_field "$state_json" "status")
 
+    # Validate required fields
+    if [[ -z "$saved_run_id" ]]; then
+        log_verbose "State file missing run_id, cannot resume"
+        return 1
+    fi
+
     # Only resume in_progress or interrupted states
     if [[ "$saved_status" != "in_progress" && "$saved_status" != "interrupted" ]]; then
         log_verbose "Previous run was '$saved_status', not resumable"
@@ -852,6 +858,9 @@ load_agent_sweep_state() {
             while IFS= read -r repo; do
                 [[ -n "$repo" ]] && COMPLETED_REPOS+=("$repo")
             done < <(python3 -c "import json,sys; [print(r) for r in json.loads(sys.stdin.read())]" <<<"$completed_json" 2>/dev/null)
+        else
+            log_warn "Cannot parse completed repos: neither jq nor python3 available"
+            log_warn "Resume may re-process already completed repositories"
         fi
     fi
 
@@ -14383,6 +14392,7 @@ run_parallel_preflight() {
     # Export counts for summary display (read by callers)
     # shellcheck disable=SC2034  # These are exported for callers to read
     PREFLIGHT_PASSED_COUNT=${#passed_repos[@]}
+    # shellcheck disable=SC2034
     PREFLIGHT_FAILED_COUNT=${#failed_repos[@]}
 
     # Log summary

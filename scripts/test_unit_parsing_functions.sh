@@ -62,6 +62,9 @@ cleanup_test_env() {
     fi
 }
 
+# Ensure cleanup on exit or interrupt
+trap cleanup_test_env EXIT
+
 pass() {
     echo -e "${GREEN}PASS${RESET}: $1"
     ((TESTS_PASSED++))
@@ -176,7 +179,7 @@ test_parse_valid_result_event() {
         if echo "$event_data" | jq -e '.status == "success"' >/dev/null 2>&1; then
             pass "parse_stream_json_event: extracts result status"
         else
-            fail "parse_stream_json_event: wrong result data" "$event_data"
+            fail "parse_stream_json_event: wrong result data" "status=success" "$event_data"
         fi
     else
         fail "parse_stream_json_event: should succeed for result event"
@@ -205,10 +208,8 @@ test_parse_empty_input() {
     # Note: jq treats empty string as valid (no tokens), so the function
     # may succeed with an empty/unknown type or may fail. Either is acceptable.
     if parse_stream_json_event "$json" event_type event_data; then
-        # Function accepted empty input - verify it set some type
-        if [[ -n "$event_type" || -z "$event_type" ]]; then
-            pass "parse_stream_json_event: handles empty input gracefully"
-        fi
+        # Function accepted empty input - this is acceptable behavior
+        pass "parse_stream_json_event: handles empty input gracefully"
     else
         pass "parse_stream_json_event: rejects empty input"
     fi

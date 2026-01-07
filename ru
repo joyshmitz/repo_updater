@@ -16867,9 +16867,95 @@ run_sequential_agent_sweep() {
 run_parallel_agent_sweep() {
     # shellcheck disable=SC2178
     local -n repos_ref=$1
-    local max_parallel="$2"
-    # Simplified: just run sequentially for now (full impl in separate bead)
-    run_sequential_agent_sweep repos_ref
+    local max_parallel="${2:-4}"
+    local total=${#repos_ref[@]}
+
+    # For small batches, just use sequential mode
+    if [[ $total -le 1 ]] || [[ "$max_parallel" -le 1 ]]; then
+        run_sequential_agent_sweep repos_ref
+        return $?
+    fi
+
+    log_info "Starting parallel sweep: $total repos, max $max_parallel workers"
+    progress_init "$total"
+
+    # Create work queue and lock directory
+    local work_queue lock_dir
+    work_queue=$(mktemp)
+    lock_dir="${AGENT_SWEEP_STATE_DIR:-/tmp}/locks_$$"
+    mkdir -p "$lock_dir"
+
+    # Populate work queue
+    printf '%s\n' "${repos_ref[@]}" > "$work_queue"
+
+    # Track worker PIDs and results
+    local -a worker_pids=()
+    local any_failed=false
+
+    # Spawn workers
+    local i
+    for ((i=0; i<max_parallel && i<total; i++)); do
+        (
+            local worker_id=$i
+            log_debug "Worker $worker_id starting"
+
+            while true; do
+                # Check global backoff before claiming work
+                agent_sweep_backoff_wait_if_needed || true
+
+                # Atomic dequeue: acquire lock, read first line, remove it
+                local repo_spec=""
+                if dir_lock_acquire "${lock_dir}/queue.lock" 30 2>/dev/null; then
+                    if [[ -s "$work_queue" ]]; then
+                        repo_spec=$(head -n1 "$work_queue" 2>/dev/null || true)
+                        if [[ -n "$repo_spec" ]]; then
+                            tail -n +2 "$work_queue" > "${work_queue}.tmp" 2>/dev/null || true
+                            mv "${work_queue}.tmp" "$work_queue" 2>/dev/null || true
+                        fi
+                    fi
+                    dir_lock_release "${lock_dir}/queue.lock" 2>/dev/null || true
+                fi
+
+                # No more work
+                [[ -z "$repo_spec" ]] && break
+
+                # Process this repo
+                local rn
+                rn=$(get_repo_name "$repo_spec")
+                progress_start_repo "$rn"
+                log_debug "Worker $worker_id processing $rn"
+
+                if run_single_agent_workflow "$repo_spec"; then
+                    record_repo_result "$rn" "success"
+                    progress_complete_repo "success"
+                else
+                    local exit_code=$?
+                    record_repo_result "$rn" "failed" "$exit_code"
+                    progress_complete_repo "failed" "exit code $exit_code"
+                fi
+            done
+
+            log_debug "Worker $worker_id finished"
+        ) &
+        worker_pids+=($!)
+    done
+
+    # Wait for all workers
+    local pid
+    for pid in "${worker_pids[@]}"; do
+        if ! wait "$pid"; then
+            any_failed=true
+        fi
+    done
+
+    # Cleanup
+    rm -f "$work_queue" "${work_queue}.tmp"
+    rm -rf "$lock_dir"
+
+    # Show summary
+    progress_summary
+
+    [[ "$any_failed" != true ]]
 }
 
 run_single_agent_workflow() {

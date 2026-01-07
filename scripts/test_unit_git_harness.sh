@@ -209,7 +209,8 @@ test_create_repo_shallow() {
     repo=$(git_harness_create_repo "shallow" --shallow=2)
 
     assert_true "git_harness_is_shallow \"$repo\"" "Repo is shallow"
-    assert_true "[[ -f \"$repo/.git/shallow\" ]]" "Shallow file exists"
+    # Use git plumbing to verify shallow status (per AGENTS.md)
+    assert_true "[[ \"\$(git -C \"$repo\" rev-parse --is-shallow-repository)\" == \"true\" ]]" "Git reports shallow repository"
 
     git_harness_cleanup
     log_test_pass "git_harness_create_repo --shallow"
@@ -401,11 +402,7 @@ test_is_dirty_false() {
     local repo
     repo=$(git_harness_create_repo "clean")
 
-    if git_harness_is_dirty "$repo"; then
-        _tf_fail "Should be clean"
-    else
-        _tf_pass "Clean repo not dirty"
-    fi
+    assert_false "git_harness_is_dirty \"$repo\"" "Clean repo should not be dirty"
 
     git_harness_cleanup
     log_test_pass "git_harness_is_dirty returns false for clean"
@@ -418,11 +415,7 @@ test_is_dirty_true() {
     local repo
     repo=$(git_harness_create_repo "dirtychk" --dirty)
 
-    if git_harness_is_dirty "$repo"; then
-        _tf_pass "Dirty repo detected"
-    else
-        _tf_fail "Should be dirty"
-    fi
+    assert_true "git_harness_is_dirty \"$repo\"" "Dirty repo detected"
 
     git_harness_cleanup
     log_test_pass "git_harness_is_dirty returns true for dirty"

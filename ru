@@ -802,6 +802,9 @@ EOF
 # Returns 0 if state loaded successfully, 1 if no state or invalid.
 # Populates: RUN_ID, COMPLETED_REPOS[], SWEEP_* globals
 load_agent_sweep_state() {
+    # Guard: require state dir to be initialized
+    [[ -z "$AGENT_SWEEP_STATE_DIR" ]] && return 1
+
     local state_file="${AGENT_SWEEP_STATE_DIR}/state.json"
     [[ ! -f "$state_file" ]] && return 1
 
@@ -857,6 +860,9 @@ load_agent_sweep_state() {
 
 # Remove agent-sweep state file (for --restart or clean completion).
 cleanup_agent_sweep_state() {
+    # Guard: require state dir to be initialized
+    [[ -z "$AGENT_SWEEP_STATE_DIR" ]] && return 0
+
     local state_file="${AGENT_SWEEP_STATE_DIR}/state.json"
     rm -f "$state_file"
     log_verbose "Cleaned up agent-sweep state"

@@ -9,6 +9,8 @@
 # - is_file_denied()
 #
 # shellcheck disable=SC1091  # Sourced files checked separately
+# shellcheck disable=SC2034  # Variables used by sourced functions
+# shellcheck disable=SC2123  # PATH modification is intentional for testing
 # shellcheck disable=SC2317  # Test functions invoked indirectly via run_test
 
 set -uo pipefail

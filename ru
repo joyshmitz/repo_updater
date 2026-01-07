@@ -15445,9 +15445,12 @@ cmd_agent_sweep() {
         for repo_spec in "${dirty_repos[@]}"; do
             local rn is_done=false
             rn=$(get_repo_name "$repo_spec")
-            for c in "${COMPLETED_REPOS[@]:-}"; do
-                [[ "$c" == "$rn" ]] && is_done=true && break
-            done
+            # Check if repo is in completed list (handle empty array safely)
+            if [[ ${#COMPLETED_REPOS[@]} -gt 0 ]]; then
+                for c in "${COMPLETED_REPOS[@]}"; do
+                    [[ "$c" == "$rn" ]] && is_done=true && break
+                done
+            fi
             [[ "$is_done" != true ]] && remaining+=("$repo_spec")
         done
         dirty_repos=("${remaining[@]}")

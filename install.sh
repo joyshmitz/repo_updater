@@ -166,6 +166,111 @@ maybe_cache_bust_url() {
     esac
 }
 
+#==============================================================================
+# NTM INTEGRATION
+# Optional installation of ntm (Named Tmux Manager) for agent-sweep support
+#==============================================================================
+
+# Check if ntm is installed
+check_ntm_installed() {
+    command -v ntm &>/dev/null
+}
+
+# Get ntm version
+get_ntm_version() {
+    ntm --version 2>/dev/null | head -1
+}
+
+# Check if tmux is installed (required for ntm)
+check_tmux_installed() {
+    command -v tmux &>/dev/null
+}
+
+# Prompt user for ntm installation
+# Returns: 0 if user wants to install, 1 if skip
+prompt_ntm_install() {
+    # Non-interactive mode: skip prompt
+    [[ "${RU_NON_INTERACTIVE:-}" == "1" ]] && return 1
+
+    # Explicit yes: install
+    [[ "${RU_INSTALL_NTM:-}" == "yes" ]] && return 0
+
+    # Explicit no: skip
+    [[ "${RU_INSTALL_NTM:-}" == "no" ]] && return 1
+
+    # Not a terminal: skip
+    [[ ! -t 0 ]] && return 1
+
+    printf '\n' >&2
+    printf '%b\n' "${BOLD}Optional: ntm Integration${RESET}" >&2
+    printf '%s\n' "────────────────────────────" >&2
+    printf '\n' >&2
+    printf '%b\n' "ntm (Named Tmux Manager) enables the ${BOLD}ru agent-sweep${RESET} command:" >&2
+    printf '%s\n' "  • AI-assisted commit and release automation" >&2
+    printf '%s\n' "  • Automated code review across multiple repos" >&2
+    printf '%s\n' "  • Structured commit plan generation" >&2
+    printf '\n' >&2
+
+    if ! check_tmux_installed; then
+        log_warn "tmux is required for ntm but not found."
+        log_info "Install tmux first: apt install tmux (or brew install tmux)"
+        return 1
+    fi
+
+    printf 'Install ntm? [y/N] ' >&2
+    IFS= read -r response
+    case "$response" in
+        [yY]|[yY][eE][sS]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Install ntm
+install_ntm() {
+    if check_ntm_installed; then
+        log_info "ntm already installed: $(get_ntm_version)"
+        return 0
+    fi
+
+    log_step "Installing ntm..."
+
+    # Download and run ntm installer
+    local ntm_install_url="https://raw.githubusercontent.com/Dicklesworthstone/ntm/main/install.sh"
+    if command_exists curl; then
+        if curl -fsSL "$ntm_install_url" | bash; then
+            log_success "ntm installed successfully"
+            return 0
+        fi
+    elif command_exists wget; then
+        if wget -qO- "$ntm_install_url" | bash; then
+            log_success "ntm installed successfully"
+            return 0
+        fi
+    fi
+
+    log_warn "Failed to install ntm. You can install it manually later:"
+    log_info "  curl -fsSL $ntm_install_url | bash"
+    return 1
+}
+
+# Run ntm integration (check, prompt, install)
+maybe_install_ntm() {
+    # Skip if already installed
+    if check_ntm_installed; then
+        log_info "ntm detected: $(get_ntm_version)"
+        log_info "ru agent-sweep is available"
+        return 0
+    fi
+
+    # Prompt user
+    if prompt_ntm_install; then
+        install_ntm
+    else
+        log_info "Skipped ntm installation"
+        log_info "You can install it later to enable: ru agent-sweep"
+    fi
+}
+
 # Self-refresh the installer when executed from a pipe (/dev/fd/*), to avoid
 # stale CDN/proxy caches when users run:
 #   curl -fsSL https://raw.githubusercontent.com/.../install.sh | bash
@@ -656,6 +761,9 @@ main() {
             fi
         fi
     fi
+
+    # Offer to install ntm for agent-sweep support
+    maybe_install_ntm
 
     # Check PATH and offer to add if needed
     if ! in_path "$install_dir"; then

@@ -4159,6 +4159,8 @@ parse_args() {
                 ;;
             --json)
                 JSON_OUTPUT="true"
+                # Also pass to subcommands that handle --json internally
+                [[ "$COMMAND" == "agent-sweep" ]] && ARGS+=("$1")
                 shift
                 ;;
             -q|--quiet)
@@ -4174,7 +4176,7 @@ parse_args() {
                 shift
                 ;;
             --dry-run)
-                if [[ "$COMMAND" == "review" ]]; then
+                if [[ "$COMMAND" == "review" || "$COMMAND" == "agent-sweep" ]]; then
                     ARGS+=("$1")
                 elif [[ -z "$COMMAND" ]]; then
                     pending_global_args+=("$1")
@@ -15648,8 +15650,11 @@ cmd_agent_sweep() {
     # Concurrent instance lock
     local lock_dir="$state_dir/instance.lock"
 
-    # Helper to release lock (removes pid file then directory)
-    release_lock() { rm -f "$lock_dir/pid" 2>/dev/null; rmdir "$lock_dir" 2>/dev/null || true; }
+    # Helper to release lock - uses state_dir which persists in closure
+    release_lock() {
+        rm -f "$state_dir/instance.lock/pid" 2>/dev/null
+        rmdir "$state_dir/instance.lock" 2>/dev/null || true
+    }
 
     if ! mkdir "$lock_dir" 2>/dev/null; then
         local existing_pid
@@ -15659,7 +15664,9 @@ cmd_agent_sweep() {
         return 1
     fi
     echo $$ > "$lock_dir/pid"
-    trap 'release_lock' EXIT
+    # Use double quotes to expand lock_dir at trap definition time (not execution time)
+    # shellcheck disable=SC2064
+    trap "rm -f '$lock_dir/pid' 2>/dev/null; rmdir '$lock_dir' 2>/dev/null || true" EXIT
     log_debug "Acquired instance lock: $lock_dir (PID: $$)"
 
     # Check ntm availability

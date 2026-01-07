@@ -16391,6 +16391,12 @@ repo_preflight_check() {
     local repo_path="$1"
     PREFLIGHT_SKIP_REASON=""
 
+    # Check 0: Path exists?
+    if [[ -z "$repo_path" || ! -d "$repo_path" ]]; then
+        PREFLIGHT_SKIP_REASON="repo_path_not_found"
+        return 1
+    fi
+
     # Check 1: Is it a git repo?
     if ! git -C "$repo_path" rev-parse --is-inside-work-tree &>/dev/null; then
         PREFLIGHT_SKIP_REASON="not_a_git_repo"
@@ -16495,6 +16501,7 @@ repo_preflight_check() {
 preflight_skip_reason_message() {
     local reason="$1"
     case "$reason" in
+        repo_path_not_found)        echo "Repository path not found" ;;
         not_a_git_repo)             echo "Not a git repository" ;;
         git_email_not_configured)   echo "Git user.email is not configured" ;;
         git_name_not_configured)    echo "Git user.name is not configured" ;;
@@ -16519,6 +16526,7 @@ preflight_skip_reason_message() {
 preflight_skip_reason_action() {
     local reason="$1"
     case "$reason" in
+        repo_path_not_found)        echo "Ensure the repo exists or run: ru sync" ;;
         not_a_git_repo)             echo "Verify the directory is a git repository" ;;
         git_email_not_configured)   echo "Run: git config user.email \"you@example.com\"" ;;
         git_name_not_configured)    echo "Run: git config user.name \"Your Name\"" ;;
@@ -16845,6 +16853,12 @@ cmd_agent_sweep() {
         log_info "Restarting agent-sweep (clearing previous state)..."
         cleanup_agent_sweep_state
     fi
+
+    # If resuming, honor prior --with-release unless explicitly overridden
+    if [[ "$resume" == true && "${SWEEP_WITH_RELEASE:-false}" == "true" ]]; then
+        with_release="true"
+    fi
+    SWEEP_WITH_RELEASE="$with_release"
 
     if [[ ${#dirty_repos[@]} -eq 0 ]]; then
         log_success "All repositories already processed."

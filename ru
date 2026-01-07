@@ -15076,6 +15076,328 @@ run_parallel_preflight() {
 }
 
 #==============================================================================
+# SECTION 13.10: AGENT SWEEP COMMAND
+#==============================================================================
+
+#------------------------------------------------------------------------------
+# cmd_agent_sweep: Main entry point for agent-sweep command
+#
+# Orchestrates AI coding agents to process repositories with uncommitted changes.
+# Uses ntm (Named Tmux Manager) to spawn and manage agent sessions.
+#
+# Returns:
+#   0 - All repos processed successfully
+#   1 - Some repos failed
+#   2 - Conflicts or quality gate failures
+#   3 - System/dependency error (ntm, tmux missing)
+#   4 - Invalid arguments
+#   5 - Interrupted (use --resume to continue)
+#------------------------------------------------------------------------------
+cmd_agent_sweep() {
+    # Default configuration
+    local with_release=false
+    local parallel=1
+    local repos_filter=""
+    local dry_run=false
+    local resume=false
+    local restart=false
+    local keep_sessions=false
+    local keep_sessions_on_fail=false
+    local attach_on_fail=false
+    local execution_mode="agent"
+    local secret_scan_mode="warn"
+    local json_output=false
+    local phase1_timeout="${AGENT_SWEEP_PHASE1_TIMEOUT:-300}"
+    local phase2_timeout="${AGENT_SWEEP_PHASE2_TIMEOUT:-600}"
+    local phase3_timeout="${AGENT_SWEEP_PHASE3_TIMEOUT:-300}"
+
+    # Parse agent-sweep specific arguments
+    local arg
+    for arg in "${ARGS[@]}"; do
+        case "$arg" in
+            --with-release) with_release=true ;;
+            -j[0-9]*) parallel="${arg#-j}" ;;
+            --parallel=*) parallel="${arg#--parallel=}" ;;
+            --repos=*) repos_filter="${arg#--repos=}" ;;
+            --dry-run) dry_run=true ;;
+            --resume) resume=true ;;
+            --restart) restart=true ;;
+            --keep-sessions) keep_sessions=true ;;
+            --keep-sessions-on-fail) keep_sessions_on_fail=true ;;
+            --attach-on-fail) attach_on_fail=true ;;
+            --execution-mode=*) execution_mode="${arg#--execution-mode=}" ;;
+            --secret-scan=*) secret_scan_mode="${arg#--secret-scan=}" ;;
+            --phase1-timeout=*) phase1_timeout="${arg#--phase1-timeout=}" ;;
+            --phase2-timeout=*) phase2_timeout="${arg#--phase2-timeout=}" ;;
+            --phase3-timeout=*) phase3_timeout="${arg#--phase3-timeout=}" ;;
+            --json) json_output=true ;;
+        esac
+    done
+
+    # Validate parallel count
+    if ! [[ "$parallel" =~ ^[1-9][0-9]*$ ]]; then
+        log_error "Invalid parallel count: $parallel (must be positive integer)"
+        return 4
+    fi
+
+    # Validate execution mode
+    case "$execution_mode" in
+        plan|apply|agent) ;;
+        *) log_error "Invalid execution mode: $execution_mode"; return 4 ;;
+    esac
+
+    # Validate secret scan mode
+    case "$secret_scan_mode" in
+        none|warn|block) ;;
+        *) log_error "Invalid secret-scan mode: $secret_scan_mode"; return 4 ;;
+    esac
+
+    # Resume and restart are mutually exclusive
+    if [[ "$resume" == true && "$restart" == true ]]; then
+        log_error "Cannot use --resume and --restart together"
+        return 4
+    fi
+
+    # Ensure state directory exists
+    local state_dir="${AGENT_SWEEP_STATE_DIR:-$RU_STATE_DIR/agent-sweep}"
+    ensure_dir "$state_dir"
+
+    # Concurrent instance lock
+    local lock_dir="$state_dir/instance.lock"
+    if ! mkdir "$lock_dir" 2>/dev/null; then
+        local existing_pid
+        existing_pid=$(cat "$lock_dir/pid" 2>/dev/null || echo "unknown")
+        log_error "Another agent-sweep is already running (PID: $existing_pid)"
+        log_error "If stale, remove: $lock_dir"
+        return 1
+    fi
+    echo $$ > "$lock_dir/pid"
+    trap 'rmdir "$lock_dir" 2>/dev/null; rm -f "$lock_dir/pid" 2>/dev/null' EXIT
+
+    # Check ntm availability
+    if ! ntm_check_available; then
+        log_error "ntm (Named Tmux Manager) is not available"
+        rmdir "$lock_dir" 2>/dev/null || true
+        return 3
+    fi
+
+    # Check tmux availability
+    if ! command -v tmux &>/dev/null; then
+        log_error "tmux is required for agent-sweep"
+        rmdir "$lock_dir" 2>/dev/null || true
+        return 3
+    fi
+
+    # Load all configured repos
+    local -a repos=()
+    load_all_repos repos
+
+    if [[ ${#repos[@]} -eq 0 ]]; then
+        log_error "No repositories configured. Run 'ru add' to add repositories."
+        rmdir "$lock_dir" 2>/dev/null || true
+        return 4
+    fi
+
+    # Filter to repos with uncommitted changes
+    local -a dirty_repos=()
+    local repo_spec repo_path
+    for repo_spec in "${repos[@]}"; do
+        repo_path=$(repo_spec_to_path "$repo_spec")
+        if [[ -d "$repo_path" ]] && has_uncommitted_changes "$repo_path"; then
+            if [[ -z "$repos_filter" ]] || [[ "$repo_spec" == *"$repos_filter"* ]]; then
+                dirty_repos+=("$repo_spec")
+            fi
+        fi
+    done
+
+    # Handle empty case
+    if [[ ${#dirty_repos[@]} -eq 0 ]]; then
+        if [[ "$json_output" == true ]]; then
+            jq -n '{status:"success",message:"No repositories with uncommitted changes",repos_processed:0}'
+        else
+            log_success "No repositories with uncommitted changes found."
+        fi
+        rmdir "$lock_dir" 2>/dev/null || true
+        return 0
+    fi
+
+    # Dry run mode
+    if [[ "$dry_run" == true ]]; then
+        if [[ "$json_output" == true ]]; then
+            printf '%s\n' "${dirty_repos[@]}" | jq -R . | jq -s '{mode:"dry-run",repos:.}'
+        else
+            log_info "Dry run: ${#dirty_repos[@]} repositories with uncommitted changes:"
+            for repo_spec in "${dirty_repos[@]}"; do
+                log_info "  - $(get_repo_name "$repo_spec")"
+            done
+        fi
+        rmdir "$lock_dir" 2>/dev/null || true
+        return 0
+    fi
+
+    # Setup results tracking
+    setup_agent_sweep_results
+
+    # Handle resume/restart
+    if [[ "$resume" == true ]] && load_agent_sweep_state; then
+        log_info "Resuming previous agent-sweep run..."
+        local -a remaining=()
+        for repo_spec in "${dirty_repos[@]}"; do
+            local rn is_done=false
+            rn=$(get_repo_name "$repo_spec")
+            for c in "${COMPLETED_REPOS[@]:-}"; do
+                [[ "$c" == "$rn" ]] && is_done=true && break
+            done
+            [[ "$is_done" != true ]] && remaining+=("$repo_spec")
+        done
+        dirty_repos=("${remaining[@]}")
+        log_info "Resuming with ${#dirty_repos[@]} remaining repositories"
+    elif [[ "$restart" == true ]]; then
+        log_info "Restarting agent-sweep (clearing previous state)..."
+        cleanup_agent_sweep_state
+    fi
+
+    if [[ ${#dirty_repos[@]} -eq 0 ]]; then
+        log_success "All repositories already processed."
+        rmdir "$lock_dir" 2>/dev/null || true
+        return 0
+    fi
+
+    # Run preflight checks
+    log_step "Running preflight checks..."
+    if ! run_parallel_preflight dirty_repos; then
+        if [[ ${#dirty_repos[@]} -eq 0 ]]; then
+            log_error "All repositories failed preflight checks"
+            rmdir "$lock_dir" 2>/dev/null || true
+            return 2
+        fi
+    fi
+
+    # Setup trap handlers
+    setup_agent_sweep_traps
+
+    # Export configuration
+    export AGENT_SWEEP_WITH_RELEASE="$with_release"
+    export AGENT_SWEEP_EXECUTION_MODE="$execution_mode"
+    export AGENT_SWEEP_SECRET_SCAN="$secret_scan_mode"
+    export AGENT_SWEEP_PHASE1_TIMEOUT="$phase1_timeout"
+    export AGENT_SWEEP_PHASE2_TIMEOUT="$phase2_timeout"
+    export AGENT_SWEEP_PHASE3_TIMEOUT="$phase3_timeout"
+    export AGENT_SWEEP_JSON_OUTPUT="$json_output"
+
+    # Process repositories
+    local sweep_exit=0
+    log_step "Processing ${#dirty_repos[@]} repositories..."
+
+    if [[ $parallel -gt 1 ]]; then
+        log_info "Running $parallel agents in parallel"
+        run_parallel_agent_sweep dirty_repos "$parallel" || sweep_exit=$?
+    else
+        run_sequential_agent_sweep dirty_repos || sweep_exit=$?
+    fi
+
+    # Print summary
+    print_agent_sweep_summary
+
+    # Handle attach-on-fail
+    if [[ "$attach_on_fail" == true && $sweep_exit -ne 0 ]]; then
+        local failed_session
+        failed_session=$(get_first_failed_session)
+        [[ -n "$failed_session" ]] && tmux attach-session -t "$failed_session" 2>/dev/null || true
+    fi
+
+    # Cleanup
+    if [[ "$keep_sessions" != true ]]; then
+        if [[ "$keep_sessions_on_fail" != true || $sweep_exit -eq 0 ]]; then
+            cleanup_agent_sweep_sessions
+        fi
+    fi
+
+    rmdir "$lock_dir" 2>/dev/null || true
+    return $sweep_exit
+}
+
+# Helper functions for agent-sweep (stubs for dependent beads)
+run_sequential_agent_sweep() {
+    # shellcheck disable=SC2178
+    local -n repos_ref=$1
+    local any_failed=false
+    for repo_spec in "${repos_ref[@]}"; do
+        local rn=$(get_repo_name "$repo_spec")
+        log_step "Processing: $rn"
+        if run_single_agent_workflow "$repo_spec"; then
+            record_repo_result "$rn" "success"
+            log_success "Completed: $rn"
+        else
+            record_repo_result "$rn" "failed" "$?"
+            log_error "Failed: $rn"
+            any_failed=true
+        fi
+    done
+    [[ "$any_failed" != true ]]
+}
+
+run_parallel_agent_sweep() {
+    # shellcheck disable=SC2178
+    local -n repos_ref=$1
+    local max_parallel="$2"
+    # Simplified: just run sequentially for now (full impl in separate bead)
+    run_sequential_agent_sweep repos_ref
+}
+
+run_single_agent_workflow() {
+    local repo_spec="$1"
+    local rn=$(get_repo_name "$repo_spec")
+    local rp=$(repo_spec_to_path "$repo_spec")
+    load_per_repo_agent_config "$rp"
+    if [[ "$AGENT_SWEEP_ENABLED" != "true" ]]; then
+        log_verbose "Skipping $rn (disabled)"
+        return 0
+    fi
+    # TODO: Full implementation in bd-b00c
+    log_verbose "Would process $rn with agent workflow"
+    return 0
+}
+
+get_first_failed_session() {
+    local sf="${AGENT_SWEEP_STATE_DIR:-$RU_STATE_DIR/agent-sweep}/results.ndjson"
+    [[ -f "$sf" ]] && grep '"status":"failed"' "$sf" | head -1 | jq -r '.session // empty' 2>/dev/null
+}
+
+record_repo_result() {
+    local rn="$1" st="$2" dt="${3:-}"
+    local sf="${AGENT_SWEEP_STATE_DIR:-$RU_STATE_DIR/agent-sweep}/results.ndjson"
+    local ts=$(date -Iseconds)
+    printf '{"repo":"%s","status":"%s","detail":"%s","timestamp":"%s"}\n' \
+        "$(json_escape "$rn")" "$st" "$dt" "$ts" >> "$sf"
+    [[ "$st" == "success" || "$st" == "failed" ]] && \
+        echo "$rn" >> "${AGENT_SWEEP_STATE_DIR:-$RU_STATE_DIR/agent-sweep}/completed_repos.txt"
+}
+
+print_agent_sweep_summary() {
+    local sf="${AGENT_SWEEP_STATE_DIR:-$RU_STATE_DIR/agent-sweep}/results.ndjson"
+    [[ ! -f "$sf" ]] && return
+    local s=0 f=0 k=0
+    while IFS= read -r l; do
+        case "$(echo "$l" | jq -r '.status // empty' 2>/dev/null)" in
+            success) ((s++)) ;; failed) ((f++)) ;; skipped) ((k++)) ;;
+        esac
+    done < "$sf"
+    local t=$((s + f + k))
+    if [[ "${AGENT_SWEEP_JSON_OUTPUT:-false}" == "true" ]]; then
+        jq -n --argjson t "$t" --argjson s "$s" --argjson f "$f" --argjson k "$k" \
+            '{summary:{total:$t,success:$s,failed:$f,skipped:$k}}'
+    else
+        echo ""
+        log_info "═══════════════════════════════════════════"
+        log_info "Agent Sweep Summary"
+        log_info "═══════════════════════════════════════════"
+        log_info "Total: $t | Success: $s | Failed: $f | Skipped: $k"
+        log_info "═══════════════════════════════════════════"
+    fi
+}
+
+#==============================================================================
 # SECTION 14: MAIN DISPATCH
 #==============================================================================
 
@@ -15110,6 +15432,7 @@ main() {
         prune)      cmd_prune ;;
         import)     cmd_import ;;
         review)     cmd_review ;;
+        agent-sweep) cmd_agent_sweep ;;
         *)
             log_error "Unknown command: $COMMAND"
             show_help

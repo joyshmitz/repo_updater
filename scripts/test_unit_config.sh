@@ -42,6 +42,7 @@ RU_LOG_DIR="$RU_STATE_DIR/logs"
 # Initialize other global variables that functions depend on
 VERBOSE="false"
 GUM_AVAILABLE="false"
+LOG_LEVEL=0
 
 #==============================================================================
 # Tests: get_config_value

@@ -1168,6 +1168,31 @@ skip_test() {
     return 0
 }
 
+# Require gh authentication for a test.
+# Usage: require_gh_auth || return 0
+# Env: TF_SKIP_GH_AUTH=1|true|yes to force skip
+require_gh_auth() {
+    local skip_flag="${TF_SKIP_GH_AUTH:-}"
+    case "${skip_flag,,}" in
+        1|true|yes)
+            skip_test "TF_SKIP_GH_AUTH set"
+            return 1
+            ;;
+    esac
+
+    if ! command -v gh &>/dev/null; then
+        skip_test "gh CLI not installed"
+        return 1
+    fi
+
+    if ! gh auth status &>/dev/null; then
+        skip_test "gh not authenticated"
+        return 1
+    fi
+
+    return 0
+}
+
 # Print test results summary
 print_results() {
     if is_tap_mode; then
@@ -1715,7 +1740,7 @@ export -f log_debug log_info log_warn log_error
 export -f log_test_start log_test_pass log_test_fail log_test_skip log_suite_start
 export -f init_log_file set_log_level
 export -f create_temp_dir cleanup_temp_dirs reset_test_env create_test_env get_test_env_root setup_cleanup_trap
-export -f run_test skip_test print_results get_exit_code run_parallel_tests
+export -f run_test skip_test require_gh_auth print_results get_exit_code run_parallel_tests
 export -f enable_tap_output disable_tap_output is_tap_mode tap_plan tap_version tap_diag
 export -f _tap_ok _tap_not_ok _tap_skip _tap_todo _tap_summary
 export -f get_project_dir source_ru_function

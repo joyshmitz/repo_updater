@@ -1272,6 +1272,329 @@ execute_commit_plan() {
 }
 
 #------------------------------------------------------------------------------
+# AGENT-SWEEP RELEASE PLAN VALIDATION
+#
+# Validate release plan JSON for safety and guardrails.
+# Sets VALIDATION_ERROR (fatal) and VALIDATION_WARNINGS (non-fatal).
+#------------------------------------------------------------------------------
+
+# Validate release plan before execution.
+# Args: $1=release_plan_json, $2=repo_path
+# Returns: 0=valid, 1=blocked
+# Side effects: Sets VALIDATION_ERROR on failure, VALIDATION_WARNINGS array
+validate_release_plan() {
+    local plan_json="$1"
+    local repo_path="$2"
+
+    VALIDATION_ERROR=""
+    VALIDATION_WARNINGS=()
+
+    if [[ -z "$plan_json" ]]; then
+        VALIDATION_ERROR="Release plan is empty"
+        return 1
+    fi
+    if [[ -z "$repo_path" || ! -d "$repo_path" ]]; then
+        VALIDATION_ERROR="Invalid repo path for release plan validation"
+        return 1
+    fi
+
+    if ! echo "$plan_json" | json_validate; then
+        VALIDATION_ERROR="Invalid JSON structure in release plan"
+        return 1
+    fi
+
+    # Extract required fields
+    local version tag_name title body files_json
+    version=$(json_get_field "$plan_json" "version" || echo "")
+    tag_name=$(json_get_field "$plan_json" "tag_name" || echo "")
+    title=$(json_get_field "$plan_json" "title" || echo "")
+    body=$(json_get_field "$plan_json" "body" || echo "")
+    files_json=$(json_get_field "$plan_json" "files" || echo "")
+
+    # 1. Validate version format (semver: vX.Y.Z or X.Y.Z)
+    if [[ -z "$version" || "$version" == "null" ]]; then
+        VALIDATION_ERROR="Missing version in release plan"
+        return 1
+    fi
+    if ! [[ "$version" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?(\+[a-zA-Z0-9.-]+)?$ ]]; then
+        VALIDATION_ERROR="Invalid version format: $version (expected semver like v1.2.3 or 1.2.3)"
+        return 1
+    fi
+
+    # 2. Validate tag_name
+    if [[ -z "$tag_name" || "$tag_name" == "null" ]]; then
+        # Default to version if tag_name not provided
+        tag_name="$version"
+    fi
+    # Check tag doesn't already exist
+    if git -C "$repo_path" rev-parse "refs/tags/$tag_name" >/dev/null 2>&1; then
+        VALIDATION_ERROR="Tag already exists: $tag_name"
+        return 1
+    fi
+    # Validate tag name characters (no shell metacharacters)
+    if [[ "$tag_name" =~ [\;\&\|\$\`\(\)\{\}\<\>\'\"\!\#\*\?\\] ]]; then
+        VALIDATION_ERROR="Tag name contains unsafe characters: $tag_name"
+        return 1
+    fi
+
+    # 3. Validate title length
+    if [[ -n "$title" && "$title" != "null" ]]; then
+        local title_len=${#title}
+        if [[ $title_len -gt 200 ]]; then
+            VALIDATION_ERROR="Release title too long: $title_len chars (max 200)"
+            return 1
+        fi
+        # Check for shell metacharacters
+        if [[ "$title" =~ [\;\&\|\$\`] ]]; then
+            VALIDATION_ERROR="Release title contains unsafe shell characters"
+            return 1
+        fi
+    fi
+
+    # 4. Validate body length
+    if [[ -n "$body" && "$body" != "null" ]]; then
+        local body_len=${#body}
+        if [[ $body_len -gt 10000 ]]; then
+            VALIDATION_ERROR="Release body too long: $body_len chars (max 10000)"
+            return 1
+        fi
+    fi
+
+    # 5. Validate files array (release assets)
+    if [[ -n "$files_json" && "$files_json" != "null" && "$files_json" != "[]" ]]; then
+        if ! command -v jq &>/dev/null; then
+            VALIDATION_WARNINGS+=("jq not available, skipping release files validation")
+        else
+            if ! echo "$files_json" | jq -e 'type == "array"' >/dev/null 2>&1; then
+                VALIDATION_ERROR="Release files must be an array"
+                return 1
+            fi
+
+            local -a files=()
+            mapfile -t files < <(echo "$files_json" | jq -r '.[]' 2>/dev/null)
+
+            local file
+            for file in "${files[@]}"; do
+                [[ -z "$file" ]] && continue
+
+                # Normalize path
+                local normalized="${file#./}"
+                case "$normalized" in
+                    ""|".")
+                        VALIDATION_ERROR="Release files contains empty path"
+                        return 1
+                        ;;
+                    /*)
+                        VALIDATION_ERROR="Release files contains absolute path: $file"
+                        return 1
+                        ;;
+                    ../*|*/../*|*/..|..)
+                        VALIDATION_ERROR="Release files contains unsafe path: $file"
+                        return 1
+                        ;;
+                esac
+
+                # Check against denylist
+                if is_file_denied "$normalized"; then
+                    VALIDATION_ERROR="Denied file in release assets: $normalized"
+                    return 1
+                fi
+
+                # Verify file exists
+                if [[ ! -f "$repo_path/$normalized" ]]; then
+                    VALIDATION_WARNINGS+=("Release asset not found: $normalized")
+                fi
+            done
+        fi
+    fi
+
+    # 6. Validate changelog if specified
+    local changelog
+    changelog=$(json_get_field "$plan_json" "changelog" || echo "")
+    if [[ -n "$changelog" && "$changelog" != "null" ]]; then
+        if [[ ! -f "$repo_path/$changelog" ]]; then
+            VALIDATION_WARNINGS+=("Changelog file not found: $changelog")
+        else
+            # Check if changelog mentions the version
+            local version_pattern="${version#v}"  # Remove leading v for matching
+            if ! grep -qE "(^#+.*${version_pattern}|^## \\[?${version_pattern})" "$repo_path/$changelog" 2>/dev/null; then
+                VALIDATION_WARNINGS+=("Changelog may not contain version $version header")
+            fi
+        fi
+    fi
+
+    return 0
+}
+
+# Execute release plan after validation.
+# Args: $1=release_plan_json, $2=repo_path
+# Returns: 0=success, 1=failure
+# Side effects: Creates git tag, pushes to remote, creates GitHub release
+execute_release_plan() {
+    local plan_json="$1"
+    local repo_path="$2"
+
+    if [[ -z "$plan_json" ]]; then
+        log_error "Release plan is empty"
+        return 1
+    fi
+    if [[ -z "$repo_path" || ! -d "$repo_path" ]]; then
+        log_error "Invalid repo path for release plan execution"
+        return 1
+    fi
+
+    # Check execution mode
+    local exec_mode="${AGENT_SWEEP_EXECUTION_MODE:-agent}"
+    if [[ "$exec_mode" == "plan" ]]; then
+        capture_plan_json "$repo_path" "release" "$plan_json" || true
+        log_info "Plan mode enabled; skipping release execution"
+        return 0
+    fi
+
+    if ! command -v jq &>/dev/null; then
+        log_error "jq is required to execute release plans"
+        return 1
+    fi
+
+    # Validate the plan first
+    if ! validate_release_plan "$plan_json" "$repo_path"; then
+        log_error "Release plan validation failed: ${VALIDATION_ERROR:-unknown error}"
+        return 1
+    fi
+
+    # Log any warnings
+    local warning
+    for warning in "${VALIDATION_WARNINGS[@]}"; do
+        log_warn "$warning"
+    done
+
+    # Extract fields
+    local version tag_name title body
+    version=$(echo "$plan_json" | jq -r '.version // empty' 2>/dev/null)
+    tag_name=$(echo "$plan_json" | jq -r '.tag_name // empty' 2>/dev/null)
+    title=$(echo "$plan_json" | jq -r '.title // empty' 2>/dev/null)
+    body=$(echo "$plan_json" | jq -r '.body // empty' 2>/dev/null)
+
+    # Default tag_name to version if not specified
+    [[ -z "$tag_name" ]] && tag_name="$version"
+    # Ensure tag starts with v if version does
+    [[ "$version" == v* && "$tag_name" != v* ]] && tag_name="v$tag_name"
+
+    # Default title to tag_name if not specified
+    [[ -z "$title" ]] && title="Release $tag_name"
+
+    # Check release strategy
+    local strategy
+    strategy=$(get_release_strategy "$repo_path")
+    case "$strategy" in
+        never)
+            log_info "Release strategy is 'never', skipping release for $repo_path"
+            return 0
+            ;;
+        tag-only)
+            log_info "Release strategy is 'tag-only', will create tag but no GitHub release"
+            ;;
+    esac
+
+    # Step 1: Create git tag locally
+    log_info "Creating tag: $tag_name"
+    local tag_output tag_exit
+    if tag_output=$(git -C "$repo_path" tag -a "$tag_name" -m "$title" 2>&1); then
+        tag_exit=0
+    else
+        tag_exit=$?
+    fi
+
+    if [[ $tag_exit -ne 0 ]]; then
+        log_error "Failed to create tag: $tag_output"
+        return 1
+    fi
+
+    # Step 2: Push tag to origin
+    log_info "Pushing tag to origin..."
+    local push_output push_exit
+    if push_output=$(git -C "$repo_path" push origin "$tag_name" 2>&1); then
+        push_exit=0
+    else
+        push_exit=$?
+    fi
+
+    if [[ $push_exit -ne 0 ]]; then
+        log_error "Failed to push tag: $push_output"
+        # Cleanup: delete local tag
+        git -C "$repo_path" tag -d "$tag_name" 2>/dev/null || true
+        return 1
+    fi
+
+    # If tag-only strategy, we're done
+    if [[ "$strategy" == "tag-only" ]]; then
+        log_info "Tag $tag_name created and pushed successfully"
+        return 0
+    fi
+
+    # Step 3: Check gh CLI availability
+    if ! command -v gh &>/dev/null; then
+        log_warn "gh CLI not available, cannot create GitHub release"
+        log_info "Tag $tag_name created and pushed, but GitHub release skipped"
+        return 0
+    fi
+
+    # Step 4: Create GitHub release
+    log_info "Creating GitHub release..."
+    local -a gh_args=("release" "create" "$tag_name")
+    gh_args+=("--title" "$title")
+
+    if [[ -n "$body" ]]; then
+        gh_args+=("--notes" "$body")
+    else
+        gh_args+=("--generate-notes")
+    fi
+
+    # Add release assets
+    local -a files=()
+    local files_json
+    files_json=$(echo "$plan_json" | jq -r '.files // []' 2>/dev/null)
+    if [[ -n "$files_json" && "$files_json" != "null" && "$files_json" != "[]" ]]; then
+        mapfile -t files < <(echo "$files_json" | jq -r '.[]' 2>/dev/null)
+        for file in "${files[@]}"; do
+            [[ -z "$file" ]] && continue
+            local asset_path="$repo_path/${file#./}"
+            if [[ -f "$asset_path" ]]; then
+                gh_args+=("$asset_path")
+            else
+                log_warn "Release asset not found, skipping: $file"
+            fi
+        done
+    fi
+
+    # Execute gh release create
+    local gh_output gh_exit
+    if gh_output=$(cd "$repo_path" && gh "${gh_args[@]}" 2>&1); then
+        gh_exit=0
+    else
+        gh_exit=$?
+    fi
+
+    if [[ $gh_exit -ne 0 ]]; then
+        log_error "Failed to create GitHub release: $gh_output"
+        # Note: We don't delete the tag here since it's already pushed
+        # The user can retry or manually create the release
+        return 1
+    fi
+
+    # Extract release URL from output
+    local release_url
+    release_url=$(echo "$gh_output" | grep -oE 'https://github.com/[^[:space:]]+' | head -1)
+    if [[ -n "$release_url" ]]; then
+        log_info "Release created: $release_url"
+    else
+        log_info "Release $tag_name created successfully"
+    fi
+
+    return 0
+}
+
+#------------------------------------------------------------------------------
 # AGENT-SWEEP RELEASE WORKFLOW DETECTION
 #
 # Determine if a repository should have release automation (Phase 3).
@@ -15453,7 +15776,18 @@ run_secret_scan() {
 
     local findings_json="[]"
     if [[ ${#findings[@]} -gt 0 ]]; then
-        findings_json=$(printf '%s\n' "${findings[@]}" | jq -R . | jq -s .)
+        if command -v jq &>/dev/null; then
+            findings_json=$(printf '%s\n' "${findings[@]}" | jq -R . | jq -s . 2>/dev/null || echo '[]')
+        else
+            local first=true item
+            findings_json="["
+            for item in "${findings[@]}"; do
+                $first || findings_json+=","
+                findings_json+="\"$(json_escape "$item")\""
+                first=false
+            done
+            findings_json+="]"
+        fi
     fi
 
     # Determine which tool was actually used based on scanner_ran flag
@@ -15467,19 +15801,29 @@ run_secret_scan() {
         fi
     fi
 
-    jq -n \
-        --argjson ran true \
-        --argjson ok "$([ $exit_code -eq 0 ] && echo true || echo false)" \
-        --argjson warning "$([ $exit_code -eq 2 ] && echo true || echo false)" \
-        --argjson findings "$findings_json" \
-        --arg tool "$tool_used" \
-        '{
-            ran: $ran,
-            ok: $ok,
-            warning: $warning,
-            tool: $tool,
-            findings: $findings
-        }'
+    local ok_json="false"
+    local warning_json="false"
+    [[ $exit_code -eq 0 ]] && ok_json="true"
+    [[ $exit_code -eq 2 ]] && warning_json="true"
+
+    if command -v jq &>/dev/null; then
+        jq -n \
+            --argjson ran true \
+            --argjson ok "$ok_json" \
+            --argjson warning "$warning_json" \
+            --argjson findings "$findings_json" \
+            --arg tool "$tool_used" \
+            '{
+                ran: $ran,
+                ok: $ok,
+                warning: $warning,
+                tool: $tool,
+                findings: $findings
+            }'
+    else
+        printf '{"ran":true,"ok":%s,"warning":%s,"tool":"%s","findings":%s}\n' \
+            "$ok_json" "$warning_json" "$(json_escape "$tool_used")" "$findings_json"
+    fi
 
     return $exit_code
 }

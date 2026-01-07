@@ -444,6 +444,133 @@ declare -g AGENT_SWEEP_PRE_HOOK=""
 declare -g AGENT_SWEEP_POST_HOOK=""
 declare -ga AGENT_SWEEP_DENYLIST_EXTRA_LOCAL=()
 
+#------------------------------------------------------------------------------
+# AGENT-SWEEP PHASE PROMPTS
+# Default prompts for each phase of the agent-sweep workflow.
+# Each phase produces structured JSON output between markers.
+#------------------------------------------------------------------------------
+
+# Phase 1: Understanding - analyze the codebase and changes
+# Output markers: RU_UNDERSTANDING_JSON_BEGIN / RU_UNDERSTANDING_JSON_END
+read -r -d '' AGENT_SWEEP_PHASE1_PROMPT_DEFAULT << 'EOF_PHASE1'
+First read AGENTS.md (if present) and README.md (if present) carefully.
+If a file is missing, explicitly note that and continue.
+Then use your investigation mode to understand the codebase architecture,
+entrypoints, conventions, and what the current changes appear to be.
+At the end, output a short structured summary as JSON between:
+RU_UNDERSTANDING_JSON_BEGIN
+{ "summary": "...", "conventions": [...], "risks": [...], "notes": [...] }
+RU_UNDERSTANDING_JSON_END
+EOF_PHASE1
+
+# Phase 2: Commit Plan - plan the commits without executing
+# Output markers: RU_COMMIT_PLAN_JSON_BEGIN / RU_COMMIT_PLAN_JSON_END
+read -r -d '' AGENT_SWEEP_PHASE2_PROMPT_DEFAULT << 'EOF_PHASE2'
+Now, based on your knowledge of the project, DO NOT run git commands.
+Instead, produce a COMMIT PLAN as JSON between these markers:
+RU_COMMIT_PLAN_JSON_BEGIN
+{ ... }
+RU_COMMIT_PLAN_JSON_END
+
+Rules:
+- Do not edit any code or files.
+- Do not include ephemeral/ignored files (.pyc, node_modules, __pycache__, etc.).
+- Group changes into logically connected commits.
+- For each commit, include:
+  - "files": explicit list of paths to stage
+  - "message": full commit message (subject + body)
+- Include "push": true/false
+- Include "excluded_files": list of files excluded and why
+Use ultrathink.
+
+Expected schema:
+{
+  "commits": [
+    {"files": ["path/a", "path/b"], "message": "feat(x): summary\n\nBody..."},
+    {"files": ["path/c"], "message": "fix(y): summary\n\nBody..."}
+  ],
+  "push": true,
+  "excluded_files": [
+    {"path": "__pycache__/foo.pyc", "reason": "bytecode cache"}
+  ],
+  "assumptions": ["No breaking changes detected"],
+  "risks": ["Large diff in core module"]
+}
+EOF_PHASE2
+
+# Phase 3: Release Plan - plan any release actions without executing
+# Output markers: RU_RELEASE_PLAN_JSON_BEGIN / RU_RELEASE_PLAN_JSON_END
+read -r -d '' AGENT_SWEEP_PHASE3_PROMPT_DEFAULT << 'EOF_PHASE3'
+If a release is warranted based on the changes, DO NOT execute release commands.
+Produce a RELEASE PLAN as JSON between:
+RU_RELEASE_PLAN_JSON_BEGIN
+{ ... }
+RU_RELEASE_PLAN_JSON_END
+
+Include:
+- "version": proposed version (or null if no release needed)
+- "tag": proposed tag (or null)
+- "changelog_entry": text to add to CHANGELOG
+- "version_files": files to update with new version
+- "checks": actions to verify before release (tests/CI)
+Use ultrathink.
+
+Expected schema:
+{
+  "version": "1.2.0",
+  "tag": "v1.2.0",
+  "changelog_entry": "## v1.2.0 (2026-01-06)\n\n### Added\n- ...",
+  "version_files": [
+    {"path": "VERSION", "old": "1.1.0", "new": "1.2.0"}
+  ],
+  "checks": ["tests", "lint"]
+}
+EOF_PHASE3
+
+# Effective phase prompts (may be overridden by env vars or per-repo files)
+declare -g AGENT_SWEEP_PHASE1_PROMPT="${AGENT_SWEEP_PHASE1_PROMPT:-$AGENT_SWEEP_PHASE1_PROMPT_DEFAULT}"
+declare -g AGENT_SWEEP_PHASE2_PROMPT="${AGENT_SWEEP_PHASE2_PROMPT:-$AGENT_SWEEP_PHASE2_PROMPT_DEFAULT}"
+declare -g AGENT_SWEEP_PHASE3_PROMPT="${AGENT_SWEEP_PHASE3_PROMPT:-$AGENT_SWEEP_PHASE3_PROMPT_DEFAULT}"
+
+# Get the effective prompt for a given phase, with override precedence:
+# 1. Per-repo file: $repo_path/.ru/phase{1,2,3}-prompt.txt (highest priority)
+# 2. Environment variable: AGENT_SWEEP_PHASE{1,2,3}_PROMPT
+# 3. Default prompt (lowest priority)
+# Usage: get_effective_phase_prompt <phase_number> [repo_path]
+# Args:
+#   phase_number: 1, 2, or 3
+#   repo_path: optional path to repo for per-repo overrides
+# Returns: The effective prompt text
+get_effective_phase_prompt() {
+    local phase="${1:-}"
+    local repo_path="${2:-}"
+
+    # Validate phase number
+    case "$phase" in
+        1|2|3) ;;
+        *)
+            echo "Invalid phase: $phase. Must be 1, 2, or 3." >&2
+            return 1
+            ;;
+    esac
+
+    # Check for per-repo prompt file first (highest priority)
+    if [[ -n "$repo_path" && -d "$repo_path" ]]; then
+        local prompt_file="$repo_path/.ru/phase${phase}-prompt.txt"
+        if [[ -f "$prompt_file" ]]; then
+            cat "$prompt_file"
+            return 0
+        fi
+    fi
+
+    # Return the effective prompt (env var override or default)
+    case "$phase" in
+        1) echo "$AGENT_SWEEP_PHASE1_PROMPT" ;;
+        2) echo "$AGENT_SWEEP_PHASE2_PROMPT" ;;
+        3) echo "$AGENT_SWEEP_PHASE3_PROMPT" ;;
+    esac
+}
+
 # Load per-repo agent-sweep configuration.
 # Usage: load_repo_agent_config /path/to/repo
 # Returns: 0 on success (uses defaults if no config found), 1 on invalid args

@@ -2096,6 +2096,235 @@ info_resume_available() {
     echo "" >&2
 }
 
+#------------------------------------------------------------------------------
+# AGENT-SWEEP PROGRESS DISPLAY
+#
+# Real-time progress display for agent-sweep operations.
+# Supports interactive (TTY with spinners/bars) and non-interactive modes.
+#------------------------------------------------------------------------------
+
+# Global progress tracking state
+declare -g PROGRESS_TOTAL=0
+declare -g PROGRESS_CURRENT=0
+declare -g PROGRESS_SUCCEEDED=0
+declare -g PROGRESS_FAILED=0
+declare -g PROGRESS_SKIPPED=0
+declare -g PROGRESS_START_EPOCH=0
+declare -g PROGRESS_REPO_START_EPOCH=0
+declare -g PROGRESS_CURRENT_REPO=""
+declare -g PROGRESS_CURRENT_PHASE=""
+declare -g PROGRESS_IS_INTERACTIVE=false
+declare -g PROGRESS_PHASE_HISTORY=()
+
+# Phase names for display
+declare -gA PROGRESS_PHASE_NAMES=(
+    [1]="Understanding codebase"
+    [2]="Generating commit plan"
+    [3]="Release workflow (optional)"
+    [preflight]="Running preflight checks"
+    [spawn]="Starting agent session"
+    [wait]="Waiting for completion"
+    [validate]="Validating plan"
+    [apply]="Applying changes"
+)
+
+# Initialize progress tracking for agent-sweep.
+# Args: $1 = total repo count
+progress_init() {
+    local total="${1:-0}"
+
+    PROGRESS_TOTAL=$total
+    PROGRESS_CURRENT=0
+    PROGRESS_SUCCEEDED=0
+    PROGRESS_FAILED=0
+    PROGRESS_SKIPPED=0
+    PROGRESS_START_EPOCH=$(date +%s)
+    PROGRESS_CURRENT_REPO=""
+    PROGRESS_CURRENT_PHASE=""
+    PROGRESS_PHASE_HISTORY=()
+
+    # Detect interactive mode
+    if [[ -t 2 && "${QUIET:-false}" != "true" && "${AGENT_SWEEP_JSON_OUTPUT:-false}" != "true" ]]; then
+        PROGRESS_IS_INTERACTIVE=true
+    else
+        PROGRESS_IS_INTERACTIVE=false
+    fi
+
+    if [[ "$PROGRESS_IS_INTERACTIVE" == "true" ]]; then
+        _progress_show_header "$total"
+    else
+        log_info "Starting agent-sweep: $total repositories"
+    fi
+}
+
+# Show initial header (interactive mode)
+_progress_show_header() {
+    local total="$1"
+    echo "" >&2
+    if [[ "${GUM_AVAILABLE:-false}" == "true" ]]; then
+        gum style --border rounded --padding "0 2" --border-foreground "#89b4fa" \
+            "$(gum style --bold "Agent Sweep")" \
+            "Processing $total repositories" >&2
+    else
+        printf '%b\n' "${CYAN}╭──────────────────────────────────────╮${RESET}" >&2
+        printf '%b\n' "${CYAN}│${RESET}          ${BOLD}Agent Sweep${RESET}              ${CYAN}│${RESET}" >&2
+        printf '%b\n' "${CYAN}│${RESET}   Processing $total repositories       ${CYAN}│${RESET}" >&2
+        printf '%b\n' "${CYAN}╰──────────────────────────────────────╯${RESET}" >&2
+    fi
+    echo "" >&2
+}
+
+# Start processing a new repository.
+# Args: $1 = repo name/spec
+progress_start_repo() {
+    local repo_name="${1:-unknown}"
+
+    ((PROGRESS_CURRENT++))
+    PROGRESS_CURRENT_REPO="$repo_name"
+    PROGRESS_CURRENT_PHASE="preflight"
+    PROGRESS_REPO_START_EPOCH=$(date +%s)
+    PROGRESS_PHASE_HISTORY=()
+
+    SWEEP_CURRENT_REPO="$repo_name"
+
+    if [[ "$PROGRESS_IS_INTERACTIVE" == "true" ]]; then
+        _progress_show_repo_start "$repo_name"
+    else
+        log_step "[$PROGRESS_CURRENT/$PROGRESS_TOTAL] Processing: $repo_name"
+    fi
+}
+
+# Show repo start (interactive mode)
+_progress_show_repo_start() {
+    local repo_name="$1"
+
+    echo "" >&2
+    if [[ "${GUM_AVAILABLE:-false}" == "true" ]]; then
+        printf '%b\n' "$(gum style --foreground "#89b4fa" --bold "[$PROGRESS_CURRENT/$PROGRESS_TOTAL]") $repo_name" >&2
+    else
+        printf '%b\n' "${CYAN}[$PROGRESS_CURRENT/$PROGRESS_TOTAL]${RESET} ${BOLD}$repo_name${RESET}" >&2
+    fi
+
+    _progress_show_bar
+}
+
+# Update current phase.
+# Args: $1 = phase identifier (1, 2, 3, preflight, spawn, wait, validate, apply)
+progress_update_phase() {
+    local phase="${1:-}"
+    local phase_name="${PROGRESS_PHASE_NAMES[$phase]:-$phase}"
+
+    # Record previous phase in history
+    if [[ -n "$PROGRESS_CURRENT_PHASE" ]]; then
+        PROGRESS_PHASE_HISTORY+=("$PROGRESS_CURRENT_PHASE")
+    fi
+
+    PROGRESS_CURRENT_PHASE="$phase"
+    SWEEP_CURRENT_PHASE="$phase"
+
+    if [[ "$PROGRESS_IS_INTERACTIVE" == "true" ]]; then
+        _progress_show_phase "$phase_name"
+    else
+        log_verbose "  Phase: $phase_name"
+    fi
+}
+
+# Show phase update (interactive mode)
+_progress_show_phase() {
+    local phase_name="$1"
+
+    if [[ "${GUM_AVAILABLE:-false}" == "true" ]]; then
+        printf '%b\n' "  └─ $(gum style --foreground '#a6e3a1' "$phase_name") ⏳" >&2
+    else
+        printf '%b\n' "  └─ ${GREEN}$phase_name${RESET} ⏳" >&2
+    fi
+}
+
+# Complete current repository with status.
+# Args: $1 = status (success, failed, skipped)
+#       $2 = optional detail message
+progress_complete_repo() {
+    local status="${1:-success}"
+    local detail="${2:-}"
+    local duration=$(($(date +%s) - PROGRESS_REPO_START_EPOCH))
+    local duration_str
+    duration_str=$(format_duration "$duration")
+
+    case "$status" in
+        success) ((PROGRESS_SUCCEEDED++)) ;;
+        failed|error) ((PROGRESS_FAILED++)) ;;
+        skipped|preflight) ((PROGRESS_SKIPPED++)) ;;
+    esac
+
+    if [[ "$PROGRESS_IS_INTERACTIVE" == "true" ]]; then
+        _progress_show_repo_complete "$status" "$duration_str" "$detail"
+    else
+        case "$status" in
+            success) log_success "  Completed in $duration_str" ;;
+            failed|error) log_error "  Failed: ${detail:-unknown error}" ;;
+            skipped|preflight) log_warn "  Skipped: ${detail:-preflight check failed}" ;;
+        esac
+    fi
+}
+
+# Show repo completion (interactive mode)
+_progress_show_repo_complete() {
+    local status="$1"
+    local duration="$2"
+    local detail="$3"
+
+    local status_icon status_color
+    case "$status" in
+        success) status_icon="✓"; status_color="${GREEN}" ;;
+        failed|error) status_icon="✗"; status_color="${RED}" ;;
+        skipped|preflight) status_icon="⊘"; status_color="${YELLOW}" ;;
+        *) status_icon="?"; status_color="${DIM}" ;;
+    esac
+
+    printf '%b\n' "  └─ ${status_color}${status_icon}${RESET} Completed in $duration" >&2
+
+    if [[ -n "$detail" && "$status" != "success" ]]; then
+        printf '%b\n' "     ${DIM}$detail${RESET}" >&2
+    fi
+}
+
+# Render progress bar to stderr.
+_progress_show_bar() {
+    local pct=0
+    [[ $PROGRESS_TOTAL -gt 0 ]] && pct=$((PROGRESS_CURRENT * 100 / PROGRESS_TOTAL))
+
+    # Calculate elapsed time and estimate
+    local elapsed=$(($(date +%s) - PROGRESS_START_EPOCH))
+    local eta_str=""
+    if [[ $PROGRESS_CURRENT -gt 1 && $pct -gt 0 && $pct -lt 100 ]]; then
+        local per_repo=$((elapsed / (PROGRESS_CURRENT - 1)))
+        local remaining=$(( (PROGRESS_TOTAL - PROGRESS_CURRENT + 1) * per_repo ))
+        eta_str=" (~$(format_duration $remaining) remaining)"
+    fi
+
+    local bar_width=30
+    local filled=$((pct * bar_width / 100))
+    local empty=$((bar_width - filled))
+    local bar
+    bar=$(printf '%*s' "$filled" '' | tr ' ' '█')$(printf '%*s' "$empty" '' | tr ' ' '░')
+    printf '%b\n' "  ${DIM}$bar${RESET} $pct%%$eta_str" >&2
+}
+
+# Show final summary (called at end of sweep).
+# Uses existing print_agent_sweep_summary() for detailed output.
+progress_summary() {
+    local total_duration=$(($(date +%s) - PROGRESS_START_EPOCH))
+    local duration_str
+    duration_str=$(format_duration "$total_duration")
+
+    if [[ "$PROGRESS_IS_INTERACTIVE" != "true" ]]; then
+        log_info "Agent-sweep complete: $PROGRESS_SUCCEEDED succeeded, $PROGRESS_FAILED failed, $PROGRESS_SKIPPED skipped"
+        log_info "Total time: $duration_str"
+    fi
+
+    # Detailed summary handled by print_agent_sweep_summary()
+}
+
 #==============================================================================
 # SECTION 6: HELP AND VERSION
 #==============================================================================
@@ -15591,25 +15820,34 @@ run_sequential_agent_sweep() {
     # shellcheck disable=SC2178
     local -n repos_ref=$1
     local any_failed=false
-    local rn idx=0 total=${#repos_ref[@]}
+    local rn total=${#repos_ref[@]}
+
+    # Initialize progress display
+    progress_init "$total"
     log_debug "Starting sequential sweep of $total repositories"
+
     for repo_spec in "${repos_ref[@]}"; do
-        ((idx++))
         rn=$(get_repo_name "$repo_spec")
-        log_step "Processing: $rn ($idx/$total)"
+
+        # Start repo in progress display
+        progress_start_repo "$rn"
         log_verbose "Starting workflow for $rn"
+
         if run_single_agent_workflow "$repo_spec"; then
             record_repo_result "$rn" "success"
-            log_success "Completed: $rn"
+            progress_complete_repo "success"
             log_debug "Workflow succeeded for $rn"
         else
             local exit_code=$?
             record_repo_result "$rn" "failed" "$exit_code"
-            log_error "Failed: $rn"
+            progress_complete_repo "failed" "exit code $exit_code"
             log_debug "Workflow failed for $rn (exit code: $exit_code)"
             any_failed=true
         fi
     done
+
+    # Show summary
+    progress_summary
     log_debug "Sequential sweep complete: any_failed=$any_failed"
     [[ "$any_failed" != true ]]
 }

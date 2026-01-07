@@ -429,6 +429,115 @@ get_repo_name() {
     basename "${input%%@*}"
 }
 
+#------------------------------------------------------------------------------
+# AGENT-SWEEP RESULT TRACKING
+# Functions for tracking per-repo results during sweep execution.
+#------------------------------------------------------------------------------
+
+# Global result tracking state (initialized by setup_agent_sweep_results)
+declare -g AGENT_SWEEP_STATE_DIR=""
+declare -g RUN_ID=""
+declare -g RUN_START_TIME=""
+declare -g RUN_ARTIFACTS_DIR=""
+declare -g SWEEP_SUCCESS_COUNT=0
+declare -g SWEEP_FAIL_COUNT=0
+declare -g SWEEP_SKIP_COUNT=0
+declare -ga COMPLETED_REPOS=()
+
+# Initialize agent-sweep results tracking
+# Sets up state directory, run ID, and results file
+setup_agent_sweep_results() {
+    local state_base="${XDG_STATE_HOME:-$HOME/.local/state}/ru"
+    AGENT_SWEEP_STATE_DIR="${state_base}/agent-sweep"
+    ensure_dir "$AGENT_SWEEP_STATE_DIR"
+    ensure_dir "${AGENT_SWEEP_STATE_DIR}/locks"
+
+    RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
+    export RUN_START_TIME
+    RUN_START_TIME=$(date +%s)
+
+    # Create run directory for artifacts
+    RUN_ARTIFACTS_DIR="${AGENT_SWEEP_STATE_DIR}/runs/${RUN_ID}"
+    ensure_dir "$RUN_ARTIFACTS_DIR"
+
+    # Set up results file (used by existing write_result function)
+    export RESULTS_FILE="${AGENT_SWEEP_STATE_DIR}/results.ndjson"
+    export RESULTS_LOCK_DIR="${AGENT_SWEEP_STATE_DIR}/locks/results.lock"
+
+    # Write header record
+    local header_ts
+    header_ts=$(date -Iseconds 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
+    echo "{\"run_id\":\"$RUN_ID\",\"started_at\":\"$header_ts\",\"type\":\"header\"}" > "$RESULTS_FILE"
+
+    # Reset counts
+    SWEEP_SUCCESS_COUNT=0
+    SWEEP_FAIL_COUNT=0
+    SWEEP_SKIP_COUNT=0
+    COMPLETED_REPOS=()
+}
+
+# Aggregate results from NDJSON file for summary reporting
+# Usage: get_results_summary [results_file]
+# Outputs: JSON summary to stdout
+get_results_summary() {
+    local results_file="${1:-${RESULTS_FILE:-}}"
+    [[ -z "$results_file" || ! -f "$results_file" ]] && {
+        echo '{"total":0,"succeeded":0,"failed":0,"skipped":0}'
+        return
+    }
+
+    if command -v jq &>/dev/null; then
+        jq -s '
+            [.[] | select(.type == "result" or .type == null)] |
+            {
+                total: length,
+                succeeded: [.[] | select(.status == "success")] | length,
+                failed: [.[] | select(.status | . == "failed" or . == "error")] | length,
+                skipped: [.[] | select(.status | . == "skipped" or . == "preflight")] | length,
+                repos: [.[] | {repo, status, duration}]
+            }
+        ' < "$results_file" 2>/dev/null || echo '{"total":0,"succeeded":0,"failed":0,"skipped":0}'
+    else
+        # Fallback: use tracked counts
+        local total=$((SWEEP_SUCCESS_COUNT + SWEEP_FAIL_COUNT + SWEEP_SKIP_COUNT))
+        echo "{\"total\":$total,\"succeeded\":$SWEEP_SUCCESS_COUNT,\"failed\":$SWEEP_FAIL_COUNT,\"skipped\":$SWEEP_SKIP_COUNT}"
+    fi
+}
+
+# Mark a repo as completed for resume tracking
+# Usage: mark_repo_completed repo_spec
+mark_repo_completed() {
+    local repo_spec="${1:-}"
+    [[ -z "$repo_spec" ]] && return 1
+    COMPLETED_REPOS+=("$repo_spec")
+
+    # Update status based on most recent operation
+    case "${2:-success}" in
+        success) ((SWEEP_SUCCESS_COUNT++)) ;;
+        failed|error) ((SWEEP_FAIL_COUNT++)) ;;
+        skipped|preflight) ((SWEEP_SKIP_COUNT++)) ;;
+    esac
+}
+
+# Check if a repo was already completed (for resume)
+# Usage: is_repo_completed repo_spec
+is_repo_completed() {
+    local repo_spec="${1:-}"
+    array_contains COMPLETED_REPOS "$repo_spec"
+}
+
+# Filter out completed repos from an array (for resume)
+# Usage: filter_completed_repos array_name
+filter_completed_repos() {
+    local -n arr_ref=$1
+    local filtered=()
+    local repo
+    for repo in "${arr_ref[@]}"; do
+        is_repo_completed "$repo" || filtered+=("$repo")
+    done
+    arr_ref=("${filtered[@]}")
+}
+
 # mktemp compatibility: BSD (macOS) mktemp requires a template or -t.
 mktemp_file() {
     local tmp

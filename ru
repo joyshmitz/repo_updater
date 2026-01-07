@@ -327,6 +327,108 @@ ensure_dir() {
     fi
 }
 
+#------------------------------------------------------------------------------
+# AGENT-SWEEP UTILITY FUNCTIONS
+# Shared utilities used by agent-sweep command and related functions.
+#------------------------------------------------------------------------------
+
+# Check if repo has uncommitted changes (staged, unstaged, or untracked)
+# Usage: has_uncommitted_changes /path/to/repo
+# Returns: 0 if dirty (has changes), 1 if clean
+has_uncommitted_changes() {
+    local repo_path="${1:-}"
+    [[ -z "$repo_path" ]] && return 1
+    [[ -n "$(git -C "$repo_path" status --porcelain 2>/dev/null)" ]]
+}
+
+# Convert repo spec (owner/repo[@branch]) to local filesystem path
+# Usage: repo_spec_to_path "owner/repo@branch"
+# Outputs: path to stdout
+repo_spec_to_path() {
+    local repo_spec="${1:-}"
+    [[ -z "$repo_spec" ]] && return 1
+
+    # Strip optional @branch suffix
+    local repo="${repo_spec%%@*}"
+    # Extract repo name (last component)
+    local repo_name="${repo##*/}"
+    # Use configured projects directory
+    local projects_dir="${RU_PROJECTS_DIR:-$HOME/projects}"
+
+    echo "${projects_dir}/${repo_name}"
+}
+
+# Load all repos from config files into an array
+# Usage: load_all_repos array_name
+# Populates the named array with repo specs
+load_all_repos() {
+    local -n repos_ref=$1
+    repos_ref=()
+
+    local config_dir="${XDG_CONFIG_HOME:-$HOME/.config}/ru"
+    local repos_d="${config_dir}/repos.d"
+
+    # Load from each file in repos.d
+    if [[ -d "$repos_d" ]]; then
+        local file
+        for file in "$repos_d"/*.txt; do
+            [[ -f "$file" ]] || continue
+            local line
+            while IFS= read -r line || [[ -n "$line" ]]; do
+                # Skip comments and empty lines
+                [[ "$line" =~ ^[[:space:]]*# ]] && continue
+                [[ -z "${line// }" ]] && continue
+                repos_ref+=("$line")
+            done < "$file"
+        done
+    fi
+}
+
+# Strip ANSI escape codes from input (useful for parsing pane output)
+# Usage: echo "$text" | strip_ansi
+strip_ansi() {
+    sed 's/\x1b\[[0-9;]*[a-zA-Z]//g'
+}
+
+# Get file size in MB (for display/validation)
+# Usage: get_file_size_mb /path/to/file
+# Outputs: size in MB (one decimal place)
+get_file_size_mb() {
+    local file="${1:-}"
+    [[ -z "$file" || ! -f "$file" ]] && { echo "0"; return; }
+
+    local size_bytes
+    # Try GNU stat first, fall back to BSD stat
+    size_bytes=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null || echo 0)
+
+    # Use awk for portability (bc may not be available)
+    awk "BEGIN { printf \"%.1f\", $size_bytes / 1048576 }"
+}
+
+# Check if array contains an element
+# Usage: array_contains array_name "element"
+# Returns: 0 if found, 1 if not found
+array_contains() {
+    local -n arr=$1
+    local elem="$2"
+    local item
+    for item in "${arr[@]}"; do
+        [[ "$item" == "$elem" ]] && return 0
+    done
+    return 1
+}
+
+# Extract repo name from path or spec
+# Usage: get_repo_name "/path/to/repo" or "owner/repo@branch"
+# Outputs: repo name to stdout
+get_repo_name() {
+    local input="${1:-}"
+    [[ -z "$input" ]] && return 1
+    # Handle both /path/to/repo and owner/repo formats
+    # Strip @branch suffix if present
+    basename "${input%%@*}"
+}
+
 # mktemp compatibility: BSD (macOS) mktemp requires a template or -t.
 mktemp_file() {
     local tmp

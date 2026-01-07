@@ -1557,8 +1557,8 @@ execute_release_plan() {
     # Add release assets
     local -a files=()
     local files_json
-    files_json=$(echo "$plan_json" | jq -r '.files // []' 2>/dev/null)
-    if [[ -n "$files_json" && "$files_json" != "null" && "$files_json" != "[]" ]]; then
+    files_json=$(echo "$plan_json" | jq -c '.files // []' 2>/dev/null || echo "[]")
+    if [[ "$files_json" != "[]" ]]; then
         mapfile -t files < <(echo "$files_json" | jq -r '.[]' 2>/dev/null)
         for file in "${files[@]}"; do
             [[ -z "$file" ]] && continue
@@ -1911,6 +1911,8 @@ get_combined_denylist() {
 declare -g AGENT_SWEEP_STATE_DIR=""
 declare -g AGENT_SWEEP_LOG_FILE=""
 declare -g AGENT_SWEEP_REPO_LOG_DIR=""
+declare -g AGENT_SWEEP_INSTANCE_LOCK_DIR=""
+declare -g AGENT_SWEEP_INSTANCE_LOCK_BASE=""
 declare -g RUN_ID=""
 declare -g RUN_START_TIME=""
 declare -g RUN_ARTIFACTS_DIR=""
@@ -1918,6 +1920,7 @@ declare -g SWEEP_SUCCESS_COUNT=0
 declare -g SWEEP_FAIL_COUNT=0
 declare -g SWEEP_SKIP_COUNT=0
 declare -ga COMPLETED_REPOS=()
+declare -g SWEEP_LAST_SESSION_NAME=""
 
 # Initialize agent-sweep results tracking
 # Sets up state directory, run ID, and results file
@@ -1977,7 +1980,7 @@ get_results_summary() {
 
     if command -v jq &>/dev/null; then
         jq -s '
-            [.[] | select(.type == "result" or .type == null)] |
+            [.[] | select(.type == "result" or .type == "summary" or .type == null)] |
             {
                 total: length,
                 succeeded: [.[] | select(.status == "success")] | length,
@@ -1987,9 +1990,28 @@ get_results_summary() {
             }
         ' < "$results_file" 2>/dev/null || echo '{"total":0,"succeeded":0,"failed":0,"skipped":0}'
     else
-        # Fallback: use tracked counts
-        local total=$((SWEEP_SUCCESS_COUNT + SWEEP_FAIL_COUNT + SWEEP_SKIP_COUNT))
-        echo "{\"total\":$total,\"succeeded\":$SWEEP_SUCCESS_COUNT,\"failed\":$SWEEP_FAIL_COUNT,\"skipped\":$SWEEP_SKIP_COUNT}"
+        # Fallback: derive counts from results file when possible
+        local summary_lines
+        summary_lines=$(grep -c '"type":"summary"' "$results_file" 2>/dev/null || echo "0")
+
+        local success=0 failed=0 skipped=0 total=0
+        if [[ "$summary_lines" =~ ^[0-9]+$ ]] && (( summary_lines > 0 )); then
+            success=$(grep -c '"type":"summary".*"status":"success"' "$results_file" 2>/dev/null || echo "0")
+            failed=$(grep -c '"type":"summary".*"status":"failed"' "$results_file" 2>/dev/null || echo "0")
+            local error_count
+            error_count=$(grep -c '"type":"summary".*"status":"error"' "$results_file" 2>/dev/null || echo "0")
+            failed=$((failed + error_count))
+            skipped=$(grep -c '"type":"summary".*"status":"skipped"' "$results_file" 2>/dev/null || echo "0")
+            total=$((success + failed + skipped))
+        else
+            # Fall back to tracked counts if summary lines are unavailable
+            success=${SWEEP_SUCCESS_COUNT:-0}
+            failed=${SWEEP_FAIL_COUNT:-0}
+            skipped=${SWEEP_SKIP_COUNT:-0}
+            total=$((success + failed + skipped))
+        fi
+
+        echo "{\"total\":$total,\"succeeded\":$success,\"failed\":$failed,\"skipped\":$skipped}"
     fi
 }
 
@@ -2219,6 +2241,22 @@ save_agent_sweep_state() {
     local state_file="${AGENT_SWEEP_STATE_DIR}/state.json"
     local tmp_file="${state_file}.tmp.$$"
     local completed_json
+    local completed_file="${AGENT_SWEEP_STATE_DIR}/completed_repos.txt"
+
+    # Merge completed repos from file (parallel workers) into memory
+    if [[ -s "$completed_file" ]]; then
+        if [[ ${#COMPLETED_REPOS[@]} -eq 0 ]]; then
+            mapfile -t COMPLETED_REPOS < "$completed_file"
+        else
+            local repo
+            while IFS= read -r repo; do
+                [[ -z "$repo" ]] && continue
+                if ! array_contains COMPLETED_REPOS "$repo"; then
+                    COMPLETED_REPOS+=("$repo")
+                fi
+            done < "$completed_file"
+        fi
+    fi
 
     # Build JSON arrays for repos
     if command -v jq &>/dev/null; then
@@ -2337,6 +2375,18 @@ load_agent_sweep_state() {
             log_warn "Cannot parse completed repos: neither jq nor python3 available"
             log_warn "Resume may re-process already completed repositories"
         fi
+    fi
+
+    # Merge any completed repos recorded by parallel workers
+    local completed_file="${AGENT_SWEEP_STATE_DIR}/completed_repos.txt"
+    if [[ -s "$completed_file" ]]; then
+        local repo
+        while IFS= read -r repo; do
+            [[ -z "$repo" ]] && continue
+            if ! array_contains COMPLETED_REPOS "$repo"; then
+                COMPLETED_REPOS+=("$repo")
+            fi
+        done < "$completed_file"
     fi
 
     log_info "Resuming run $RUN_ID: ${#COMPLETED_REPOS[@]} repos already completed"
@@ -9022,6 +9072,22 @@ cleanup_agent_sweep_sessions() {
     done
 }
 
+# Release agent-sweep instance lock (if held).
+# Uses AGENT_SWEEP_INSTANCE_LOCK_DIR/BASE set by cmd_agent_sweep.
+release_agent_sweep_instance_lock() {
+    local lock_dir="${AGENT_SWEEP_INSTANCE_LOCK_DIR:-}"
+    local lock_base="${AGENT_SWEEP_INSTANCE_LOCK_BASE:-}"
+
+    [[ -z "$lock_dir" ]] && return 0
+
+    if [[ -n "$lock_base" ]] && _is_path_under_base "$lock_dir" "$lock_base"; then
+        rm -f "$lock_dir/pid" 2>/dev/null || true
+        rmdir "$lock_dir" 2>/dev/null || true
+    else
+        log_warn "Refusing to release unsafe agent-sweep lock dir: $lock_dir"
+    fi
+}
+
 # Set up trap handlers for graceful agent-sweep shutdown.
 # Call early in cmd_agent_sweep() after initial setup.
 setup_agent_sweep_traps() {
@@ -9047,6 +9113,7 @@ agent_sweep_handle_exit() {
     # On failure, optionally keep sessions for debugging
     if [[ $exit_code -ne 0 ]] && [[ "${AGENT_SWEEP_KEEP_SESSIONS_ON_FAIL:-false}" == "true" ]]; then
         log_info "Keeping sessions for debugging (--keep-sessions-on-fail)"
+        release_agent_sweep_instance_lock
         return
     fi
 
@@ -9057,6 +9124,7 @@ agent_sweep_handle_exit() {
     fi
 
     cleanup_agent_sweep_sessions
+    release_agent_sweep_instance_lock
 }
 
 # Map ntm error codes to ru exit codes.
@@ -12152,7 +12220,7 @@ cleanup_old_review_state() {
     # Clean old worktrees if they exist
     local worktrees_dir="${RU_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ru}/worktrees"
     if [[ -d "$worktrees_dir" ]]; then
-        find "$worktrees_dir" -maxdepth 1 -type d -mtime "+$max_age_days" \
+        find "$worktrees_dir" -mindepth 1 -maxdepth 1 -type d -mtime "+$max_age_days" \
             -exec rm -rf {} \; 2>/dev/null || true
     fi
 
@@ -16671,6 +16739,8 @@ cmd_agent_sweep() {
         return 1
     fi
     echo $$ > "$lock_dir/pid"
+    AGENT_SWEEP_INSTANCE_LOCK_DIR="$lock_dir"
+    AGENT_SWEEP_INSTANCE_LOCK_BASE="$state_dir"
     # Use double quotes to expand lock_dir at trap definition time (not execution time)
     # shellcheck disable=SC2064
     trap "rm -f '$lock_dir/pid' 2>/dev/null; rmdir '$lock_dir' 2>/dev/null || true" EXIT
@@ -16752,12 +16822,11 @@ cmd_agent_sweep() {
         log_info "Resuming previous agent-sweep run..."
         local -a remaining=()
         for repo_spec in "${dirty_repos[@]}"; do
-            local rn is_done=false
-            rn=$(get_repo_name "$repo_spec")
+            local is_done=false
             # Check if repo is in completed list (handle empty array safely)
             if [[ ${#COMPLETED_REPOS[@]} -gt 0 ]]; then
                 for c in "${COMPLETED_REPOS[@]}"; do
-                    [[ "$c" == "$rn" ]] && is_done=true && break
+                    [[ "$c" == "$repo_spec" ]] && is_done=true && break
                 done
             fi
             [[ "$is_done" != true ]] && remaining+=("$repo_spec")
@@ -16850,16 +16919,26 @@ run_sequential_agent_sweep() {
         progress_start_repo "$rn"
         log_verbose "Starting workflow for $rn"
 
+        local repo_start repo_duration
+        repo_start=$(date +%s)
         if run_single_agent_workflow "$repo_spec"; then
-            record_repo_result "$rn" "success"
+            repo_duration=$(( $(date +%s) - repo_start ))
+            record_repo_result "$repo_spec" "success" "" "$repo_duration"
             progress_complete_repo "success"
             log_debug "Workflow succeeded for $rn"
         else
             local exit_code=$?
-            record_repo_result "$rn" "failed" "$exit_code"
-            progress_complete_repo "failed" "exit code $exit_code"
-            log_debug "Workflow failed for $rn (exit code: $exit_code)"
-            any_failed=true
+            repo_duration=$(( $(date +%s) - repo_start ))
+            if [[ $exit_code -eq 2 ]]; then
+                record_repo_result "$repo_spec" "skipped" "skipped" "$repo_duration"
+                progress_complete_repo "skipped" "skipped"
+                log_debug "Workflow skipped for $rn"
+            else
+                record_repo_result "$repo_spec" "failed" "exit code $exit_code" "$repo_duration"
+                progress_complete_repo "failed" "exit code $exit_code"
+                log_debug "Workflow failed for $rn (exit code: $exit_code)"
+                any_failed=true
+            fi
         fi
     done
 
@@ -16887,9 +16966,13 @@ run_parallel_agent_sweep() {
 
     # Create work queue and lock directory
     local work_queue lock_dir
-    work_queue=$(mktemp)
+    work_queue=$(mktemp_file) || { log_error "Failed to create work queue"; return 3; }
     lock_dir="${AGENT_SWEEP_STATE_DIR:-/tmp}/locks_$$"
-    mkdir -p "$lock_dir"
+    if ! mkdir -p "$lock_dir"; then
+        log_error "Failed to create lock directory: $lock_dir"
+        rm -f "$work_queue" 2>/dev/null || true
+        return 3
+    fi
 
     # Populate work queue
     printf '%s\n' "${repos_ref[@]}" > "$work_queue"
@@ -16903,6 +16986,7 @@ run_parallel_agent_sweep() {
     for ((i=0; i<max_parallel && i<total; i++)); do
         (
             local worker_id=$i
+            local worker_failed=false
             log_debug "Worker $worker_id starting"
 
             while true; do
@@ -16931,17 +17015,28 @@ run_parallel_agent_sweep() {
                 progress_start_repo "$rn"
                 log_debug "Worker $worker_id processing $rn"
 
+                local repo_start repo_duration
+                repo_start=$(date +%s)
                 if run_single_agent_workflow "$repo_spec"; then
-                    record_repo_result "$rn" "success"
+                    repo_duration=$(( $(date +%s) - repo_start ))
+                    record_repo_result "$repo_spec" "success" "" "$repo_duration"
                     progress_complete_repo "success"
                 else
                     local exit_code=$?
-                    record_repo_result "$rn" "failed" "$exit_code"
-                    progress_complete_repo "failed" "exit code $exit_code"
+                    repo_duration=$(( $(date +%s) - repo_start ))
+                    if [[ $exit_code -eq 2 ]]; then
+                        record_repo_result "$repo_spec" "skipped" "skipped" "$repo_duration"
+                        progress_complete_repo "skipped" "skipped"
+                    else
+                        record_repo_result "$repo_spec" "failed" "exit code $exit_code" "$repo_duration"
+                        progress_complete_repo "failed" "exit code $exit_code"
+                        worker_failed=true
+                    fi
                 fi
             done
 
             log_debug "Worker $worker_id finished"
+            [[ "$worker_failed" != true ]]
         ) &
         worker_pids+=($!)
     done
@@ -16972,6 +17067,7 @@ run_single_agent_workflow() {
     start_time=$(date +%s)
     exec_mode="${AGENT_SWEEP_EXECUTION_MODE:-agent}"
     with_release="${AGENT_SWEEP_WITH_RELEASE:-false}"
+    SWEEP_LAST_SESSION_NAME=""
 
     log_debug "run_single_agent_workflow: repo=$rn path=$rp"
 
@@ -16991,7 +17087,7 @@ run_single_agent_workflow() {
     if [[ "$AGENT_SWEEP_ENABLED" != "true" ]]; then
         log_verbose "Skipping $rn (disabled in config)"
         write_result "$rn" "preflight" "skipped" 0 "disabled" "$rp"
-        return 0
+        return 2
     fi
 
     progress_update_phase "preflight"
@@ -17001,7 +17097,7 @@ run_single_agent_workflow() {
         message=$(preflight_skip_reason_message "$reason")
         log_warn "Preflight failed for $rn: $message"
         write_result "$rn" "preflight" "skipped" 0 "$reason" "$rp"
-        return 0
+        return 2
     fi
 
     local artifact_dir=""
@@ -17063,6 +17159,7 @@ run_single_agent_workflow() {
         _maybe_kill_session "$session_name" "true"
         return 1
     fi
+    SWEEP_LAST_SESSION_NAME="$session_name"
     write_result "$rn" "spawn" "ok" 0 "" "$rp"
 
     local pane_output=""
@@ -17292,18 +17389,66 @@ run_single_agent_workflow() {
 
 get_first_failed_session() {
     local sf="${AGENT_SWEEP_STATE_DIR:-$RU_STATE_DIR/agent-sweep}/results.ndjson"
-    [[ -f "$sf" ]] && grep '"status":"failed"' "$sf" | head -1 | jq -r '.session // empty' 2>/dev/null
+    if [[ ! -f "$sf" ]]; then
+        return 0
+    fi
+    if command -v jq &>/dev/null; then
+        jq -r 'select(.type=="summary" and .status=="failed") | .session // empty' "$sf" 2>/dev/null | head -1
+    else
+        grep '"type":"summary"' "$sf" | grep '"status":"failed"' | head -1 | sed -nE 's/.*"session":"([^"]*)".*/\1/p'
+    fi
 }
 
 record_repo_result() {
-    local rn="$1" st="$2" dt="${3:-}"
+    local repo_spec="$1"
+    local st="$2"
+    local detail="${3:-}"
+    local duration="${4:-0}"
     local sf="${AGENT_SWEEP_STATE_DIR:-$RU_STATE_DIR/agent-sweep}/results.ndjson"
-    local ts
-    ts=$(date -Iseconds)
-    printf '{"repo":"%s","status":"%s","detail":"%s","timestamp":"%s"}\n' \
-        "$(json_escape "$rn")" "$st" "$(json_escape "$dt")" "$ts" >> "$sf"
-    [[ "$st" == "success" || "$st" == "failed" ]] && \
-        echo "$rn" >> "${AGENT_SWEEP_STATE_DIR:-$RU_STATE_DIR/agent-sweep}/completed_repos.txt"
+    local completed_file="${AGENT_SWEEP_STATE_DIR:-$RU_STATE_DIR/agent-sweep}/completed_repos.txt"
+    local ts line
+
+    [[ -z "$repo_spec" ]] && return 1
+
+    # Ensure duration is numeric
+    local duration_num="${duration:-0}"
+    [[ "$duration_num" =~ ^[0-9]+$ ]] || duration_num=0
+
+    ts=$(date -Iseconds 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    local safe_repo safe_detail safe_session
+    safe_repo=$(json_escape "$repo_spec")
+    safe_detail=$(json_escape "$detail")
+    safe_session=$(json_escape "${SWEEP_LAST_SESSION_NAME:-}")
+
+    printf -v line '{"type":"summary","repo":"%s","status":"%s","detail":"%s","duration":%s,"session":"%s","timestamp":"%s"}\n' \
+        "$safe_repo" "$st" "$safe_detail" "$duration_num" "$safe_session" "$ts"
+
+    # Use results lock if available (parallel safety)
+    if [[ -n "${RESULTS_LOCK_DIR:-}" ]] && dir_lock_acquire "$RESULTS_LOCK_DIR" 10 2>/dev/null; then
+        printf '%s' "$line" >> "$sf"
+        case "$st" in
+            success|failed|skipped)
+                echo "$repo_spec" >> "$completed_file"
+                ;;
+        esac
+        dir_lock_release "$RESULTS_LOCK_DIR" 2>/dev/null || true
+    else
+        printf '%s' "$line" >> "$sf"
+        case "$st" in
+            success|failed|skipped)
+                echo "$repo_spec" >> "$completed_file"
+                ;;
+        esac
+    fi
+
+    case "$st" in
+        success|failed|skipped)
+            mark_repo_completed "$repo_spec" "$st" || true
+            ;;
+    esac
+
+    SWEEP_LAST_SESSION_NAME=""
 }
 
 print_agent_sweep_summary() {
@@ -17318,24 +17463,46 @@ print_agent_sweep_summary() {
 
     # Count results
     local s=0 f=0 k=0
-    while IFS= read -r l; do
-        case "$(echo "$l" | jq -r '.status // empty' 2>/dev/null)" in
-            success) ((s++)) ;; failed) ((f++)) ;; skipped) ((k++)) ;;
-        esac
-    done < "$sf"
+    if command -v jq &>/dev/null; then
+        while IFS= read -r l; do
+            local entry_type status
+            entry_type=$(echo "$l" | jq -r '.type // empty' 2>/dev/null)
+            [[ "$entry_type" != "summary" ]] && continue
+            status=$(echo "$l" | jq -r '.status // empty' 2>/dev/null)
+            case "$status" in
+                success) ((s++)) ;; failed) ((f++)) ;; skipped) ((k++)) ;;
+            esac
+        done < "$sf"
+    else
+        s=$(grep -c '"type":"summary".*"status":"success"' "$sf" 2>/dev/null || echo 0)
+        f=$(grep -c '"type":"summary".*"status":"failed"' "$sf" 2>/dev/null || echo 0)
+        local error_count
+        error_count=$(grep -c '"type":"summary".*"status":"error"' "$sf" 2>/dev/null || echo 0)
+        f=$((f + error_count))
+        k=$(grep -c '"type":"summary".*"status":"skipped"' "$sf" 2>/dev/null || echo 0)
+    fi
     local t=$((s + f + k))
 
     if [[ "${AGENT_SWEEP_JSON_OUTPUT:-false}" == "true" ]]; then
         # JSON output with full details
         local timestamp repos_json
         timestamp=$(date -Iseconds 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)
-        repos_json=$(jq -s '[.[] | {name:.repo,status:.status,duration:.duration,error:.error}]' "$sf" 2>/dev/null || echo '[]')
-        jq -n --arg ts "$timestamp" --arg rid "${RUN_ID:-unknown}" \
-            --argjson dur "$duration_seconds" \
-            --argjson t "$t" --argjson s "$s" --argjson f "$f" --argjson k "$k" \
-            --argjson repos "$repos_json" \
-            --arg art "${RUN_ARTIFACTS_DIR:-}" \
-            '{timestamp:$ts,run_id:$rid,duration_seconds:$dur,summary:{total:$t,succeeded:$s,failed:$f,skipped:$k},artifacts_dir:$art,repos:$repos}'
+        if command -v jq &>/dev/null; then
+            repos_json=$(jq -s \
+                '[.[] | select(.type=="summary") | {name:.repo,status:.status,duration:(.duration // 0),error:(.detail // ""),session:(.session // "")}]' \
+                "$sf" 2>/dev/null || echo '[]')
+            jq -n --arg ts "$timestamp" --arg rid "${RUN_ID:-unknown}" \
+                --argjson dur "$duration_seconds" \
+                --argjson t "$t" --argjson s "$s" --argjson f "$f" --argjson k "$k" \
+                --argjson repos "$repos_json" \
+                --arg art "${RUN_ARTIFACTS_DIR:-}" \
+                '{timestamp:$ts,run_id:$rid,duration_seconds:$dur,summary:{total:$t,succeeded:$s,failed:$f,skipped:$k},artifacts_dir:$art,repos:$repos}'
+        else
+            repos_json="[]"
+            printf '{"timestamp":"%s","run_id":"%s","duration_seconds":%s,"summary":{"total":%s,"succeeded":%s,"failed":%s,"skipped":%s},"artifacts_dir":"%s","repos":%s}' \
+                "$timestamp" "$(json_escape "${RUN_ID:-unknown}")" "$duration_seconds" "$t" "$s" "$f" "$k" \
+                "$(json_escape "${RUN_ARTIFACTS_DIR:-}")" "$repos_json"
+        fi
     else
         # Human-readable box output (63 chars wide)
         {
@@ -17355,7 +17522,7 @@ print_agent_sweep_summary() {
         if (( f > 0 )); then
             echo >&2 ""
             echo >&2 "Failed repos:"
-            jq -r 'select(.status == "failed") | "  • \(.repo): \(.error // "unknown")"' "$sf" 2>/dev/null | head -10 >&2
+            jq -r 'select(.type=="summary" and .status == "failed") | "  • \(.repo): \(.detail // "unknown")"' "$sf" 2>/dev/null | head -10 >&2
         fi
 
         # Show artifacts location

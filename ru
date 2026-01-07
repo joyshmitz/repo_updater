@@ -2587,8 +2587,17 @@ except:
         return 0
     fi
 
+    # Try simple arrays first: extract ["item1","item2"] as-is (bd-kgg5)
+    # This must come before unquoted values to avoid partial array matching
+    result=$(sed -nE 's/.*"'"$field"'"[[:space:]]*:[[:space:]]*(\[[^]]*\]).*/\1/p' <<<"$json" | head -n1)
+    if [[ -n "$result" ]]; then
+        printf '%s\n' "$result"
+        return 0
+    fi
+
     # Try unquoted values (numbers, booleans)
-    result=$(sed -nE 's/.*"'"$field"'"[[:space:]]*:[[:space:]]*([^,}\]]+).*/\1/p' <<<"$json" | head -n1 | tr -d '[:space:]')
+    # Note: [^],}] puts ] first in negated class for correct literal matching
+    result=$(sed -nE 's/.*"'"$field"'"[[:space:]]*:[[:space:]]*([^],}]+).*/\1/p' <<<"$json" | head -n1 | tr -d '[:space:]')
     [[ -n "$result" ]] && printf '%s\n' "$result"
     return 0
 }
@@ -7588,6 +7597,9 @@ is_file_denied() {
 
     # Also check for any extra patterns from environment
     local -a all_patterns=("${AGENT_SWEEP_DENYLIST_PATTERNS[@]}")
+    if [[ ${#AGENT_SWEEP_DENYLIST_EXTRA_LOCAL[@]} -gt 0 ]]; then
+        all_patterns+=("${AGENT_SWEEP_DENYLIST_EXTRA_LOCAL[@]}")
+    fi
     if [[ -n "${AGENT_SWEEP_DENYLIST_EXTRA:-}" ]]; then
         # Split space-separated extra patterns
         read -ra extra <<<"$AGENT_SWEEP_DENYLIST_EXTRA"
@@ -7612,10 +7624,12 @@ is_file_denied() {
         case "$pattern" in
             */\*) ;;  # Already has /*, skip
             *)
-                # Check if file is inside a denied directory
+                # Check if file is inside a denied directory (at any nesting level)
+                # This handles both "node_modules/pkg" and "frontend/node_modules/pkg"
                 # shellcheck disable=SC2254
                 case "$file_path" in
-                    $pattern/*) return 0 ;;  # File is inside denied directory
+                    $pattern/*) return 0 ;;       # Prefix match: node_modules/...
+                    */$pattern/*) return 0 ;;     # Nested match: .../node_modules/...
                 esac
                 ;;
         esac
@@ -7648,6 +7662,9 @@ filter_files_denylist() {
 # Useful for displaying to users or for external tools
 get_denylist_patterns() {
     printf '%s\n' "${AGENT_SWEEP_DENYLIST_PATTERNS[@]}"
+    if [[ ${#AGENT_SWEEP_DENYLIST_EXTRA_LOCAL[@]} -gt 0 ]]; then
+        printf '%s\n' "${AGENT_SWEEP_DENYLIST_EXTRA_LOCAL[@]}"
+    fi
     if [[ -n "${AGENT_SWEEP_DENYLIST_EXTRA:-}" ]]; then
         # shellcheck disable=SC2086  # Intentional word splitting for space-separated patterns
         printf '%s\n' $AGENT_SWEEP_DENYLIST_EXTRA
@@ -16775,6 +16792,8 @@ cmd_agent_sweep() {
     export AGENT_SWEEP_PHASE3_TIMEOUT="$phase3_timeout"
     export AGENT_SWEEP_JSON_OUTPUT="$json_output"
     export AGENT_SWEEP_MAX_FILE_MB_OVERRIDE="${AGENT_SWEEP_MAX_FILE_MB_OVERRIDE:-}"
+    export AGENT_SWEEP_KEEP_SESSIONS="$keep_sessions"
+    export AGENT_SWEEP_KEEP_SESSIONS_ON_FAIL="$keep_sessions_on_fail"
 
     # Process repositories
     local sweep_exit=0
@@ -16855,19 +16874,326 @@ run_parallel_agent_sweep() {
 
 run_single_agent_workflow() {
     local repo_spec="$1"
-    local rn rp
+    local rn rp start_time exec_mode with_release
     rn=$(get_repo_name "$repo_spec")
     rp=$(repo_spec_to_path "$repo_spec")
+    start_time=$(date +%s)
+    exec_mode="${AGENT_SWEEP_EXECUTION_MODE:-agent}"
+    with_release="${AGENT_SWEEP_WITH_RELEASE:-false}"
+
     log_debug "run_single_agent_workflow: repo=$rn path=$rp"
-    load_repo_agent_config "$rp"
+
+    if [[ -z "$rp" || ! -d "$rp" ]]; then
+        log_error "Repo path not found: $rp"
+        write_result "$rn" "preflight" "failed" 0 "repo path not found" "$rp"
+        return 1
+    fi
+
+    if ! load_repo_agent_config "$rp"; then
+        log_error "Failed to load agent-sweep config for $rn"
+        write_result "$rn" "config" "failed" 0 "config load failed" "$rp"
+        return 1
+    fi
     log_debug "Config loaded: AGENT_SWEEP_ENABLED=$AGENT_SWEEP_ENABLED"
+
     if [[ "$AGENT_SWEEP_ENABLED" != "true" ]]; then
         log_verbose "Skipping $rn (disabled in config)"
+        write_result "$rn" "preflight" "skipped" 0 "disabled" "$rp"
         return 0
     fi
-    # TODO: Full implementation in bd-b00c
-    log_verbose "Would process $rn with agent workflow"
-    log_debug "Stub returning success for $rn"
+
+    progress_update_phase "preflight"
+    if ! repo_preflight_check "$rp"; then
+        local reason="${PREFLIGHT_SKIP_REASON:-unknown}"
+        local message
+        message=$(preflight_skip_reason_message "$reason")
+        log_warn "Preflight failed for $rn: $message"
+        write_result "$rn" "preflight" "skipped" 0 "$reason" "$rp"
+        return 0
+    fi
+
+    local artifact_dir=""
+    artifact_dir=$(setup_repo_artifact_dir "$rp" 2>/dev/null || true)
+    if [[ -n "$artifact_dir" ]]; then
+        capture_git_state "$rp" "${artifact_dir}/git_before.txt" || true
+    fi
+
+    # Optional pre-hook
+    if [[ -n "$AGENT_SWEEP_PRE_HOOK" ]]; then
+        local pre_output pre_exit
+        if pre_output=$( (cd "$rp" && eval "$AGENT_SWEEP_PRE_HOOK") 2>&1); then
+            pre_exit=0
+        else
+            pre_exit=$?
+        fi
+        [[ -n "$artifact_dir" ]] && printf '%s\n' "$pre_output" > "${artifact_dir}/pre_hook.log"
+        if [[ $pre_exit -ne 0 ]]; then
+            log_error "Pre-hook failed for $rn (exit $pre_exit): $pre_output"
+            write_result "$rn" "pre_hook" "failed" 0 "pre-hook failed" "$rp"
+            capture_final_artifacts "$rp" ""
+            return 1
+        fi
+    fi
+
+    # Backup ref before any changes
+    git -C "$rp" update-ref -m "agent-sweep backup before run ${RUN_ID:-unknown}" \
+        "refs/agent-sweep/pre-run-${RUN_ID:-unknown}" HEAD 2>/dev/null || true
+
+    # Session cleanup helper (honor keep-sessions flags)
+    _maybe_kill_session() {
+        local session_name="$1"
+        local failed="${2:-false}"
+        [[ -z "$session_name" ]] && return 0
+        if [[ "${AGENT_SWEEP_KEEP_SESSIONS:-false}" == "true" ]]; then
+            return 0
+        fi
+        if [[ "$failed" == "true" && "${AGENT_SWEEP_KEEP_SESSIONS_ON_FAIL:-false}" == "true" ]]; then
+            return 0
+        fi
+        ntm_kill_session "$session_name"
+    }
+
+    # Spawn session
+    progress_update_phase "spawn"
+    local session_name="ru_sweep_$(sanitize_session_name "$rn")_$$"
+    local spawn_result spawn_exit
+    if spawn_result=$(ntm_spawn_session "$session_name" "$rp"); then
+        spawn_exit=0
+    else
+        spawn_exit=$?
+    fi
+    [[ -n "$artifact_dir" ]] && capture_spawn_response "$rp" "$spawn_result" || true
+    if [[ $spawn_exit -ne 0 ]]; then
+        log_error "Session spawn failed for $rn: $spawn_result"
+        write_result "$rn" "spawn" "failed" 0 "session spawn failed" "$rp"
+        capture_final_artifacts "$rp" "$session_name"
+        _maybe_kill_session "$session_name" "true"
+        return 1
+    fi
+    write_result "$rn" "spawn" "ok" 0 "" "$rp"
+
+    local pane_output=""
+    local phase_start phase_duration
+
+    # Phase 1: Understanding
+    if ! should_skip_phase "phase1" && ! should_skip_phase "understanding"; then
+        progress_update_phase 1
+        local phase1_prompt
+        phase1_prompt=$(get_effective_phase_prompt 1 "$rp")
+        if [[ -n "$AGENT_SWEEP_EXTRA_CONTEXT" ]]; then
+            phase1_prompt+=$'\n\nAdditional context:\n'"$AGENT_SWEEP_EXTRA_CONTEXT"
+        fi
+
+        phase_start=$(date +%s)
+        log_activity_snapshot "$rp" "phase1" "start"
+        if ! ntm_send_prompt "$session_name" "$phase1_prompt" >/dev/null 2>&1; then
+            log_error "Failed to send Phase 1 prompt for $rn"
+            write_result "$rn" "phase1" "failed" 0 "send prompt failed" "$rp"
+            capture_final_artifacts "$rp" "$session_name"
+            _maybe_kill_session "$session_name" "true"
+            return 1
+        fi
+
+        progress_update_phase "wait"
+        if ! ntm_wait_completion "$session_name" "${AGENT_SWEEP_PHASE1_TIMEOUT:-300}" >/dev/null 2>&1; then
+            phase_duration=$(( $(date +%s) - phase_start ))
+            log_error "Phase 1 timed out for $rn"
+            write_result "$rn" "phase1" "timeout" "$phase_duration" "" "$rp"
+            log_activity_snapshot "$rp" "phase1" "timeout"
+            capture_final_artifacts "$rp" "$session_name"
+            _maybe_kill_session "$session_name" "true"
+            return 1
+        fi
+
+        phase_duration=$(( $(date +%s) - phase_start ))
+        pane_output=$(capture_pane_output "$session_name" 10000 2>/dev/null || true)
+        local understanding_json=""
+        if understanding_json=$(extract_plan_json "$pane_output" "UNDERSTANDING"); then
+            [[ -n "$artifact_dir" ]] && printf '%s\n' "$understanding_json" > "${artifact_dir}/understanding.json"
+            write_result "$rn" "phase1" "ok" "$phase_duration" "" "$rp"
+        else
+            log_warn "Phase 1 understanding JSON not found for $rn"
+            write_result "$rn" "phase1" "warning" "$phase_duration" "missing understanding json" "$rp"
+        fi
+        log_activity_snapshot "$rp" "phase1" "complete"
+    else
+        log_verbose "Skipping Phase 1 for $rn"
+        write_result "$rn" "phase1" "skipped" 0 "" "$rp"
+    fi
+
+    # Phase 2: Commit plan
+    if should_skip_phase "phase2" || should_skip_phase "commit"; then
+        log_verbose "Skipping Phase 2 for $rn"
+        write_result "$rn" "phase2" "skipped" 0 "" "$rp"
+    else
+        progress_update_phase 2
+        local phase2_prompt
+        phase2_prompt=$(get_effective_phase_prompt 2 "$rp")
+        if [[ -n "$AGENT_SWEEP_EXTRA_CONTEXT" ]]; then
+            phase2_prompt+=$'\n\nAdditional context:\n'"$AGENT_SWEEP_EXTRA_CONTEXT"
+        fi
+
+        phase_start=$(date +%s)
+        log_activity_snapshot "$rp" "phase2" "start"
+        if ! ntm_send_prompt "$session_name" "$phase2_prompt" >/dev/null 2>&1; then
+            log_error "Failed to send Phase 2 prompt for $rn"
+            write_result "$rn" "phase2" "failed" 0 "send prompt failed" "$rp"
+            capture_final_artifacts "$rp" "$session_name"
+            _maybe_kill_session "$session_name" "true"
+            return 1
+        fi
+
+        progress_update_phase "wait"
+        if ! ntm_wait_completion "$session_name" "${AGENT_SWEEP_PHASE2_TIMEOUT:-600}" >/dev/null 2>&1; then
+            phase_duration=$(( $(date +%s) - phase_start ))
+            log_error "Phase 2 timed out for $rn"
+            write_result "$rn" "phase2" "timeout" "$phase_duration" "" "$rp"
+            log_activity_snapshot "$rp" "phase2" "timeout"
+            capture_final_artifacts "$rp" "$session_name"
+            _maybe_kill_session "$session_name" "true"
+            return 1
+        fi
+
+        phase_duration=$(( $(date +%s) - phase_start ))
+        pane_output=$(capture_pane_output "$session_name" 10000 2>/dev/null || true)
+        local commit_plan=""
+        if ! commit_plan=$(extract_plan_json "$pane_output" "COMMIT_PLAN"); then
+            log_error "Commit plan JSON not found for $rn"
+            write_result "$rn" "phase2" "failed" "$phase_duration" "missing commit plan json" "$rp"
+            log_activity_snapshot "$rp" "phase2" "failed"
+            capture_final_artifacts "$rp" "$session_name"
+            _maybe_kill_session "$session_name" "true"
+            return 1
+        fi
+
+        [[ -n "$artifact_dir" ]] && capture_plan_json "$rp" "commit" "$commit_plan" || true
+        write_result "$rn" "phase2" "ok" "$phase_duration" "" "$rp"
+
+        progress_update_phase "validate"
+        if [[ "$exec_mode" == "plan" ]]; then
+            if ! validate_commit_plan "$commit_plan" "$rp"; then
+                log_error "Commit plan validation failed for $rn: ${VALIDATION_ERROR:-unknown}"
+                write_result "$rn" "validation" "failed" 0 "${VALIDATION_ERROR:-validation failed}" "$rp"
+                log_activity_snapshot "$rp" "phase2" "validation_failed"
+                capture_final_artifacts "$rp" "$session_name"
+                _maybe_kill_session "$session_name" "true"
+                return 1
+            fi
+            write_result "$rn" "validation" "ok" 0 "" "$rp"
+            log_info "Plan mode enabled; skipping commit execution for $rn"
+        else
+            progress_update_phase "apply"
+            if ! execute_commit_plan "$commit_plan" "$rp"; then
+                log_error "Commit execution failed for $rn"
+                write_result "$rn" "execution" "failed" 0 "commit execution failed" "$rp"
+                log_activity_snapshot "$rp" "phase2" "execution_failed"
+                capture_final_artifacts "$rp" "$session_name"
+                _maybe_kill_session "$session_name" "true"
+                return 1
+            fi
+            write_result "$rn" "execution" "ok" 0 "" "$rp"
+        fi
+        log_activity_snapshot "$rp" "phase2" "complete"
+    fi
+
+    # Phase 3: Release (optional)
+    local release_strategy
+    release_strategy=$(get_release_strategy "$rp")
+    if [[ "$with_release" == true && "$release_strategy" != "never" ]] && \
+       ! should_skip_phase "phase3" && ! should_skip_phase "release"; then
+        progress_update_phase 3
+        local phase3_prompt
+        phase3_prompt=$(get_effective_phase_prompt 3 "$rp")
+        if [[ -n "$AGENT_SWEEP_EXTRA_CONTEXT" ]]; then
+            phase3_prompt+=$'\n\nAdditional context:\n'"$AGENT_SWEEP_EXTRA_CONTEXT"
+        fi
+
+        phase_start=$(date +%s)
+        log_activity_snapshot "$rp" "phase3" "start"
+        if ! ntm_send_prompt "$session_name" "$phase3_prompt" >/dev/null 2>&1; then
+            log_error "Failed to send Phase 3 prompt for $rn"
+            write_result "$rn" "phase3" "failed" 0 "send prompt failed" "$rp"
+            capture_final_artifacts "$rp" "$session_name"
+            _maybe_kill_session "$session_name" "true"
+            return 1
+        fi
+
+        progress_update_phase "wait"
+        if ! ntm_wait_completion "$session_name" "${AGENT_SWEEP_PHASE3_TIMEOUT:-300}" >/dev/null 2>&1; then
+            phase_duration=$(( $(date +%s) - phase_start ))
+            log_error "Phase 3 timed out for $rn"
+            write_result "$rn" "phase3" "timeout" "$phase_duration" "" "$rp"
+            log_activity_snapshot "$rp" "phase3" "timeout"
+            capture_final_artifacts "$rp" "$session_name"
+            _maybe_kill_session "$session_name" "true"
+            return 1
+        fi
+
+        phase_duration=$(( $(date +%s) - phase_start ))
+        pane_output=$(capture_pane_output "$session_name" 10000 2>/dev/null || true)
+        local release_plan=""
+        if ! release_plan=$(extract_plan_json "$pane_output" "RELEASE_PLAN"); then
+            log_error "Release plan JSON not found for $rn"
+            write_result "$rn" "phase3" "failed" "$phase_duration" "missing release plan json" "$rp"
+            log_activity_snapshot "$rp" "phase3" "failed"
+            capture_final_artifacts "$rp" "$session_name"
+            _maybe_kill_session "$session_name" "true"
+            return 1
+        fi
+
+        [[ -n "$artifact_dir" ]] && capture_plan_json "$rp" "release" "$release_plan" || true
+        write_result "$rn" "phase3" "ok" "$phase_duration" "" "$rp"
+
+        if [[ "$exec_mode" == "plan" ]]; then
+            if ! validate_release_plan "$release_plan" "$rp"; then
+                log_error "Release plan validation failed for $rn: ${VALIDATION_ERROR:-unknown}"
+                write_result "$rn" "release" "failed" 0 "${VALIDATION_ERROR:-validation failed}" "$rp"
+                log_activity_snapshot "$rp" "phase3" "validation_failed"
+                capture_final_artifacts "$rp" "$session_name"
+                _maybe_kill_session "$session_name" "true"
+                return 1
+            fi
+            write_result "$rn" "release" "skipped" 0 "plan mode" "$rp"
+        else
+            if ! execute_release_plan "$release_plan" "$rp"; then
+                log_error "Release execution failed for $rn"
+                write_result "$rn" "release" "failed" 0 "release execution failed" "$rp"
+                log_activity_snapshot "$rp" "phase3" "execution_failed"
+                capture_final_artifacts "$rp" "$session_name"
+                _maybe_kill_session "$session_name" "true"
+                return 1
+            fi
+            write_result "$rn" "release" "ok" 0 "" "$rp"
+        fi
+        log_activity_snapshot "$rp" "phase3" "complete"
+    else
+        log_verbose "Skipping Phase 3 for $rn"
+        write_result "$rn" "phase3" "skipped" 0 "" "$rp"
+    fi
+
+    # Optional post-hook
+    if [[ -n "$AGENT_SWEEP_POST_HOOK" ]]; then
+        local post_output post_exit
+        if post_output=$( (cd "$rp" && eval "$AGENT_SWEEP_POST_HOOK") 2>&1); then
+            post_exit=0
+        else
+            post_exit=$?
+        fi
+        [[ -n "$artifact_dir" ]] && printf '%s\n' "$post_output" > "${artifact_dir}/post_hook.log"
+        if [[ $post_exit -ne 0 ]]; then
+            log_error "Post-hook failed for $rn (exit $post_exit): $post_output"
+            write_result "$rn" "post_hook" "failed" 0 "post-hook failed" "$rp"
+            capture_final_artifacts "$rp" "$session_name"
+            _maybe_kill_session "$session_name" "true"
+            return 1
+        fi
+    fi
+
+    capture_final_artifacts "$rp" "$session_name"
+    _maybe_kill_session "$session_name"
+
+    local duration=$(( $(date +%s) - start_time ))
+    write_result "$rn" "agent-sweep" "success" "$duration" "" "$rp"
     return 0
 }
 

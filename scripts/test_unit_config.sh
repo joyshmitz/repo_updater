@@ -960,4 +960,4 @@ run_test test_resolve_config_uses_cli_args
 run_test test_resolve_config_partial_config
 
 print_results
-exit $?
+exit "$(get_exit_code)"

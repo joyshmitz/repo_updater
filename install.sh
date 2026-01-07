@@ -234,20 +234,49 @@ install_ntm() {
 
     log_step "Installing ntm..."
 
-    # Download and run ntm installer
+    # Download and run ntm installer with validation
     local ntm_install_url="https://raw.githubusercontent.com/Dicklesworthstone/ntm/main/install.sh"
-    if command_exists curl; then
-        if curl -fsSL "$ntm_install_url" | bash; then
-            log_success "ntm installed successfully"
-            return 0
-        fi
-    elif command_exists wget; then
-        if wget -qO- "$ntm_install_url" | bash; then
-            log_success "ntm installed successfully"
-            return 0
-        fi
+    local temp_ntm_script=""
+
+    # Create temp file for validation
+    if ! temp_ntm_script=$(mktemp 2>/dev/null); then
+        log_error "Failed to create temp file for ntm installer"
+        return 1
     fi
 
+    # Download the installer
+    local download_ok=0
+    if command_exists curl; then
+        curl -fsSL "$ntm_install_url" -o "$temp_ntm_script" 2>/dev/null && download_ok=1
+    elif command_exists wget; then
+        wget -q "$ntm_install_url" -O "$temp_ntm_script" 2>/dev/null && download_ok=1
+    fi
+
+    if [[ "$download_ok" -ne 1 ]]; then
+        rm -f "$temp_ntm_script" 2>/dev/null
+        log_warn "Failed to download ntm installer"
+        log_info "  You can install it manually: curl -fsSL $ntm_install_url | bash"
+        return 1
+    fi
+
+    # Validate it looks like a bash script (security check)
+    local first_line=""
+    IFS= read -r first_line < "$temp_ntm_script" 2>/dev/null || true
+    if [[ "$first_line" != "#!/usr/bin/env bash" && "$first_line" != "#!/bin/bash" ]]; then
+        rm -f "$temp_ntm_script" 2>/dev/null
+        log_warn "ntm installer validation failed (unexpected content)"
+        log_info "  You can install it manually: curl -fsSL $ntm_install_url | bash"
+        return 1
+    fi
+
+    # Run the validated installer
+    if bash "$temp_ntm_script"; then
+        rm -f "$temp_ntm_script" 2>/dev/null
+        log_success "ntm installed successfully"
+        return 0
+    fi
+
+    rm -f "$temp_ntm_script" 2>/dev/null
     log_warn "Failed to install ntm. You can install it manually later:"
     log_info "  curl -fsSL $ntm_install_url | bash"
     return 1
@@ -441,6 +470,7 @@ in_path() {
 
 # Download a file with cache-busting
 # Adds a timestamp query parameter to bypass CDN/proxy caches
+# Returns: 0 on success, 1 on failure
 download_file() {
     local url="$1"
     local dest="$2"
@@ -448,9 +478,9 @@ download_file() {
     final_url=$(maybe_cache_bust_url "$url")
 
     if command_exists curl; then
-        curl -fsSL "$final_url" -o "$dest"
+        curl -fsSL "$final_url" -o "$dest" || return 1
     elif command_exists wget; then
-        wget -q "$final_url" -O "$dest"
+        wget -q "$final_url" -O "$dest" || return 1
     else
         log_error "Neither curl nor wget found"
         return 1
@@ -700,15 +730,18 @@ add_to_path() {
 
     log_step "Adding $dir to PATH in $shell_config"
 
-    # Add to shell config
-    {
+    # Add to shell config with error checking
+    if {
         printf '\n'
         printf '%s\n' "# Added by ru installer"
         printf '%s\n' "export PATH=\"$dir:\$PATH\""
-    } >> "$shell_config"
-
-    log_success "Added to $shell_config"
-    log_info "Run 'source $shell_config' or start a new shell to update PATH"
+    } >> "$shell_config" 2>/dev/null; then
+        log_success "Added to $shell_config"
+        log_info "Run 'source $shell_config' or start a new shell to update PATH"
+    else
+        log_error "Failed to write to $shell_config (check permissions)"
+        return 1
+    fi
 }
 
 #==============================================================================

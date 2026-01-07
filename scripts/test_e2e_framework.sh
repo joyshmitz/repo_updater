@@ -92,11 +92,12 @@ e2e_log_result() {
     if is_json_mode; then
         local extra_args=()
         [[ -n "$details" ]] && extra_args+=("details" "$details")
+        # Use ${arr[@]+"${arr[@]}"} pattern for Bash 4.0-4.3 compatibility with set -u
         _json_log "e2e_result" \
             "operation" "$operation" \
             "result" "$result" \
             "duration_ms" "$duration_ms" \
-            "${extra_args[@]}"
+            ${extra_args[@]+"${extra_args[@]}"}
     fi
 }
 

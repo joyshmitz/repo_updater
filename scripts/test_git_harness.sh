@@ -104,7 +104,8 @@ git_harness_setup() {
 # Usage: git_harness_cleanup
 git_harness_cleanup() {
     local dir
-    for dir in "${GIT_HARNESS_TEMP_DIRS[@]}"; do
+    # Use ${array[@]+"${array[@]}"} pattern to safely handle empty arrays with set -u
+    for dir in ${GIT_HARNESS_TEMP_DIRS[@]+"${GIT_HARNESS_TEMP_DIRS[@]}"}; do
         if [[ -n "$dir" && -d "$dir" ]]; then
             rm -rf "$dir"
             _git_harness_log "Cleaned up $dir"
@@ -436,9 +437,10 @@ git_harness_is_dirty() {
 
 # Check if repo is shallow
 # Usage: if git_harness_is_shallow PATH; then ...
+# Note: Uses git plumbing (rev-parse --is-shallow-repository) per AGENTS.md
 git_harness_is_shallow() {
     local repo_dir="$1"
-    [[ -f "$repo_dir/.git/shallow" ]]
+    [[ "$(git -C "$repo_dir" rev-parse --is-shallow-repository 2>/dev/null)" == "true" ]]
 }
 
 # Check if HEAD is detached

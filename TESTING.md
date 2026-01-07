@@ -86,6 +86,7 @@ Test real git operations using local bare repos:
 #!/usr/bin/env bash
 set -uo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/test_framework.sh"
 
 test_clone_and_pull() {
@@ -97,8 +98,8 @@ test_clone_and_pull() {
     repo_dir="${info%|*}"
     remote_dir="${info#*|}"
 
-    # Add remote commit
-    git -C "$remote_dir" ... # manipulate the bare repo
+    # Add a commit directly to the bare remote (simulates someone else pushing)
+    git -C "$remote_dir" commit --allow-empty -m "Remote commit"
 
     # Test ru function
     source_ru_function "do_pull"
@@ -141,7 +142,7 @@ test_sync_command() {
     echo "https://github.com/test/myrepo" > "$RU_CONFIG_DIR/repos.d/public.txt"
 
     # Run ru command
-    local output exit_code
+    local output exit_code=0
     output=$("$RU_SCRIPT" sync 2>&1) || exit_code=$?
 
     # Verify
@@ -273,7 +274,7 @@ See `.github/workflows/ci.yml` for details.
 test_error_handling() {
     log_test_start "function returns error on invalid input"
 
-    local exit_code
+    local exit_code=0
     some_function "invalid" 2>/dev/null || exit_code=$?
 
     assert_equals "1" "$exit_code" "returns error code 1"
@@ -316,9 +317,9 @@ test_repo_state() {
     # Check state
     git -C "$repo_dir" fetch
     local ahead
-    ahead=$(git -C "$repo_dir" rev-list --count HEAD..origin/main)
+    ahead=$(git -C "$repo_dir" rev-list --count origin/main..HEAD)
 
-    assert_equals "0" "$ahead" "local is not behind"
+    assert_equals "1" "$ahead" "local is 1 commit ahead"
 
     log_test_pass "repo is ahead after local commit"
 }

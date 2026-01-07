@@ -31,6 +31,11 @@ log_warn() { :; }
 log_error() { :; }
 log_info() { :; }
 log_verbose() { :; }
+log_debug() { :; }
+
+# Global vars required by extracted functions
+VERBOSE=false
+LOG_LEVEL=0
 
 # Stub for ensure_dir
 ensure_dir() { mkdir -p "$1" 2>/dev/null; }
@@ -123,16 +128,28 @@ run_test() {
 
     setup_test_env
 
-    local result
-    if result=$($test_func 2>&1); then
+    # Run test directly (not in subshell) to preserve globals
+    # Redirect output to a temp file to capture errors
+    local output_file
+    output_file=$(mktemp)
+
+    local test_passed=true
+    if ! $test_func > "$output_file" 2>&1; then
+        test_passed=false
+    fi
+
+    if $test_passed; then
         echo -e "${GREEN}PASS${NC}"
         ((TESTS_PASSED++))
     else
         echo -e "${RED}FAIL${NC}"
-        [[ -n "$result" ]] && echo "$result" | sed 's/^/    /'
+        if [[ -s "$output_file" ]]; then
+            sed 's/^/    /' "$output_file"
+        fi
         ((TESTS_FAILED++))
     fi
 
+    rm -f "$output_file"
     cleanup_test_env
 }
 

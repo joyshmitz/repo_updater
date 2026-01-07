@@ -408,6 +408,124 @@ get_file_size_mb() {
     awk "BEGIN { printf \"%.1f\", $size_bytes / 1048576 }"
 }
 
+# Check if value is a positive integer (>0)
+agent_sweep_is_positive_int() {
+    [[ "${1:-}" =~ ^[0-9]+$ ]] && [[ "$1" -gt 0 ]]
+}
+
+# Set max file size in MB and keep bytes in sync
+set_agent_sweep_max_file_mb() {
+    local max_mb="${1:-}"
+    if agent_sweep_is_positive_int "$max_mb"; then
+        AGENT_SWEEP_MAX_FILE_MB="$max_mb"
+        AGENT_SWEEP_MAX_FILE_SIZE=$((max_mb * 1024 * 1024))
+        return 0
+    fi
+    return 1
+}
+
+# Set max file size in bytes and keep MB in sync (rounded up)
+set_agent_sweep_max_file_bytes() {
+    local max_bytes="${1:-}"
+    if agent_sweep_is_positive_int "$max_bytes"; then
+        AGENT_SWEEP_MAX_FILE_SIZE="$max_bytes"
+        AGENT_SWEEP_MAX_FILE_MB=$(((max_bytes + 1048575) / 1048576))
+        return 0
+    fi
+    return 1
+}
+
+# Apply max file size from config values (MB preferred, then bytes)
+apply_agent_sweep_max_file_limit() {
+    local raw_mb="${1:-}"
+    local raw_bytes="${2:-}"
+
+    if [[ -n "$raw_mb" && "$raw_mb" != "null" ]]; then
+        set_agent_sweep_max_file_mb "$raw_mb" || true
+        return 0
+    fi
+
+    if [[ -n "$raw_bytes" && "$raw_bytes" != "null" ]]; then
+        set_agent_sweep_max_file_bytes "$raw_bytes" || true
+    fi
+}
+
+# Apply CLI override for max file size (MB)
+apply_agent_sweep_max_file_override() {
+    local override="${AGENT_SWEEP_MAX_FILE_MB_OVERRIDE:-}"
+    [[ -z "$override" ]] && return 0
+    set_agent_sweep_max_file_mb "$override" || true
+}
+
+# Check if a file exceeds the max size (MB)
+# Usage: is_file_too_large /path/to/file [max_mb]
+# Returns: 0 if too large, 1 otherwise
+is_file_too_large() {
+    local file="${1:-}"
+    local max_mb="${2:-${AGENT_SWEEP_MAX_FILE_MB:-0}}"
+    [[ -z "$file" || ! -f "$file" ]] && return 1
+    agent_sweep_is_positive_int "$max_mb" || return 1
+
+    local max_bytes=$((max_mb * 1024 * 1024))
+    local size_bytes
+    size_bytes=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null || echo 0)
+    [[ "$size_bytes" -gt "$max_bytes" ]]
+}
+
+# Detect if a file is likely binary
+# Returns: 0 if binary, 1 otherwise
+is_binary_file() {
+    local file="${1:-}"
+    [[ -z "$file" || ! -f "$file" ]] && return 1
+
+    if command -v file &>/dev/null; then
+        local info
+        info=$(file -b "$file" 2>/dev/null || echo "")
+        if echo "$info" | grep -qiE '(text|script|json|xml|empty|ascii|utf-8|unicode)'; then
+            return 1
+        fi
+        return 0
+    fi
+
+    # Fallback: detect NUL bytes
+    if LC_ALL=C grep -q $'\x00' "$file" 2>/dev/null; then
+        return 0
+    fi
+    return 1
+}
+
+# Check if a binary file is explicitly allowed by patterns
+# Usage: is_binary_allowed "path/to/file.bin"
+# Returns: 0 if allowed, 1 otherwise
+is_binary_allowed() {
+    local file_path="${1:-}"
+    [[ -z "$file_path" ]] && return 1
+
+    file_path="${file_path#./}"
+    file_path="${file_path%/}"
+    local basename="${file_path##*/}"
+
+    local -a patterns=("${AGENT_SWEEP_ALLOW_BINARY_PATTERNS_DEFAULT[@]}")
+    if [[ -n "${AGENT_SWEEP_ALLOW_BINARY_PATTERNS:-}" ]]; then
+        read -ra extra <<<"$AGENT_SWEEP_ALLOW_BINARY_PATTERNS"
+        patterns+=("${extra[@]}")
+    fi
+
+    local pattern
+    for pattern in "${patterns[@]}"; do
+        # shellcheck disable=SC2254
+        case "$file_path" in
+            $pattern) return 0 ;;
+        esac
+        # shellcheck disable=SC2254
+        case "$basename" in
+            $pattern) return 0 ;;
+        esac
+    done
+
+    return 1
+}
+
 # Check if array contains an element
 # Usage: array_contains array_name "element"
 # Returns: 0 if found, 1 if not found
@@ -439,12 +557,23 @@ get_repo_name() {
 
 # Default agent-sweep per-repo config values
 declare -g AGENT_SWEEP_ENABLED="true"
-declare -g AGENT_SWEEP_MAX_FILE_SIZE="5242880"
+declare -g AGENT_SWEEP_MAX_FILE_MB="10"
+declare -g AGENT_SWEEP_MAX_FILE_SIZE="10485760"
+declare -g AGENT_SWEEP_MAX_FILE_MB_OVERRIDE=""
 declare -ga AGENT_SWEEP_SKIP_PHASES=()
 declare -g AGENT_SWEEP_EXTRA_CONTEXT=""
 declare -g AGENT_SWEEP_PRE_HOOK=""
 declare -g AGENT_SWEEP_POST_HOOK=""
 declare -ga AGENT_SWEEP_DENYLIST_EXTRA_LOCAL=()
+declare -a AGENT_SWEEP_ALLOW_BINARY_PATTERNS_DEFAULT=(
+    "*.png"
+    "*.jpg"
+    "*.jpeg"
+    "*.gif"
+    "*.ico"
+    "*.woff"
+    "*.woff2"
+)
 
 #------------------------------------------------------------------------------
 # AGENT-SWEEP PHASE PROMPTS
@@ -834,7 +963,8 @@ load_repo_agent_config() {
 
     # Reset to defaults before loading
     AGENT_SWEEP_ENABLED="true"
-    AGENT_SWEEP_MAX_FILE_SIZE="5242880"
+    AGENT_SWEEP_MAX_FILE_MB="10"
+    set_agent_sweep_max_file_mb "$AGENT_SWEEP_MAX_FILE_MB"
     AGENT_SWEEP_SKIP_PHASES=()
     AGENT_SWEEP_EXTRA_CONTEXT=""
     AGENT_SWEEP_PRE_HOOK=""
@@ -846,7 +976,10 @@ load_repo_agent_config() {
     for cfg in "$repo_path/.ru-agent.yml" "$repo_path/.ru-agent.yaml" "$repo_path/.ru-agent.json"; do
         [[ -f "$cfg" ]] && { config_file="$cfg"; break; }
     done
-    [[ -z "$config_file" ]] && return 0  # No config = use defaults
+    if [[ -z "$config_file" ]]; then
+        apply_agent_sweep_max_file_override
+        return 0  # No config = use defaults + CLI override
+    fi
 
     # Parse config with layered fallbacks: yq > python3 > jq (JSON only)
     local is_yaml=false
@@ -867,7 +1000,10 @@ load_repo_agent_config() {
         local raw_enabled
         raw_enabled=$(yq -r '.agent_sweep.enabled // "true"' "$config_file" 2>/dev/null || echo "true")
         AGENT_SWEEP_ENABLED=$(_normalize_bool "$raw_enabled")
-        AGENT_SWEEP_MAX_FILE_SIZE=$(yq -r '.agent_sweep.max_file_size // 5242880' "$config_file" 2>/dev/null || echo "5242880")
+        local raw_max_mb raw_max_bytes
+        raw_max_mb=$(yq -r '.agent_sweep.max_file_mb // ""' "$config_file" 2>/dev/null || echo "")
+        raw_max_bytes=$(yq -r '.agent_sweep.max_file_size // ""' "$config_file" 2>/dev/null || echo "")
+        apply_agent_sweep_max_file_limit "$raw_max_mb" "$raw_max_bytes"
         AGENT_SWEEP_EXTRA_CONTEXT=$(yq -r '.agent_sweep.extra_context // ""' "$config_file" 2>/dev/null || echo "")
         AGENT_SWEEP_PRE_HOOK=$(yq -r '.agent_sweep.pre_hook // ""' "$config_file" 2>/dev/null || echo "")
         AGENT_SWEEP_POST_HOOK=$(yq -r '.agent_sweep.post_hook // ""' "$config_file" 2>/dev/null || echo "")
@@ -885,6 +1021,7 @@ try:
     cfg = data.get('agent_sweep', {})
     print(json.dumps({
         'enabled': str(cfg.get('enabled', True)).lower(),
+        'max_file_mb': cfg.get('max_file_mb', None),
         'max_file_size': cfg.get('max_file_size', 5242880),
         'extra_context': cfg.get('extra_context', ''),
         'pre_hook': cfg.get('pre_hook', ''),
@@ -900,7 +1037,10 @@ except Exception as e:
             local raw_enabled
             raw_enabled=$(json_get_field "$py_output" "enabled" || echo "true")
             AGENT_SWEEP_ENABLED=$(_normalize_bool "$raw_enabled")
-            AGENT_SWEEP_MAX_FILE_SIZE=$(json_get_field "$py_output" "max_file_size" || echo "5242880")
+            local raw_max_mb raw_max_bytes
+            raw_max_mb=$(json_get_field "$py_output" "max_file_mb" || echo "")
+            raw_max_bytes=$(json_get_field "$py_output" "max_file_size" || echo "")
+            apply_agent_sweep_max_file_limit "$raw_max_mb" "$raw_max_bytes"
             AGENT_SWEEP_EXTRA_CONTEXT=$(json_get_field "$py_output" "extra_context" || echo "")
             AGENT_SWEEP_PRE_HOOK=$(json_get_field "$py_output" "pre_hook" || echo "")
             AGENT_SWEEP_POST_HOOK=$(json_get_field "$py_output" "post_hook" || echo "")
@@ -915,7 +1055,10 @@ except Exception as e:
         local raw_enabled
         raw_enabled=$(jq -r '.agent_sweep.enabled // true' "$config_file" 2>/dev/null || echo "true")
         AGENT_SWEEP_ENABLED=$(_normalize_bool "$raw_enabled")
-        AGENT_SWEEP_MAX_FILE_SIZE=$(jq -r '.agent_sweep.max_file_size // 5242880' "$config_file" 2>/dev/null || echo "5242880")
+        local raw_max_mb raw_max_bytes
+        raw_max_mb=$(jq -r '.agent_sweep.max_file_mb // empty' "$config_file" 2>/dev/null || echo "")
+        raw_max_bytes=$(jq -r '.agent_sweep.max_file_size // empty' "$config_file" 2>/dev/null || echo "")
+        apply_agent_sweep_max_file_limit "$raw_max_mb" "$raw_max_bytes"
         AGENT_SWEEP_EXTRA_CONTEXT=$(jq -r '.agent_sweep.extra_context // ""' "$config_file" 2>/dev/null || echo "")
         AGENT_SWEEP_PRE_HOOK=$(jq -r '.agent_sweep.pre_hook // ""' "$config_file" 2>/dev/null || echo "")
         AGENT_SWEEP_POST_HOOK=$(jq -r '.agent_sweep.post_hook // ""' "$config_file" 2>/dev/null || echo "")
@@ -932,6 +1075,7 @@ try:
     cfg = data.get('agent_sweep', {})
     print(json.dumps({
         'enabled': str(cfg.get('enabled', True)).lower(),
+        'max_file_mb': cfg.get('max_file_mb', None),
         'max_file_size': cfg.get('max_file_size', 5242880),
         'extra_context': cfg.get('extra_context', ''),
         'pre_hook': cfg.get('pre_hook', ''),
@@ -947,7 +1091,10 @@ except Exception as e:
             local raw_enabled
             raw_enabled=$(json_get_field "$py_output" "enabled" || echo "true")
             AGENT_SWEEP_ENABLED=$(_normalize_bool "$raw_enabled")
-            AGENT_SWEEP_MAX_FILE_SIZE=$(json_get_field "$py_output" "max_file_size" || echo "5242880")
+            local raw_max_mb raw_max_bytes
+            raw_max_mb=$(json_get_field "$py_output" "max_file_mb" || echo "")
+            raw_max_bytes=$(json_get_field "$py_output" "max_file_size" || echo "")
+            apply_agent_sweep_max_file_limit "$raw_max_mb" "$raw_max_bytes"
             AGENT_SWEEP_EXTRA_CONTEXT=$(json_get_field "$py_output" "extra_context" || echo "")
             AGENT_SWEEP_PRE_HOOK=$(json_get_field "$py_output" "pre_hook" || echo "")
             AGENT_SWEEP_POST_HOOK=$(json_get_field "$py_output" "post_hook" || echo "")
@@ -958,6 +1105,8 @@ except Exception as e:
             [[ -n "$deny_arr" ]] && mapfile -t AGENT_SWEEP_DENYLIST_EXTRA_LOCAL <<< "$deny_arr"
         fi
     fi
+    # Apply CLI override (if provided)
+    apply_agent_sweep_max_file_override
     # If no parser available, stay with defaults (already set)
     return 0
 }
@@ -1236,7 +1385,7 @@ log_activity_snapshot() {
     local repo_path="${1:-}"
     local phase="${2:-}"
     local status="${3:-}"
-    local extra="${4:-}"
+    local extra_json="${4:-}"
 
     [[ -z "$repo_path" ]] && return 1
 
@@ -1248,7 +1397,7 @@ log_activity_snapshot() {
 
     # Build JSON - phase/status are controlled strings (no special chars expected)
     local json="{\"ts\":\"$ts\",\"phase\":\"$phase\",\"status\":\"$status\""
-    [[ -n "$extra" ]] && json="${json},${extra}"
+    [[ -n "$extra_json" ]] && json="${json},${extra_json}"
     json="${json}}"
 
     echo "$json" >> "${artifact_dir}/activity.ndjson"
@@ -2166,9 +2315,20 @@ _progress_show_header() {
             "$(gum style --bold "Agent Sweep")" \
             "Processing $total repositories" >&2
     else
+        # Build content line with dynamic padding
+        local content="Processing $total repositories"
+        local box_width=38
+        local content_len=${#content}
+        local total_padding=$((box_width - content_len))
+        local left_pad=$((total_padding / 2))
+        local right_pad=$((total_padding - left_pad))
+        local left_spaces right_spaces
+        printf -v left_spaces '%*s' "$left_pad" ''
+        printf -v right_spaces '%*s' "$right_pad" ''
+
         printf '%b\n' "${CYAN}╭──────────────────────────────────────╮${RESET}" >&2
         printf '%b\n' "${CYAN}│${RESET}          ${BOLD}Agent Sweep${RESET}              ${CYAN}│${RESET}" >&2
-        printf '%b\n' "${CYAN}│${RESET}   Processing $total repositories       ${CYAN}│${RESET}" >&2
+        printf '%b\n' "${CYAN}│${RESET}${left_spaces}${content}${right_spaces}${CYAN}│${RESET}" >&2
         printf '%b\n' "${CYAN}╰──────────────────────────────────────╯${RESET}" >&2
     fi
     echo "" >&2
@@ -2180,6 +2340,7 @@ progress_start_repo() {
     local repo_name="${1:-unknown}"
 
     ((PROGRESS_CURRENT++))
+    # shellcheck disable=SC2034  # Tracking state for external introspection
     PROGRESS_CURRENT_REPO="$repo_name"
     PROGRESS_CURRENT_PHASE="preflight"
     PROGRESS_REPO_START_EPOCH=$(date +%s)
@@ -4160,7 +4321,11 @@ parse_args() {
             --json)
                 JSON_OUTPUT="true"
                 # Also pass to subcommands that handle --json internally
-                [[ "$COMMAND" == "agent-sweep" ]] && ARGS+=("$1")
+                if [[ "$COMMAND" == "agent-sweep" ]]; then
+                    ARGS+=("$1")
+                elif [[ -z "$COMMAND" ]]; then
+                    pending_global_args+=("$1")
+                fi
                 shift
                 ;;
             -q|--quiet)
@@ -4381,7 +4546,7 @@ parse_args() {
     fi
 
     # Apply any pending args that appeared before the command
-    if [[ "$COMMAND" == "review" ]]; then
+    if [[ "$COMMAND" == "review" || "$COMMAND" == "agent-sweep" ]]; then
         [[ ${#pending_review_args[@]} -gt 0 ]] && ARGS+=("${pending_review_args[@]}")
         [[ ${#pending_global_args[@]} -gt 0 ]] && ARGS+=("${pending_global_args[@]}")
     else
@@ -15590,6 +15755,7 @@ cmd_agent_sweep() {
     local execution_mode="agent"
     local secret_scan_mode="warn"
     local json_output=false
+    local max_file_mb_override=""
     local phase1_timeout="${AGENT_SWEEP_PHASE1_TIMEOUT:-300}"
     local phase2_timeout="${AGENT_SWEEP_PHASE2_TIMEOUT:-600}"
     local phase3_timeout="${AGENT_SWEEP_PHASE3_TIMEOUT:-300}"
@@ -15610,6 +15776,7 @@ cmd_agent_sweep() {
             --attach-on-fail) attach_on_fail=true ;;
             --execution-mode=*) execution_mode="${arg#--execution-mode=}" ;;
             --secret-scan=*) secret_scan_mode="${arg#--secret-scan=}" ;;
+            --max-file-mb=*) max_file_mb_override="${arg#--max-file-mb=}" ;;
             --phase1-timeout=*) phase1_timeout="${arg#--phase1-timeout=}" ;;
             --phase2-timeout=*) phase2_timeout="${arg#--phase2-timeout=}" ;;
             --phase3-timeout=*) phase3_timeout="${arg#--phase3-timeout=}" ;;
@@ -15636,6 +15803,15 @@ cmd_agent_sweep() {
         none|warn|block) ;;
         *) log_error "Invalid secret-scan mode: $secret_scan_mode"; return 4 ;;
     esac
+
+    # Validate max file size override
+    if [[ -n "$max_file_mb_override" ]]; then
+        if ! agent_sweep_is_positive_int "$max_file_mb_override"; then
+            log_error "Invalid --max-file-mb: $max_file_mb_override (must be positive integer)"
+            return 4
+        fi
+        AGENT_SWEEP_MAX_FILE_MB_OVERRIDE="$max_file_mb_override"
+    fi
 
     # Resume and restart are mutually exclusive
     if [[ "$resume" == true && "$restart" == true ]]; then
@@ -15790,6 +15966,7 @@ cmd_agent_sweep() {
     export AGENT_SWEEP_PHASE2_TIMEOUT="$phase2_timeout"
     export AGENT_SWEEP_PHASE3_TIMEOUT="$phase3_timeout"
     export AGENT_SWEEP_JSON_OUTPUT="$json_output"
+    export AGENT_SWEEP_MAX_FILE_MB_OVERRIDE="${AGENT_SWEEP_MAX_FILE_MB_OVERRIDE:-}"
 
     # Process repositories
     local sweep_exit=0

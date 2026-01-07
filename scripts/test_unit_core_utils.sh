@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # Unit Tests: Core Utilities
-# Tests for ensure_dir, json_escape, json_get_field, json_is_success, write_result functions
+# Tests for ensure_dir, json_escape, json_get_field, json_is_success, write_result,
+# file size, and binary detection functions
 #
 # Test coverage:
 #   - ensure_dir creates directories
@@ -24,6 +25,9 @@
 #   - write_result includes all fields
 #   - write_result handles special characters in fields
 #   - write_result respects RESULTS_FILE being unset
+#   - is_file_too_large enforces max size limit
+#   - is_binary_file detects text vs binary
+#   - is_binary_allowed honors patterns
 #
 # shellcheck disable=SC2034  # Variables used by sourced functions
 set -uo pipefail
@@ -95,11 +99,29 @@ extract_functions() {
     # Extract json_is_success
     eval "$(sed -n '/^json_is_success()/,/^}/p' "$RU_SCRIPT")"
 
+    # Extract file size/binary helpers
+    eval "$(sed -n '/^get_file_size_mb()/,/^}/p' "$RU_SCRIPT")"
+    eval "$(sed -n '/^agent_sweep_is_positive_int()/,/^}/p' "$RU_SCRIPT")"
+    eval "$(sed -n '/^set_agent_sweep_max_file_mb()/,/^}/p' "$RU_SCRIPT")"
+    eval "$(sed -n '/^set_agent_sweep_max_file_bytes()/,/^}/p' "$RU_SCRIPT")"
+    eval "$(sed -n '/^apply_agent_sweep_max_file_limit()/,/^}/p' "$RU_SCRIPT")"
+    eval "$(sed -n '/^apply_agent_sweep_max_file_override()/,/^}/p' "$RU_SCRIPT")"
+    eval "$(sed -n '/^is_file_too_large()/,/^}/p' "$RU_SCRIPT")"
+    eval "$(sed -n '/^is_binary_file()/,/^}/p' "$RU_SCRIPT")"
+    eval "$(sed -n '/^is_binary_allowed()/,/^}/p' "$RU_SCRIPT")"
+
     # Extract write_result
     eval "$(sed -n '/^write_result()/,/^}/p' "$RU_SCRIPT")"
 }
 
 extract_functions
+
+# Globals needed by extracted helpers
+AGENT_SWEEP_MAX_FILE_MB="10"
+AGENT_SWEEP_MAX_FILE_SIZE=$((AGENT_SWEEP_MAX_FILE_MB * 1024 * 1024))
+AGENT_SWEEP_MAX_FILE_MB_OVERRIDE=""
+AGENT_SWEEP_ALLOW_BINARY_PATTERNS_DEFAULT=("*.png" "*.jpg" "*.jpeg" "*.gif" "*.ico" "*.woff" "*.woff2")
+AGENT_SWEEP_ALLOW_BINARY_PATTERNS=""
 
 #==============================================================================
 # Tests: ensure_dir
@@ -612,6 +634,96 @@ test_write_result_default_duration() {
 }
 
 #==============================================================================
+# Tests: file size and binary detection helpers
+#==============================================================================
+
+test_is_file_too_large_limits() {
+    echo -e "${BLUE}Test:${RESET} is_file_too_large enforces max MB limit"
+    setup_test_env
+
+    AGENT_SWEEP_MAX_FILE_MB="1"
+    AGENT_SWEEP_MAX_FILE_SIZE=$((AGENT_SWEEP_MAX_FILE_MB * 1024 * 1024))
+
+    local small_file="$TEMP_DIR/small.bin"
+    local exact_file="$TEMP_DIR/exact.bin"
+    local large_file="$TEMP_DIR/large.bin"
+
+    dd if=/dev/zero of="$small_file" bs=1K count=64 >/dev/null 2>&1
+    dd if=/dev/zero of="$exact_file" bs=1M count=1 >/dev/null 2>&1
+    dd if=/dev/zero of="$large_file" bs=1M count=2 >/dev/null 2>&1
+
+    if is_file_too_large "$small_file"; then
+        fail "Small file should not be too large"
+    else
+        pass "Small file allowed"
+    fi
+
+    if is_file_too_large "$exact_file"; then
+        fail "Exact-limit file should not be too large"
+    else
+        pass "Exact-limit file allowed"
+    fi
+
+    if is_file_too_large "$large_file"; then
+        pass "Large file correctly flagged"
+    else
+        fail "Large file should be too large"
+    fi
+
+    cleanup_test_env
+}
+
+test_is_binary_file_detection() {
+    echo -e "${BLUE}Test:${RESET} is_binary_file detects text vs binary"
+    setup_test_env
+
+    local text_file="$TEMP_DIR/text.txt"
+    local bin_file="$TEMP_DIR/binary.bin"
+
+    echo "hello world" > "$text_file"
+    printf "binary\x00content" > "$bin_file"
+
+    if is_binary_file "$text_file"; then
+        fail "Text file should not be binary"
+    else
+        pass "Text file correctly treated as text"
+    fi
+
+    if is_binary_file "$bin_file"; then
+        pass "Binary file correctly detected"
+    else
+        fail "Binary file should be detected"
+    fi
+
+    cleanup_test_env
+}
+
+test_is_binary_allowed_patterns() {
+    echo -e "${BLUE}Test:${RESET} is_binary_allowed honors patterns"
+
+    AGENT_SWEEP_ALLOW_BINARY_PATTERNS=""
+    if is_binary_allowed "assets/logo.png"; then
+        pass "Default allow patterns permit .png"
+    else
+        fail "Default allow patterns should permit .png"
+    fi
+
+    if is_binary_allowed "bin/app"; then
+        fail "Binary without pattern should be blocked"
+    else
+        pass "Binary without pattern blocked"
+    fi
+
+    AGENT_SWEEP_ALLOW_BINARY_PATTERNS="*.bin"
+    if is_binary_allowed "bin/tool.bin"; then
+        pass "Env allow patterns permit .bin"
+    else
+        fail "Env allow patterns should permit .bin"
+    fi
+    AGENT_SWEEP_ALLOW_BINARY_PATTERNS=""
+}
+
+#==============================================================================
 # Run Tests
 #==============================================================================
 
@@ -688,6 +800,14 @@ echo ""
 test_write_result_appends_multiple
 echo ""
 test_write_result_default_duration
+echo ""
+
+# file size / binary detection tests
+test_is_file_too_large_limits
+echo ""
+test_is_binary_file_detection
+echo ""
+test_is_binary_allowed_patterns
 echo ""
 
 echo "============================================"

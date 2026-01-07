@@ -584,7 +584,7 @@ run_all_tests() {
     run_test test_detect_wait_reason_priority
 
     print_results
-    return $TF_TESTS_FAILED
+    return "$(get_exit_code)"
 }
 
 run_all_tests

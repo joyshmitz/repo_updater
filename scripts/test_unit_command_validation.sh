@@ -555,7 +555,7 @@ run_all_tests() {
     run_test test_is_command_blocked_ls
 
     print_results
-    return $TF_TESTS_FAILED
+    return "$(get_exit_code)"
 }
 
 run_all_tests

@@ -424,7 +424,7 @@ run_all_tests() {
     run_test test_get_tool_uses_ask_user
 
     print_results
-    return $TF_TESTS_FAILED
+    return "$(get_exit_code)"
 }
 
 run_all_tests

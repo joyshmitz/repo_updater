@@ -464,9 +464,15 @@ is_file_too_large() {
     local file="${1:-}"
     local max_mb="${2:-${AGENT_SWEEP_MAX_FILE_MB:-0}}"
     [[ -z "$file" || ! -f "$file" ]] && return 1
-    agent_sweep_is_positive_int "$max_mb" || return 1
 
-    local max_bytes=$((max_mb * 1024 * 1024))
+    local max_bytes=""
+    if agent_sweep_is_positive_int "$max_mb"; then
+        max_bytes=$((max_mb * 1024 * 1024))
+    elif agent_sweep_is_positive_int "${AGENT_SWEEP_MAX_FILE_SIZE:-0}"; then
+        max_bytes="$AGENT_SWEEP_MAX_FILE_SIZE"
+    else
+        return 1
+    fi
     local size_bytes
     size_bytes=$(stat -c%s "$file" 2>/dev/null || stat -f%z "$file" 2>/dev/null || echo 0)
     [[ "$size_bytes" -gt "$max_bytes" ]]

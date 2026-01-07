@@ -1166,4 +1166,4 @@ echo "============================================"
 echo "Results: $TESTS_PASSED passed, $TESTS_FAILED failed"
 echo "============================================"
 
-exit $TESTS_FAILED
+[[ $TESTS_FAILED -eq 0 ]]

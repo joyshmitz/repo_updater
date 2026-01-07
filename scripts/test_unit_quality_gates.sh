@@ -729,11 +729,11 @@ test_run_secret_scan_reports_tool_used() {
     local tool
     tool=$(echo "$result" | jq -r '.tool')
 
-    # Should be either "gitleaks" or "regex"
-    if [[ "$tool" == "gitleaks" ]] || [[ "$tool" == "regex" ]]; then
-        pass "Tool should be gitleaks or regex"
+    # Should be one of the supported tools: gitleaks, detect-secrets, or heuristic
+    if [[ "$tool" == "gitleaks" ]] || [[ "$tool" == "detect-secrets" ]] || [[ "$tool" == "heuristic" ]]; then
+        pass "Tool should be gitleaks, detect-secrets, or heuristic"
     else
-        fail "Tool should be gitleaks or regex (got: $tool)"
+        fail "Tool should be gitleaks, detect-secrets, or heuristic (got: $tool)"
     fi
 
     cleanup_temp_dirs

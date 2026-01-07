@@ -700,6 +700,126 @@ filter_sweep_completed_repos() {
     arr_ref=("${filtered[@]}")
 }
 
+#------------------------------------------------------------------------------
+# AGENT-SWEEP STATE PERSISTENCE
+#
+# Save/load/cleanup state for --resume and --restart functionality.
+# State file: ${AGENT_SWEEP_STATE_DIR}/state.json
+#------------------------------------------------------------------------------
+
+# Additional state tracking (global)
+declare -g SWEEP_WITH_RELEASE="false"
+declare -g SWEEP_CURRENT_REPO=""
+declare -g SWEEP_CURRENT_PHASE=0
+
+# Save agent-sweep state for resume capability.
+# Args: $1 = status (in_progress|completed|interrupted)
+# Uses atomic write (temp + mv) for safety.
+save_agent_sweep_state() {
+    local status="${1:-in_progress}"
+    local state_file="${AGENT_SWEEP_STATE_DIR}/state.json"
+    local tmp_file="${state_file}.tmp.$$"
+    local completed_json
+
+    # Build JSON arrays for repos
+    if command -v jq &>/dev/null; then
+        completed_json=$(printf '%s\n' "${COMPLETED_REPOS[@]}" 2>/dev/null | jq -R . | jq -s . 2>/dev/null || echo '[]')
+    elif command -v python3 &>/dev/null; then
+        completed_json=$(python3 -c "
+import json, sys
+repos = [line.strip() for line in sys.stdin if line.strip()]
+print(json.dumps(repos))
+" <<<"$(printf '%s\n' "${COMPLETED_REPOS[@]}" 2>/dev/null)" 2>/dev/null || echo '[]')
+    else
+        # Fallback: manual JSON array construction
+        local first=true item
+        completed_json="["
+        for item in "${COMPLETED_REPOS[@]}"; do
+            $first || completed_json+=","
+            completed_json+="\"$(json_escape "$item")\""
+            first=false
+        done
+        completed_json+="]"
+    fi
+
+    # Write state atomically
+    cat > "$tmp_file" <<EOF
+{
+  "run_id": "$RUN_ID",
+  "status": "$status",
+  "started_at": "$(date -Iseconds 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "with_release": $SWEEP_WITH_RELEASE,
+  "repos_completed": $completed_json,
+  "current_repo": "$SWEEP_CURRENT_REPO",
+  "current_phase": $SWEEP_CURRENT_PHASE,
+  "success_count": $SWEEP_SUCCESS_COUNT,
+  "fail_count": $SWEEP_FAIL_COUNT,
+  "skip_count": $SWEEP_SKIP_COUNT
+}
+EOF
+
+    mv "$tmp_file" "$state_file"
+    log_verbose "Saved agent-sweep state: $status"
+}
+
+# Load agent-sweep state from previous run.
+# Returns 0 if state loaded successfully, 1 if no state or invalid.
+# Populates: RUN_ID, COMPLETED_REPOS[], SWEEP_* globals
+load_agent_sweep_state() {
+    local state_file="${AGENT_SWEEP_STATE_DIR}/state.json"
+    [[ ! -f "$state_file" ]] && return 1
+
+    local state_json
+    state_json=$(cat "$state_file" 2>/dev/null) || return 1
+    [[ -z "$state_json" ]] && return 1
+
+    # Extract fields
+    local saved_run_id saved_status
+    saved_run_id=$(json_get_field "$state_json" "run_id")
+    saved_status=$(json_get_field "$state_json" "status")
+
+    # Only resume in_progress or interrupted states
+    if [[ "$saved_status" != "in_progress" && "$saved_status" != "interrupted" ]]; then
+        log_verbose "Previous run was '$saved_status', not resumable"
+        return 1
+    fi
+
+    # Restore state
+    RUN_ID="$saved_run_id"
+    SWEEP_WITH_RELEASE=$(json_get_field "$state_json" "with_release")
+    SWEEP_CURRENT_REPO=$(json_get_field "$state_json" "current_repo")
+    SWEEP_CURRENT_PHASE=$(json_get_field "$state_json" "current_phase")
+    SWEEP_SUCCESS_COUNT=$(json_get_field "$state_json" "success_count")
+    SWEEP_FAIL_COUNT=$(json_get_field "$state_json" "fail_count")
+    SWEEP_SKIP_COUNT=$(json_get_field "$state_json" "skip_count")
+
+    # Load completed repos array
+    COMPLETED_REPOS=()
+    local completed_json
+    completed_json=$(json_get_field "$state_json" "repos_completed")
+    if [[ -n "$completed_json" ]]; then
+        if command -v jq &>/dev/null; then
+            while IFS= read -r repo; do
+                [[ -n "$repo" ]] && COMPLETED_REPOS+=("$repo")
+            done < <(echo "$completed_json" | jq -r '.[]' 2>/dev/null)
+        elif command -v python3 &>/dev/null; then
+            while IFS= read -r repo; do
+                [[ -n "$repo" ]] && COMPLETED_REPOS+=("$repo")
+            done < <(python3 -c "import json,sys; [print(r) for r in json.loads(sys.stdin.read())]" <<<"$completed_json" 2>/dev/null)
+        fi
+    fi
+
+    log_info "Resuming run $RUN_ID: ${#COMPLETED_REPOS[@]} repos already completed"
+    return 0
+}
+
+# Remove agent-sweep state file (for --restart or clean completion).
+cleanup_agent_sweep_state() {
+    local state_file="${AGENT_SWEEP_STATE_DIR}/state.json"
+    rm -f "$state_file"
+    log_verbose "Cleaned up agent-sweep state"
+}
+
 # mktemp compatibility: BSD (macOS) mktemp requires a template or -t.
 mktemp_file() {
     local tmp
@@ -6733,6 +6853,80 @@ cleanup_agent_sweep_sessions() {
             ntm_kill_session "$session"
         fi
     done
+}
+
+# Set up trap handlers for graceful agent-sweep shutdown.
+# Call early in cmd_agent_sweep() after initial setup.
+setup_agent_sweep_traps() {
+    trap 'agent_sweep_handle_interrupt' INT TERM
+    trap 'agent_sweep_handle_exit' EXIT
+}
+
+# Handle interrupt (Ctrl+C or TERM signal) during agent-sweep.
+# Saves state for resume and cleans up sessions.
+agent_sweep_handle_interrupt() {
+    echo "" >&2  # Newline after ^C
+    log_warn "Agent-sweep interrupted! Saving state for resume..."
+    save_agent_sweep_state "interrupted"
+    cleanup_agent_sweep_sessions
+    exit 5  # Exit code 5 = signal/interrupt
+}
+
+# Handle normal exit from agent-sweep.
+# Cleans up sessions unless --keep-sessions or --keep-sessions-on-fail.
+agent_sweep_handle_exit() {
+    local exit_code=$?
+
+    # On failure, optionally keep sessions for debugging
+    if [[ $exit_code -ne 0 ]] && [[ "${AGENT_SWEEP_KEEP_SESSIONS_ON_FAIL:-false}" == "true" ]]; then
+        log_info "Keeping sessions for debugging (--keep-sessions-on-fail)"
+        return
+    fi
+
+    # On success, mark state as completed
+    if [[ $exit_code -eq 0 ]]; then
+        save_agent_sweep_state "completed"
+        cleanup_agent_sweep_state  # Clean up state file on success
+    fi
+
+    cleanup_agent_sweep_sessions
+}
+
+# Map ntm error codes to ru exit codes.
+# Args: $1 = ntm error code string
+# Returns: ru exit code (0-5) on stdout
+#
+# ru exit codes:
+#   0 = success
+#   1 = partial failure (some repos failed)
+#   2 = complete failure (all operations failed)
+#   3 = system/environment error
+#   4 = bad arguments/usage
+#   5 = signal/interrupt
+map_ntm_error_to_exit_code() {
+    local ntm_error="${1:-}"
+
+    case "$ntm_error" in
+        # Retry-able conditions -> partial failure
+        TIMEOUT)             echo 1 ;;
+        RESOURCE_BUSY)       echo 1 ;;
+        RATE_LIMITED)        echo 1 ;;
+
+        # System/environment errors
+        SESSION_NOT_FOUND)   echo 3 ;;
+        PANE_NOT_FOUND)      echo 3 ;;
+        INTERNAL_ERROR)      echo 3 ;;
+        PERMISSION_DENIED)   echo 3 ;;
+        DEPENDENCY_MISSING)  echo 3 ;;
+
+        # Bad arguments/usage
+        INVALID_FLAG)        echo 4 ;;
+        INVALID_ARGS)        echo 4 ;;
+        NOT_IMPLEMENTED)     echo 4 ;;
+
+        # Default: partial failure (conservative)
+        *)                   echo 1 ;;
+    esac
 }
 
 # Get real-time activity state for an ntm session.
@@ -14058,6 +14252,94 @@ preflight_skip_reason_action() {
         too_many_untracked_files)   echo "Review .gitignore or clean untracked files: git clean -n" ;;
         *)                          echo "Investigate and fix the issue" ;;
     esac
+}
+
+# Run preflight checks on all repos upfront before spawning agents.
+# Shows all problems at once for better UX (fail fast).
+#
+# Args: $1 = name of array variable containing repo specs (modified in place)
+#
+# Returns:
+#   0 - At least one repo passed preflight
+#   1 - All repos failed preflight (or empty input)
+#
+# Side effects:
+#   - Modifies the input array to contain only repos that passed
+#   - Writes preflight results to ${AGENT_SWEEP_STATE_DIR}/preflight_results.ndjson
+#   - Sets PREFLIGHT_PASSED_COUNT and PREFLIGHT_FAILED_COUNT
+#
+# Usage:
+#   local repos=(repo1 repo2 repo3)
+#   run_parallel_preflight repos
+#   # repos now contains only repos that passed preflight
+run_parallel_preflight() {
+    local -n repos_ref=$1
+    local -a passed_repos=()
+    local -a failed_repos=()
+    local preflight_results_file="${AGENT_SWEEP_STATE_DIR}/preflight_results.ndjson"
+
+    local total_count=${#repos_ref[@]}
+    [[ $total_count -eq 0 ]] && return 1
+
+    log_info "Running preflight checks on $total_count repositories..."
+
+    # Initialize results file with header
+    printf '{"type":"header","timestamp":"%s","total_repos":%d}\n' \
+        "$(date -Iseconds)" "$total_count" > "$preflight_results_file"
+
+    # Run preflight for each repo
+    local repo_spec repo_path repo_name
+    for repo_spec in "${repos_ref[@]}"; do
+        repo_path=$(repo_spec_to_path "$repo_spec")
+        repo_name=$(get_repo_name "$repo_spec")
+
+        if repo_preflight_check "$repo_path"; then
+            passed_repos+=("$repo_spec")
+            printf '{"repo":"%s","path":"%s","status":"passed"}\n' \
+                "$repo_name" "$repo_path" >> "$preflight_results_file"
+            log_verbose "Preflight passed: $repo_name"
+        else
+            failed_repos+=("$repo_spec")
+            local reason="${PREFLIGHT_SKIP_REASON:-unknown}"
+            local message
+            message=$(preflight_skip_reason_message "$reason")
+            printf '{"repo":"%s","path":"%s","status":"failed","reason":"%s","message":"%s"}\n' \
+                "$repo_name" "$repo_path" "$reason" "$message" >> "$preflight_results_file"
+            log_warn "Preflight failed: $repo_name - $message"
+        fi
+    done
+
+    # Write summary to results file
+    printf '{"type":"summary","passed":%d,"failed":%d}\n' \
+        "${#passed_repos[@]}" "${#failed_repos[@]}" >> "$preflight_results_file"
+
+    # Export counts for summary display
+    PREFLIGHT_PASSED_COUNT=${#passed_repos[@]}
+    PREFLIGHT_FAILED_COUNT=${#failed_repos[@]}
+
+    # Log summary
+    if [[ ${#failed_repos[@]} -gt 0 ]]; then
+        log_info "Preflight complete: ${#passed_repos[@]} passed, ${#failed_repos[@]} skipped"
+        if [[ "$VERBOSE" == "true" ]]; then
+            log_info "Skipped repos:"
+            for repo_spec in "${failed_repos[@]}"; do
+                local name action
+                name=$(get_repo_name "$repo_spec")
+                # Re-run preflight to get the reason (cached in PREFLIGHT_SKIP_REASON)
+                repo_preflight_check "$(repo_spec_to_path "$repo_spec")" 2>/dev/null || true
+                action=$(preflight_skip_reason_action "${PREFLIGHT_SKIP_REASON:-unknown}")
+                log_info "  - $name: $action"
+            done
+        fi
+    else
+        log_info "Preflight complete: all ${#passed_repos[@]} repositories passed"
+    fi
+
+    # Return passed repos via the reference
+    repos_ref=("${passed_repos[@]}")
+
+    # Return failure if all repos failed
+    [[ ${#passed_repos[@]} -gt 0 ]]
 }
 
 #==============================================================================

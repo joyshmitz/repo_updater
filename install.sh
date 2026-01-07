@@ -578,7 +578,7 @@ install_from_release() {
     if download_file "$checksum_url" "$temp_dir/checksums.txt"; then
         # Extract expected checksum for ru
         local expected_checksum
-        expected_checksum=$(grep -E "^[a-f0-9]{64}[[:space:]]+\*?$SCRIPT_NAME$" "$temp_dir/checksums.txt" | cut -d' ' -f1)
+        expected_checksum=$(grep -E "^[a-f0-9]{64}[[:space:]]+\\*?$SCRIPT_NAME$" "$temp_dir/checksums.txt" | cut -d' ' -f1)
 
         if [[ -n "$expected_checksum" ]]; then
             log_step "Verifying checksum..."

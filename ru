@@ -16876,8 +16876,9 @@ run_parallel_agent_sweep() {
     local total=${#repos_ref[@]}
 
     # For small batches, just use sequential mode
+    # Pass $1 (original array name) to avoid circular nameref
     if [[ $total -le 1 ]] || [[ "$max_parallel" -le 1 ]]; then
-        run_sequential_agent_sweep repos_ref
+        run_sequential_agent_sweep "$1"
         return $?
     fi
 

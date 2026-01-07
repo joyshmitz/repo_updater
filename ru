@@ -585,10 +585,14 @@ should_skip_phase() {
 # Get combined denylist (global + per-repo local additions).
 # Outputs: newline-separated list of patterns
 get_combined_denylist() {
-    # Output global denylist
-    printf '%s\n' "${AGENT_SWEEP_DENYLIST[@]:-}"
-    # Append local additions
-    printf '%s\n' "${AGENT_SWEEP_DENYLIST_EXTRA_LOCAL[@]:-}"
+    # Output global denylist patterns (if any)
+    if [[ ${#AGENT_SWEEP_DENYLIST_PATTERNS[@]} -gt 0 ]]; then
+        printf '%s\n' "${AGENT_SWEEP_DENYLIST_PATTERNS[@]}"
+    fi
+    # Append local additions (if any)
+    if [[ ${#AGENT_SWEEP_DENYLIST_EXTRA_LOCAL[@]} -gt 0 ]]; then
+        printf '%s\n' "${AGENT_SWEEP_DENYLIST_EXTRA_LOCAL[@]}"
+    fi
 }
 
 #------------------------------------------------------------------------------
@@ -742,19 +746,27 @@ print(json.dumps(repos))
         completed_json+="]"
     fi
 
+    # Ensure valid JSON booleans/numbers (prevent empty values)
+    local with_release_json="${SWEEP_WITH_RELEASE:-false}"
+    [[ "$with_release_json" != "true" ]] && with_release_json="false"
+    local current_phase="${SWEEP_CURRENT_PHASE:-0}"
+    local success_count="${SWEEP_SUCCESS_COUNT:-0}"
+    local fail_count="${SWEEP_FAIL_COUNT:-0}"
+    local skip_count="${SWEEP_SKIP_COUNT:-0}"
+
     # Write state atomically
     cat > "$tmp_file" <<EOF
 {
   "run_id": "$RUN_ID",
   "status": "$status",
   "started_at": "$(date -Iseconds 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "with_release": $SWEEP_WITH_RELEASE,
+  "with_release": $with_release_json,
   "repos_completed": $completed_json,
   "current_repo": "$SWEEP_CURRENT_REPO",
-  "current_phase": $SWEEP_CURRENT_PHASE,
-  "success_count": $SWEEP_SUCCESS_COUNT,
-  "fail_count": $SWEEP_FAIL_COUNT,
-  "skip_count": $SWEEP_SKIP_COUNT
+  "current_phase": $current_phase,
+  "success_count": $success_count,
+  "fail_count": $fail_count,
+  "skip_count": $skip_count
 }
 EOF
 
@@ -784,14 +796,20 @@ load_agent_sweep_state() {
         return 1
     fi
 
-    # Restore state
+    # Restore state with defaults for empty/missing values
     RUN_ID="$saved_run_id"
-    SWEEP_WITH_RELEASE=$(json_get_field "$state_json" "with_release")
+    local val
+    val=$(json_get_field "$state_json" "with_release")
+    SWEEP_WITH_RELEASE="${val:-false}"
     SWEEP_CURRENT_REPO=$(json_get_field "$state_json" "current_repo")
-    SWEEP_CURRENT_PHASE=$(json_get_field "$state_json" "current_phase")
-    SWEEP_SUCCESS_COUNT=$(json_get_field "$state_json" "success_count")
-    SWEEP_FAIL_COUNT=$(json_get_field "$state_json" "fail_count")
-    SWEEP_SKIP_COUNT=$(json_get_field "$state_json" "skip_count")
+    val=$(json_get_field "$state_json" "current_phase")
+    SWEEP_CURRENT_PHASE="${val:-0}"
+    val=$(json_get_field "$state_json" "success_count")
+    SWEEP_SUCCESS_COUNT="${val:-0}"
+    val=$(json_get_field "$state_json" "fail_count")
+    SWEEP_FAIL_COUNT="${val:-0}"
+    val=$(json_get_field "$state_json" "skip_count")
+    SWEEP_SKIP_COUNT="${val:-0}"
 
     # Load completed repos array
     COMPLETED_REPOS=()
@@ -14296,7 +14314,7 @@ run_parallel_preflight() {
         if repo_preflight_check "$repo_path"; then
             passed_repos+=("$repo_spec")
             printf '{"repo":"%s","path":"%s","status":"passed"}\n' \
-                "$repo_name" "$repo_path" >> "$preflight_results_file"
+                "$(json_escape "$repo_name")" "$(json_escape "$repo_path")" >> "$preflight_results_file"
             log_verbose "Preflight passed: $repo_name"
         else
             failed_repos+=("$repo_spec")
@@ -14304,7 +14322,8 @@ run_parallel_preflight() {
             local message
             message=$(preflight_skip_reason_message "$reason")
             printf '{"repo":"%s","path":"%s","status":"failed","reason":"%s","message":"%s"}\n' \
-                "$repo_name" "$repo_path" "$reason" "$message" >> "$preflight_results_file"
+                "$(json_escape "$repo_name")" "$(json_escape "$repo_path")" \
+                "$(json_escape "$reason")" "$(json_escape "$message")" >> "$preflight_results_file"
             log_warn "Preflight failed: $repo_name - $message"
         fi
     done

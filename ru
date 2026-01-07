@@ -2806,6 +2806,8 @@ write_result() {
                 dir_lock_release "$RESULTS_LOCK_DIR"
             else
                 # Best-effort fallback: write without lock if the lock can't be acquired.
+                # Log warning to stderr (visible to user) so they know there may be data issues.
+                log_warn "Could not acquire results lock after 30s, writing without lock (may cause data issues)"
                 printf '%s' "$line" >> "$RESULTS_FILE"
             fi
         else
@@ -5078,6 +5080,8 @@ run_parallel_sync() {
                     printf '%s\n' "$result" >> "$results_file"
                     dir_lock_release "$results_lock_dir"
                 else
+                    # Best-effort fallback: warn and write without lock
+                    printf '\n⚠ Warning: Could not acquire results lock, writing without lock\n' >&2
                     printf '%s\n' "$result" >> "$results_file"
                 fi
 

@@ -692,7 +692,8 @@ add_to_path() {
     fi
 
     # Check if already configured
-    if grep -q "export PATH=.*$dir" "$shell_config" 2>/dev/null; then
+    # Use grep -F (fixed string) to avoid regex issues with dots in paths like .local
+    if grep -qF "export PATH=\"$dir:" "$shell_config" 2>/dev/null; then
         log_info "$dir already in $shell_config"
         return 0
     fi

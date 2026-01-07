@@ -481,6 +481,7 @@ load_repo_agent_config() {
         esac
     }
 
+    # shellcheck disable=SC2034  # AGENT_SWEEP_* vars are used by other functions
     if $is_yaml && command -v yq &>/dev/null; then
         # yq for YAML (preferred)
         local raw_enabled
@@ -5553,6 +5554,7 @@ filter_files_denylist() {
 get_denylist_patterns() {
     printf '%s\n' "${AGENT_SWEEP_DENYLIST_PATTERNS[@]}"
     if [[ -n "${AGENT_SWEEP_DENYLIST_EXTRA:-}" ]]; then
+        # shellcheck disable=SC2086  # Intentional word splitting for space-separated patterns
         printf '%s\n' $AGENT_SWEEP_DENYLIST_EXTRA
     fi
 }
@@ -13682,12 +13684,15 @@ run_secret_scan() {
         findings_json=$(printf '%s\n' "${findings[@]}" | jq -R . | jq -s .)
     fi
 
-    # Determine which tool was actually used (matches if/elif/else order above)
+    # Determine which tool was actually used based on scanner_ran flag
     local tool_used="heuristic"
-    if command -v gitleaks &>/dev/null; then
-        tool_used="gitleaks"
-    elif command -v detect-secrets &>/dev/null; then
-        tool_used="detect-secrets"
+    if [[ "$scanner_ran" == "true" ]]; then
+        # If scanner_ran is true, an external tool succeeded
+        if command -v gitleaks &>/dev/null; then
+            tool_used="gitleaks"
+        else
+            tool_used="detect-secrets"
+        fi
     fi
 
     jq -n \
@@ -14375,7 +14380,8 @@ run_parallel_preflight() {
     printf '{"type":"summary","passed":%d,"failed":%d}\n' \
         "${#passed_repos[@]}" "${#failed_repos[@]}" >> "$preflight_results_file"
 
-    # Export counts for summary display
+    # Export counts for summary display (read by callers)
+    # shellcheck disable=SC2034  # These are exported for callers to read
     PREFLIGHT_PASSED_COUNT=${#passed_repos[@]}
     PREFLIGHT_FAILED_COUNT=${#failed_repos[@]}
 

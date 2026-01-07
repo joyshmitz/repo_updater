@@ -519,21 +519,21 @@ mark_repo_completed() {
     esac
 }
 
-# Check if a repo was already completed (for resume)
-# Usage: is_repo_completed repo_spec
-is_repo_completed() {
+# Check if a repo was already completed in agent-sweep (for resume)
+# Usage: is_sweep_repo_completed repo_spec
+is_sweep_repo_completed() {
     local repo_spec="${1:-}"
     array_contains COMPLETED_REPOS "$repo_spec"
 }
 
-# Filter out completed repos from an array (for resume)
-# Usage: filter_completed_repos array_name
-filter_completed_repos() {
+# Filter out completed repos from an array (for agent-sweep resume)
+# Usage: filter_sweep_completed_repos array_name
+filter_sweep_completed_repos() {
     local -n arr_ref=$1
     local filtered=()
     local repo
     for repo in "${arr_ref[@]}"; do
-        is_repo_completed "$repo" || filtered+=("$repo")
+        is_sweep_repo_completed "$repo" || filtered+=("$repo")
     done
     arr_ref=("${filtered[@]}")
 }
@@ -676,7 +676,7 @@ json_is_success() {
 
 # Escape a string for safe embedding in JSON.
 # Usage: escaped=$(json_escape "$raw_string")
-# Handles: backslash, double-quote, newline, tab, carriage return
+# Handles: backslash, double-quote, newline, tab, carriage return, backspace, form feed
 json_escape() {
     local str="${1:-}"
     # Order matters: escape backslashes first, then other chars
@@ -685,6 +685,8 @@ json_escape() {
     str="${str//$'\n'/\\n}"    # newline -> \n
     str="${str//$'\t'/\\t}"    # tab -> \t
     str="${str//$'\r'/\\r}"    # carriage return -> \r
+    str="${str//$'\b'/\\b}"    # backspace -> \b
+    str="${str//$'\f'/\\f}"    # form feed -> \f
     printf '%s' "$str"
 }
 
@@ -771,20 +773,6 @@ retry_with_backoff() {
     # Unreachable, but keep explicit.
     printf '%s' "$output"
     return "$exit_code"
-}
-
-# Escape a string for JSON (handles quotes, backslashes, control characters)
-json_escape() {
-    local str="$1"
-    # Escape backslashes first, then quotes, then control characters
-    str="${str//\\/\\\\}"
-    str="${str//\"/\\\"}"
-    str="${str//$'\n'/\\n}"
-    str="${str//$'\r'/\\r}"
-    str="${str//$'\t'/\\t}"
-    str="${str//$'\b'/\\b}"
-    str="${str//$'\f'/\\f}"
-    printf '%s\n' "$str"
 }
 
 # Write a result to the NDJSON results file
@@ -6583,39 +6571,6 @@ cleanup_agent_sweep_sessions() {
             ntm_kill_session "$session"
         fi
     done
-}
-
-# Wait for Claude Code agent to complete work and return to idle state.
-# Usage: ntm_wait_completion session_name [timeout_seconds]
-# Exit codes:
-#   0 - Agent is idle (condition met)
-#   1 - Timeout exceeded
-#   2 - Error (check error_code in JSON)
-#   3 - Agent error detected via pattern match
-# Output: JSON response on stdout with wait details
-ntm_wait_completion() {
-    local session="${1:-}"
-    local timeout="${2:-300}"
-    local output exit_code
-
-    [[ -z "$session" ]] && {
-        echo '{"success":false,"error":"session name required","error_code":"INVALID_ARGS"}'
-        return 2
-    }
-
-    # Wait for idle condition with error detection
-    output=$(ntm --robot-wait="$session" \
-        --condition=idle \
-        --wait-timeout="${timeout}s" \
-        --exit-on-error 2>&1)
-    exit_code=$?
-
-    if [[ -n "$output" ]]; then
-        echo "$output"
-    else
-        echo "{\"success\":false,\"error\":\"no output from wait\",\"exit_code\":$exit_code}"
-    fi
-    return $exit_code
 }
 
 # Get real-time activity state for an ntm session.
@@ -13206,7 +13161,12 @@ run_lint_gate() {
 }
 
 #------------------------------------------------------------------------------
-# run_secret_scan: Scan for secrets in project changes
+# run_secret_scan: Scan for secrets in project changes (bd-0ghe)
+#
+# Uses layered fallback approach:
+#   1. gitleaks (if installed) - comprehensive scanner
+#   2. detect-secrets (if installed) - alternative scanner
+#   3. heuristic regex patterns (fallback) - best effort
 #
 # Args:
 #   $1 - Project directory path
@@ -13235,19 +13195,49 @@ run_secret_scan() {
             gl_summary=$(echo "$gl_output" | head -3 | tr '\n' ' ')
             findings+=("gitleaks: ${gl_summary:-detected potential secrets}")
         fi
+    # Layer 2: Use detect-secrets if available
+    elif command -v detect-secrets &>/dev/null; then
+        log_verbose "Scanning for secrets with detect-secrets"
+        local ds_output ds_count
+        if ds_output=$(detect-secrets scan "$project_dir" 2>/dev/null); then
+            ds_count=$(echo "$ds_output" | jq '.results | length' 2>/dev/null || echo "0")
+            if [[ "$ds_count" -gt 0 ]]; then
+                exit_code=1
+                findings+=("detect-secrets: found $ds_count potential secrets")
+            fi
+        fi
     else
-        # Regex fallback
+        # Layer 3: Regex fallback with comprehensive patterns
         log_verbose "Scanning for secrets with regex patterns"
         local patterns=(
+            # Private keys
+            '-----BEGIN.*PRIVATE KEY-----'
+            '-----BEGIN RSA PRIVATE KEY-----'
+            '-----BEGIN EC PRIVATE KEY-----'
+            '-----BEGIN OPENSSH PRIVATE KEY-----'
+            # AWS (exact format)
+            'AKIA[0-9A-Z]{16}'
+            'ASIA[0-9A-Z]{16}'
+            'AWS_SECRET_ACCESS_KEY'
+            'AWS_ACCESS_KEY'
+            # GitHub tokens
+            'ghp_[a-zA-Z0-9]{36}'
+            'gho_[a-zA-Z0-9]{36}'
+            'ghs_[a-zA-Z0-9]{36}'
+            # Slack
+            'xox[baprs]-[0-9a-zA-Z-]{10,}'
+            # OpenAI/Anthropic
+            'sk-[a-zA-Z0-9]{48}'
+            'sk-ant-[a-zA-Z0-9-]{40,}'
+            # Google
+            'AIza[0-9A-Za-z_-]{35}'
+            # Stripe
+            'sk_live_[0-9a-zA-Z]{24}'
+            # Generic patterns
             'password[[:space:]]*[:=]'
             'api.?key[[:space:]]*[:=]'
             'secret[[:space:]]*[:=]'
             'token[[:space:]]*[:=]'
-            'AWS_ACCESS_KEY'
-            'AWS_SECRET_ACCESS_KEY'
-            'PRIVATE_KEY'
-            'BEGIN RSA PRIVATE KEY'
-            'BEGIN OPENSSH PRIVATE KEY'
         )
 
         local diff_output
@@ -13262,7 +13252,9 @@ run_secret_scan() {
         fi
 
         for pattern in "${patterns[@]}"; do
-            if echo "$diff_output" | grep -qiE "$pattern"; then
+            # Use -e to explicitly pass pattern (handles patterns starting with -)
+            # Use case-sensitive matching for token patterns
+            if echo "$diff_output" | grep -qE -e "$pattern"; then
                 exit_code=2  # Warning
                 findings+=("Potential secret pattern: $pattern")
             fi
@@ -13274,12 +13266,20 @@ run_secret_scan() {
         findings_json=$(printf '%s\n' "${findings[@]}" | jq -R . | jq -s .)
     fi
 
+    # Determine which tool was actually used (matches if/elif/else order above)
+    local tool_used="heuristic"
+    if command -v gitleaks &>/dev/null; then
+        tool_used="gitleaks"
+    elif command -v detect-secrets &>/dev/null; then
+        tool_used="detect-secrets"
+    fi
+
     jq -n \
         --argjson ran true \
         --argjson ok "$([ $exit_code -eq 0 ] && echo true || echo false)" \
         --argjson warning "$([ $exit_code -eq 2 ] && echo true || echo false)" \
         --argjson findings "$findings_json" \
-        --arg tool "$(command -v gitleaks &>/dev/null && echo gitleaks || echo regex)" \
+        --arg tool "$tool_used" \
         '{
             ran: $ran,
             ok: $ok,

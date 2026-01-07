@@ -2279,8 +2279,7 @@ print(json.dumps(repos))
         # Fallback: manual JSON array construction
         local first=true item
         completed_json="["
-        # Use ${arr[@]+"${arr[@]}"} pattern for Bash 4.0-4.3 empty array safety
-        for item in ${COMPLETED_REPOS[@]+"${COMPLETED_REPOS[@]}"}; do
+        for item in "${COMPLETED_REPOS[@]}"; do
             $first || completed_json+=","
             completed_json+="\"$(json_escape "$item")\""
             first=false

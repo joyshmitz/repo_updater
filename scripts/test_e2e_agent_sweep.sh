@@ -42,8 +42,8 @@ create_dirty_repo() {
     git -C "$repo_dir" push -u origin main >/dev/null 2>&1 || \
         git -C "$repo_dir" push -u origin master >/dev/null 2>&1
 
-    # Create dirty file
-    echo "dirty" > "$repo_dir/dirty.txt"
+    # Create dirty file (must match mock tmux plan output: modified.txt)
+    echo "dirty" > "$repo_dir/modified.txt"
 
     echo "$repo_dir"
 }

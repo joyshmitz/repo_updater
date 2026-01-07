@@ -11705,6 +11705,9 @@ parse_review_args() {
                     exit 4
                 fi
                 ;;
+            --json|--verbose|--quiet|-q|--non-interactive)
+                # Global options already processed by parse_args - ignore here
+                ;;
             -*)
                 log_error "Unknown review option: $arg"
                 exit 4

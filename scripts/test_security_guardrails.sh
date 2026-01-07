@@ -158,7 +158,7 @@ test_denylist_path_normalization() {
 
     # Test leading ./ removal
     assert_true "is_file_denied './.env'" "./.env should be denied (normalized)"
-    assert_true "is_file_denied './node_modules/pkg'" "./node_modules should be denied"
+    assert_true "is_file_denied './node_modules/pkg'" "./node_modules/pkg should be denied (leading ./ stripped)"
 
     # Test trailing / removal
     assert_true "is_file_denied 'node_modules/'" "node_modules/ should be denied"
@@ -428,8 +428,8 @@ test_secret_scan_clean_file_passes() {
     assert_equals "true" "$ok" "Clean file should return ok:true"
 }
 
-test_secret_scan_ignores_test_keys() {
-    log_test_start "Secret scan ignores test/example keys"
+test_secret_scan_test_key_format_not_matched() {
+    log_test_start "Secret scan: test key format doesn't match production patterns"
 
     require_jq_or_skip || return 0
 
@@ -445,8 +445,8 @@ test_secret_scan_ignores_test_keys() {
     git -C "$test_repo" add initial.txt
     git -C "$test_repo" commit -m "Initial" --quiet
 
-    # Add file with Stripe test key prefix (should be ignored)
-    # Using obviously fake test key format that won't trigger GitHub push protection
+    # Add file with Stripe test key prefix (sk_test_ format differs from sk_live_ pattern)
+    # Scanner patterns only match production key formats, not test key formats
     echo "STRIPE_KEY=sk_test_XXXXXXXXXXXXXXXXXXXX" > "$test_repo/config.sh"
     git -C "$test_repo" add config.sh
 
@@ -455,7 +455,7 @@ test_secret_scan_ignores_test_keys() {
 
     local ok
     ok=$(echo "$result" | jq -r '.ok' 2>/dev/null)
-    assert_equals "true" "$ok" "Test keys (sk_test) should be ignored"
+    assert_equals "true" "$ok" "Test key format (sk_test_) should not match production patterns"
 }
 
 #==============================================================================
@@ -685,7 +685,7 @@ main() {
     run_test test_secret_scan_detects_slack_tokens
     run_test test_secret_scan_detects_password_assignments
     run_test test_secret_scan_clean_file_passes
-    run_test test_secret_scan_ignores_test_keys
+    run_test test_secret_scan_test_key_format_not_matched
 
     # File Size Tests
     echo ""

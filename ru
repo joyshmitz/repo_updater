@@ -354,8 +354,8 @@ repo_spec_to_path() {
     local repo="${repo_spec%%@*}"
     # Extract repo name (last component)
     local repo_name="${repo##*/}"
-    # Use configured projects directory
-    local projects_dir="${RU_PROJECTS_DIR:-/data/projects}"
+    # Use resolved config first, then env override, then default
+    local projects_dir="${PROJECTS_DIR:-${RU_PROJECTS_DIR:-/data/projects}}"
 
     echo "${projects_dir}/${repo_name}"
 }

@@ -2291,60 +2291,150 @@ esac
 
 ### Component Overview
 
+ru is organized into logical layers, with each layer building on the ones below. The full implementation is approximately 17,700 lines of pure Bash, with no external dependencies beyond git, curl, and optionally `gh` CLI and `gum` for enhanced UX.
+
 ```
-ru (bash, ~800-1000 LOC)
-├── Core Utilities
-│   ├── is_interactive()      # TTY detection
-│   ├── can_prompt()          # Interactive + non-CI
-│   ├── ensure_dir()          # Create if missing
-│   └── write_result()        # NDJSON logging
+ru (bash, ~17,700 LOC)
 │
-├── Configuration
-│   ├── get_config_value()    # Read from file
-│   ├── set_config_value()    # Write to file
-│   └── resolve_config()      # CLI > env > file > default
+├── Core Foundation Layer
+│   ├── Utilities & Guards
+│   │   ├── is_interactive()      # TTY detection for prompts
+│   │   ├── can_prompt()          # Interactive + non-CI guard
+│   │   ├── ensure_dir()          # Create directory if missing
+│   │   └── json_escape()         # Safe JSON string escaping
+│   │
+│   ├── Logging (stderr=humans, stdout=data)
+│   │   ├── log_info/warn/error() # Human messages to stderr
+│   │   ├── log_step/success()    # Progress indicators
+│   │   └── write_result()        # NDJSON structured logging
+│   │
+│   ├── Configuration
+│   │   ├── get_config_value()    # Read from ini-style file
+│   │   ├── set_config_value()    # Write to file atomically
+│   │   └── resolve_config()      # CLI > env > file > default
+│   │
+│   └── Path Security
+│       ├── validate_path()       # Reject traversal attacks
+│       ├── safe_path_concat()    # Prevent /a + ../b escapes
+│       └── canonicalize_path()   # Resolve symlinks safely
 │
-├── Logging (stderr=human, stdout=data)
-│   ├── log_info/warn/error() # Human messages
-│   ├── log_step/success()    # Progress indicators
-│   └── output_json()         # Structured output
+├── Infrastructure Layer
+│   ├── Portable Locking
+│   │   ├── dir_lock_try_acquire() # Atomic mkdir-based locks
+│   │   ├── dir_lock_wait()        # Blocking lock with timeout
+│   │   └── dir_lock_release()     # rmdir-based release
+│   │
+│   ├── URL & Path Parsing
+│   │   ├── parse_repo_url()      # Extract host/owner/repo
+│   │   ├── normalize_url()       # Canonical URL form
+│   │   ├── parse_repo_spec()     # owner/repo@branch as name
+│   │   └── url_to_local_path()   # Layout-aware path resolution
+│   │
+│   ├── Dependency Detection
+│   │   ├── detect_os()           # macOS/Linux detection
+│   │   ├── check_gh_*()          # gh CLI status checks
+│   │   └── ensure_dependencies() # Full dependency flow
+│   │
+│   └── Gum Integration
+│       ├── check_gum()           # Feature availability
+│       ├── gum_confirm()         # Y/N with fallback
+│       └── print_banner()        # Styled box output
 │
-├── Gum Integration
-│   ├── check_gum()           # Availability check
-│   ├── gum_confirm()         # Y/N with fallback
-│   └── print_banner()        # Styled header
+├── Git Operations Layer (no cd, plumbing-based)
+│   ├── Status Detection
+│   │   ├── get_repo_status()     # Ahead/behind via rev-list
+│   │   ├── is_dirty()            # status --porcelain
+│   │   └── is_shallow()          # rev-parse --is-shallow
+│   │
+│   ├── Actions
+│   │   ├── do_clone()            # gh repo clone with retry
+│   │   ├── do_pull()             # Strategy-aware pull
+│   │   └── do_fetch()            # Fetch with timeout handling
+│   │
+│   └── Worktree Management
+│       ├── create_worktree()     # Isolated checkout for review
+│       ├── cleanup_worktree()    # Safe removal
+│       └── get_worktree_list()   # Active worktree tracking
 │
-├── Dependency Management
-│   ├── detect_os()           # macOS/Linux
-│   ├── check_gh_*()          # Installed + authenticated
-│   └── ensure_dependencies() # Full check flow
+├── Sync Orchestration Layer
+│   ├── Repo List Management
+│   │   ├── load_repo_list()      # Parse list files
+│   │   ├── detect_collisions()   # Path collision warnings
+│   │   └── enumerate_repos()     # Combine public + private
+│   │
+│   ├── Work-Stealing Queue
+│   │   ├── queue_init()          # Write repos to temp file
+│   │   ├── queue_dequeue()       # Atomic pop with lock
+│   │   └── worker_loop()         # Process until empty
+│   │
+│   ├── Sync State Management
+│   │   ├── sync_state_init()     # Create run directory
+│   │   ├── sync_state_save()     # Persist resume state
+│   │   └── sync_state_load()     # Resume interrupted sync
+│   │
+│   └── Result Aggregation
+│       ├── tally_results()       # Count by status
+│       ├── format_summary()      # Human-readable report
+│       └── format_json()         # Machine-readable output
 │
-├── URL & Path Parsing
-│   ├── parse_repo_url()      # Extract components
-│   ├── normalize_url()       # Canonical form
-│   └── url_to_local_path()   # Layout-aware path
+├── Review & Agent Coordination Layer
+│   ├── Discovery & Prioritization
+│   │   ├── discover_items()      # Find issues/PRs to review
+│   │   ├── score_priority()      # Multi-factor ranking
+│   │   └── filter_by_policy()    # Apply review policies
+│   │
+│   ├── Session Management
+│   │   ├── create_review_session() # Initialize session
+│   │   ├── monitor_session()     # Health tracking
+│   │   └── cleanup_session()     # Resource cleanup
+│   │
+│   ├── Quality Gates
+│   │   ├── validate_commit_plan() # Security & size checks
+│   │   ├── check_file_allowlist() # Denylist enforcement
+│   │   └── verify_tests_passed()  # Test requirement gate
+│   │
+│   └── GitHub Actions Execution
+│       ├── execute_gh_action()   # Comment, close, merge, etc.
+│       ├── verify_action_safe()  # Security validation
+│       └── batch_actions()       # Rate-limit aware batching
 │
-├── Git Operations (no cd, plumbing-based)
-│   ├── get_repo_status()     # Ahead/behind/dirty
-│   ├── do_clone()            # gh repo clone
-│   └── do_pull()             # Strategy-aware pull
+├── Agent Sweep Layer
+│   ├── Preflight & Safety
+│   │   ├── preflight_checks()    # Environment validation
+│   │   ├── check_repo_config()   # Per-repo review settings
+│   │   └── abort_conditions()    # Safety circuit breakers
+│   │
+│   ├── Orchestration
+│   │   ├── agent_sweep_loop()    # Main iteration logic
+│   │   ├── spawn_review()        # ntm/Claude Code session
+│   │   └── wait_for_completion() # Timeout handling
+│   │
+│   └── State & Recovery
+│       ├── sweep_state_save()    # Progress checkpointing
+│       ├── sweep_state_load()    # Resume after interrupt
+│       └── cleanup_stale()       # Remove orphaned worktrees
 │
-├── Repo List Management
-│   ├── load_repo_list()      # Parse list file
-│   ├── parse_repo_spec()     # repo@branch syntax
-│   └── detect_collisions()   # Path collision warning
-│
-├── Subcommand Implementations
-│   ├── cmd_sync()            # Main sync logic
-│   ├── cmd_status()          # Read-only check
-│   ├── cmd_init()            # Create config
-│   ├── cmd_add()             # Add to list
-│   └── cmd_doctor()          # Diagnostics
-│
-└── Main & CLI Dispatch
-    ├── show_help()           # Usage message
-    ├── dispatch_command()    # Route to handler
-    └── on_exit()             # Cleanup trap
+└── Command Layer
+    ├── Core Commands
+    │   ├── cmd_sync()            # Clone and pull repos
+    │   ├── cmd_status()          # Read-only status check
+    │   ├── cmd_init()            # Create configuration
+    │   ├── cmd_add()             # Add repo to list
+    │   └── cmd_remove()          # Remove from list
+    │
+    ├── Maintenance Commands
+    │   ├── cmd_prune()           # Detect orphan repos
+    │   ├── cmd_doctor()          # System diagnostics
+    │   └── cmd_self_update()     # Version checking
+    │
+    ├── Review Commands
+    │   ├── cmd_review()          # Single-repo review mode
+    │   └── cmd_agent_sweep()     # Multi-repo agent sweep
+    │
+    └── CLI Infrastructure
+        ├── show_help()           # Usage message
+        ├── dispatch_command()    # Route to handler
+        └── on_exit()             # Cleanup trap
 ```
 
 ### Data Flow
@@ -2830,42 +2920,107 @@ echo -e "main.py\n.env\nREADME.md" | filter_files_denylist
 
 ## 🧪 Testing
 
-ru includes an extensive test suite with 66 test files covering unit tests, integration tests, and end-to-end workflows.
+ru includes a comprehensive test suite with 70+ test files covering unit tests, integration tests, and end-to-end workflows. The testing infrastructure is designed around a key principle: **tests must work offline and deterministically**.
 
-### Test Structure
+### Why Offline Testing Matters
+
+Git operations are notoriously difficult to test reliably:
+- Network dependencies make tests flaky and slow
+- Real repositories can change unexpectedly
+- CI environments may have restricted network access
+- Authentication tokens expire or get revoked
+
+ru solves this with a **local git harness** that creates temporary repositories with precisely controlled states—ahead, behind, diverged, dirty, shallow, detached—all without touching the network.
+
+### Test Architecture
 
 ```
 scripts/
-├── test_framework.sh              # Core test utilities and assertions
+├── test_framework.sh              # Core assertion library and utilities
+├── test_git_harness.sh            # Offline git repository factory
 ├── test_e2e_framework.sh          # E2E test isolation and helpers
 │
-├── Unit Tests (test_unit_*)
-│   ├── test_unit_config.sh        # Configuration loading
+├── Unit Tests (test_unit_*.sh) — 36 files
+│   ├── test_unit_config.sh        # Configuration loading and resolution
 │   ├── test_unit_core_utils.sh    # Core utility functions
-│   ├── test_unit_graphql.sh       # GraphQL query construction
-│   ├── test_unit_review.sh        # Review scoring (27 tests, 66 assertions)
-│   ├── test_unit_review_locking.sh # Review lock management
-│   ├── test_unit_state_locking.sh # State lock security
-│   ├── test_unit_worktree.sh      # Worktree operations
-│   ├── test_unit_driver_interface.sh # Session driver abstraction
-│   ├── test_unit_gum_wrappers.sh  # Terminal UI fallbacks
-│   └── ... (20+ more unit test files)
+│   ├── test_unit_parsing_functions.sh # URL/spec parsing (40 tests)
+│   ├── test_unit_git_harness.sh   # Git harness self-tests (24 tests)
+│   ├── test_unit_dependencies.sh  # Dependency checking logic
+│   ├── test_unit_quality_gates.sh # Commit plan validation
+│   ├── test_unit_command_validation.sh # Argument validation
+│   └── ... (29 more unit test files)
 │
 ├── Integration Tests
 │   ├── test_parsing.sh            # URL parsing (76 tests, 156 assertions)
-│   ├── test_local_git.sh          # Local git operations
+│   ├── test_local_git.sh          # Local git operations with harness
 │   └── test_sync_state.sh         # Sync state management
 │
-└── End-to-End Tests (test_e2e_*)
-    ├── test_e2e_init.sh           # Init workflow
+└── End-to-End Tests (test_e2e_*.sh) — 20 files
     ├── test_e2e_sync_clone.sh     # Clone operations
     ├── test_e2e_sync_pull.sh      # Pull operations
-    ├── test_e2e_worktree.sh       # Worktree management (7 tests, 23 assertions)
-    ├── test_e2e_error_handling.sh # Error scenarios (12 tests, 30 assertions)
-    ├── test_e2e_config.sh         # Configuration handling
-    ├── test_e2e_review.sh         # Review workflow
-    └── ... (15+ more E2E test files)
+    ├── test_e2e_sync_edge_cases.sh # Edge case handling
+    ├── test_e2e_add_remove.sh     # Repo list management
+    ├── test_e2e_status.sh         # Status command
+    └── ... (15 more E2E test files)
 ```
+
+### Git Harness: Deterministic Repository States
+
+The git harness (`test_git_harness.sh`) creates temporary git repositories with specific states for testing. It uses bare repositories as "remotes" in `/tmp`, enabling complete offline testing of sync operations.
+
+```bash
+# Create a repo that's 2 commits ahead of remote
+git_harness_setup
+repo=$(git_harness_create_repo "myrepo" --ahead=2)
+# $repo now contains a working directory with 2 unpushed commits
+
+# Create a diverged state (local and remote have different commits)
+repo=$(git_harness_create_repo "diverged" --ahead=1 --behind=3)
+
+# Create various states
+repo=$(git_harness_create_repo "dirty" --dirty)           # Uncommitted changes
+repo=$(git_harness_create_repo "shallow" --shallow=5)     # Shallow clone
+repo=$(git_harness_create_repo "detached" --detached)     # Detached HEAD
+repo=$(git_harness_create_repo "nobranch" --no-remote)    # No tracking branch
+
+git_harness_cleanup  # Removes all temp directories
+```
+
+**Available state options:**
+
+| Option | Effect |
+|--------|--------|
+| `--ahead=N` | Create N local commits not on remote |
+| `--behind=N` | Create N remote commits not in local |
+| `--diverged` | Shortcut for `--ahead=1 --behind=1` |
+| `--dirty` | Add uncommitted changes to working tree |
+| `--shallow=N` | Create shallow clone with depth N |
+| `--detached` | Checkout detached HEAD state |
+| `--no-remote` | Create repo without remote tracking |
+| `--branch=NAME` | Use NAME instead of 'main' |
+
+**Manipulation helpers:**
+
+```bash
+git_harness_add_commit "$repo" "feat: new feature"     # Add local commit
+git_harness_add_commit_and_push "$repo" "fix: bug"     # Add and push
+git_harness_make_dirty "$repo"                          # Add uncommitted changes
+git_harness_make_staged "$repo"                         # Add staged changes
+git_harness_add_untracked "$repo" "newfile.txt"        # Add untracked file
+git_harness_simulate_rebase "$repo"                     # Create rebase state
+git_harness_simulate_merge "$repo"                      # Create merge conflict
+```
+
+**Query helpers:**
+
+```bash
+status=$(git_harness_get_status "$repo")   # Returns: current|ahead|behind|diverged
+git_harness_is_dirty "$repo" && echo "Has uncommitted changes"
+git_harness_is_shallow "$repo" && echo "Is shallow clone"
+git_harness_is_detached "$repo" && echo "HEAD is detached"
+```
+
+**Why this design?** The harness uses git plumbing commands exclusively (per AGENTS.md guidelines), ensuring reliable detection regardless of locale or git version. Each test runs against known states, making failures reproducible and debuggable.
 
 ### Running Tests
 
@@ -2934,39 +3089,131 @@ Some tests require external tooling and will skip gracefully:
 - Self-update version checking
 - Error handling and edge cases
 
-### Test Framework Features
+### Test Framework: Assertion Library
 
-The test framework (`test_framework.sh`) provides:
+The test framework (`test_framework.sh`) provides a comprehensive assertion library designed for Bash testing. It tracks pass/fail counts, supports structured logging, and handles cleanup automatically.
 
-- **Isolation** — Each test runs in a fresh temporary directory
-- **TAP output** — Machine-readable test results
-- **Assertions** — `assert_equals`, `assert_contains`, `assert_file_exists`, etc.
-- **Function extraction** — Sources individual functions from `ru` for unit testing
-- **Cleanup** — Automatic cleanup of temporary directories
+**Core assertions:**
+
+```bash
+# Value comparisons
+assert_equals "expected" "$actual" "Values should match"
+assert_not_equals "bad" "$actual" "Should differ"
+assert_contains "$haystack" "needle" "Should contain substring"
+assert_not_contains "$output" "error" "Should not have errors"
+
+# Boolean assertions (execute expressions)
+assert_true "[[ -f '$file' ]]" "File should exist"
+assert_false "[[ -d '$dir' ]]" "Directory should not exist"
+
+# Exit code testing
+assert_exit_code 0 some_command arg1 arg2 "Command should succeed"
+assert_exit_code 1 failing_command "Command should fail"
+
+# File system assertions
+assert_file_exists "/path/to/file" "Config file created"
+assert_dir_exists "/path/to/dir" "Directory created"
+assert_file_contains "/path/to/file" "pattern" "File has expected content"
+```
+
+**Test lifecycle:**
+
+```bash
+# Run a test with automatic timing and result tracking
+run_test test_my_feature
+
+# Skip tests conditionally
+skip_test "Requires network access"
+
+# Print final results with exit code
+print_results
+exit "$(get_exit_code)"
+```
+
+**Structured logging:**
+
+The framework supports both human-readable and machine-readable output:
+
+```bash
+# Control log level
+TF_LOG_LEVEL=debug ./scripts/test_unit_config.sh
+
+# Write human logs to file
+TF_LOG_FILE=/tmp/test.log ./scripts/test_unit_config.sh
+
+# Write NDJSON for CI integration
+TF_JSON_LOG_FILE=/tmp/test.jsonl ./scripts/test_unit_config.sh
+```
+
+**Function extraction for unit testing:**
+
+Unit tests can source individual functions from `ru` without executing the whole script:
+
+```bash
+source_function "parse_repo_url"
+source_function "normalize_url"
+
+# Now test the isolated functions
+local host owner repo
+parse_repo_url "https://github.com/owner/repo" host owner repo
+assert_equals "github.com" "$host" "Host extracted"
+```
 
 ### Writing Tests
 
 ```bash
-# Example unit test
+#!/usr/bin/env bash
+source "$(dirname "${BASH_SOURCE[0]}")/test_framework.sh"
+
 test_parse_url_https_basic() {
-    assert_parse_url "https://github.com/owner/repo" \
-        "github.com" "owner" "repo" \
-        "HTTPS basic URL"
+    log_test_start "parse_repo_url handles HTTPS URLs"
+
+    local host owner repo
+    parse_repo_url "https://github.com/owner/repo" host owner repo
+
+    assert_equals "github.com" "$host" "Host extracted"
+    assert_equals "owner" "$owner" "Owner extracted"
+    assert_equals "repo" "$repo" "Repo extracted"
+
+    log_test_pass "parse_repo_url handles HTTPS URLs"
 }
 
-# Example E2E test
-test_sync_clones_missing_repo() {
-    setup_initialized_env
-    "$RU_SCRIPT" add owner/repo >/dev/null 2>&1
+test_sync_with_dirty_repo() {
+    log_test_start "sync skips dirty repos"
 
+    # Create a dirty repo using the git harness
+    git_harness_setup
+    local repo=$(git_harness_create_repo "dirtytest" --dirty)
+
+    # Test sync behavior
     local output
-    output=$("$RU_SCRIPT" sync 2>&1)
+    output=$("$RU_SCRIPT" sync --dir="$(dirname "$repo")" 2>&1)
 
-    assert_contains "$output" "Cloning" "Should report cloning"
-    assert_dir_exists "$RU_PROJECTS_DIR/repo" "Repo directory created"
-    cleanup_test_env
+    assert_contains "$output" "dirty" "Reports dirty state"
+    assert_exit_code 0 git -C "$repo" status --porcelain "Still has changes"
+
+    git_harness_cleanup
+    log_test_pass "sync skips dirty repos"
 }
+
+# Register and run tests
+setup_cleanup_trap
+run_test test_parse_url_https_basic
+run_test test_sync_with_dirty_repo
+print_results
+exit "$(get_exit_code)"
 ```
+
+### Test Best Practices
+
+The test suite follows these principles:
+
+1. **No network dependencies** — Use the git harness for repository states
+2. **Isolated environments** — Each test gets fresh XDG directories
+3. **Deterministic results** — Same input always produces same output
+4. **Fast execution** — Unit tests complete in milliseconds
+5. **Clear failures** — Assertion messages explain what went wrong
+6. **Bash 4.0 compatible** — Uses `${arr[@]+"${arr[@]}"}` pattern for empty arrays
 
 ---
 

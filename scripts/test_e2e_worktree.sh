@@ -131,7 +131,17 @@ test_worktree_create_from_head() {
     local wt_path
     wt_path=$(worktree_path_for_repo "$repo_id")
     assert_dir_exists "$wt_path" "Worktree directory created"
-    assert_file_exists "$(get_worktrees_dir)/mapping.json" "mapping.json written"
+    local mapping_file
+    mapping_file="$(get_worktrees_dir)/mapping.json"
+    assert_file_exists "$mapping_file" "mapping.json written"
+
+    if command -v jq >/dev/null 2>&1; then
+        local mapped_path="" mapped_base=""
+        mapped_path=$(jq -r --arg r "$repo_id" '.[$r].worktree_path // ""' "$mapping_file")
+        mapped_base=$(jq -r --arg r "$repo_id" '.[$r].base_ref // ""' "$mapping_file")
+        assert_equals "$wt_path" "$mapped_path" "Mapping stores worktree_path"
+        assert_not_equals "" "$mapped_base" "Mapping stores base_ref"
+    fi
 
     local mapped_path=""
     get_worktree_path "$repo_id" mapped_path >/dev/null 2>&1 || true
@@ -180,6 +190,14 @@ test_worktree_create_from_specific_commit() {
     local mapped_path=""
     get_worktree_path "$repo_id" mapped_path >/dev/null 2>&1 || true
     assert_equals "$wt_path" "$mapped_path" "Mapping key uses resolved repo id (no @ref)"
+
+    local mapping_file
+    mapping_file="$(get_worktrees_dir)/mapping.json"
+    if command -v jq >/dev/null 2>&1; then
+        local mapped_base=""
+        mapped_base=$(jq -r --arg r "$repo_id" '.[$r].base_ref // ""' "$mapping_file")
+        assert_equals "$first_commit" "$mapped_base" "Mapping stores pinned base_ref"
+    fi
 
     cleanup_review_worktrees "$REVIEW_RUN_ID" >/dev/null 2>&1 || true
     e2e_cleanup
@@ -233,8 +251,8 @@ test_worktree_list_and_validate() {
     json=$(list_review_worktrees "$REVIEW_RUN_ID" 2>/dev/null)
     if command -v jq >/dev/null 2>&1; then
         assert_equals "object" "$(printf '%s' "$json" | jq -r 'type')" "list_review_worktrees returns JSON object"
-        assert_not_equals "" "$(printf '%s' "$json" | jq -r --arg r "$repo_a" '.[$r].path // ""')" "Repo A mapping present"
-        assert_not_equals "" "$(printf '%s' "$json" | jq -r --arg r "$repo_b" '.[$r].path // ""')" "Repo B mapping present"
+        assert_not_equals "" "$(printf '%s' "$json" | jq -r --arg r "$repo_a" '.[$r].worktree_path // ""')" "Repo A mapping present"
+        assert_not_equals "" "$(printf '%s' "$json" | jq -r --arg r "$repo_b" '.[$r].worktree_path // ""')" "Repo B mapping present"
     else
         skip_test "jq not installed - skipping mapping validation"
     fi
@@ -340,8 +358,8 @@ test_worktree_mapping_concurrent_updates() {
         else
             fail "mapping.json is invalid JSON after concurrent updates"
         fi
-        assert_not_equals "" "$(jq -r --arg r "$repo_a" '.[$r].path // ""' "$mapping_file")" "Repo A mapping present"
-        assert_not_equals "" "$(jq -r --arg r "$repo_b" '.[$r].path // ""' "$mapping_file")" "Repo B mapping present"
+        assert_not_equals "" "$(jq -r --arg r "$repo_a" '.[$r].worktree_path // ""' "$mapping_file")" "Repo A mapping present"
+        assert_not_equals "" "$(jq -r --arg r "$repo_b" '.[$r].worktree_path // ""' "$mapping_file")" "Repo B mapping present"
     else
         skip_test "jq not installed - skipping concurrent mapping validation"
     fi
@@ -367,4 +385,3 @@ run_test test_worktree_mapping_concurrent_updates
 
 print_results
 exit "$(get_exit_code)"
-

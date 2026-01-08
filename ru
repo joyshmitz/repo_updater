@@ -4401,6 +4401,27 @@ get_all_repos() {
     fi
 }
 
+# Find the configured repo spec for a repo_id (preserves branch pins/custom names)
+# Args: repo_id (owner/repo or host/owner/repo)
+# Output: matching repo spec on stdout
+find_repo_spec_for_repo_id() {
+    local target_repo_id="$1"
+    [[ -z "$target_repo_id" ]] && return 1
+
+    local spec url branch custom_name path repo_id
+    while IFS= read -r spec; do
+        [[ -z "$spec" ]] && continue
+        if resolve_repo_spec "$spec" "$PROJECTS_DIR" "$LAYOUT" url branch custom_name path repo_id; then
+            if [[ "$repo_id" == "$target_repo_id" ]]; then
+                printf '%s\n' "$spec"
+                return 0
+            fi
+        fi
+    done < <(get_all_repos)
+
+    return 1
+}
+
 # Attempt to detect latest release version without the GitHub API (avoids rate limits/proxies).
 # Returns:
 #   0 with version on stdout - success
@@ -9618,18 +9639,37 @@ check_model_rate_limit() {
     local log_dir
     log_dir="$state_dir/logs/$(date +%Y-%m-%d)"
 
-    if [[ ! -d "$log_dir" ]]; then
-        return 0
-    fi
-
     # Look for 429 responses in recent log files (last 5 minutes)
     local recent_429s=0
     local now
     now=$(date +%s)
     local five_min_ago=$((now - 300))
 
+    local -a log_files=()
+    if [[ -d "$log_dir" ]]; then
+        while IFS= read -r log_file; do
+            [[ -n "$log_file" ]] && log_files+=("$log_file")
+        done < <(find "$log_dir" -name "*.log" -type f 2>/dev/null)
+    fi
+
+    # Also scan review session logs in active worktrees (if available)
+    local run_id="${REVIEW_RUN_ID:-}"
+    if [[ -n "$run_id" ]]; then
+        local worktrees_dir="$state_dir/worktrees/$run_id"
+        if [[ -d "$worktrees_dir" ]]; then
+            while IFS= read -r log_file; do
+                [[ -n "$log_file" ]] && log_files+=("$log_file")
+            done < <(find "$worktrees_dir" -path "*/.ru/session.log" -type f 2>/dev/null)
+        fi
+    fi
+
+    if [[ ${#log_files[@]} -eq 0 ]]; then
+        return 0
+    fi
+
     # Find log files modified in last 5 minutes and grep for rate limit patterns
-    while IFS= read -r log_file; do
+    local log_file
+    for log_file in "${log_files[@]}"; do
         if [[ -f "$log_file" ]]; then
             local mtime
             mtime=$(stat -c %Y "$log_file" 2>/dev/null || stat -f %m "$log_file" 2>/dev/null || echo 0)
@@ -9639,7 +9679,7 @@ check_model_rate_limit() {
                 fi
             fi
         fi
-    done < <(find "$log_dir" -name "*.log" -type f 2>/dev/null)
+    done
 
     if [[ "$recent_429s" -gt 0 ]]; then
         local backoff_until=$((now + 60))
@@ -12305,8 +12345,12 @@ cleanup_old_review_state() {
     # Clean old worktrees if they exist
     local worktrees_dir="${RU_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ru}/worktrees"
     if [[ -d "$worktrees_dir" ]]; then
-        find "$worktrees_dir" -mindepth 1 -maxdepth 1 -type d -mtime "+$max_age_days" \
-            -exec rm -rf {} \; 2>/dev/null || true
+        if _is_path_under_base "$worktrees_dir" "${RU_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/ru}"; then
+            find "$worktrees_dir" -mindepth 1 -maxdepth 1 -type d -mtime "+$max_age_days" \
+                -exec rm -rf {} \; 2>/dev/null || true
+        else
+            log_warn "Skipping worktree cleanup: unsafe path $worktrees_dir"
+        fi
     fi
 
     # Prune old runs from state file (requires jq)
@@ -12354,7 +12398,7 @@ prepare_repo_digest_for_worktree() {
     digest_file="$wt_path/.ru/repo-digest.md"
 
     if [[ ! -f "$digest_cache" ]]; then
-        log_verbose "No cached digest for $repo_id"
+        log_info "No cached digest for $repo_id - agent will create fresh"
         return 0
     fi
 
@@ -12363,14 +12407,15 @@ prepare_repo_digest_for_worktree() {
         return 1
     fi
 
+    local delta_appended="false"
     if [[ -f "$meta_cache" ]] && command -v jq &>/dev/null; then
         local last_commit current_commit
         last_commit=$(jq -r '.last_commit // empty' "$meta_cache" 2>/dev/null)
         current_commit=$(git -C "$wt_path" rev-parse HEAD 2>/dev/null || echo "")
 
         if [[ -n "$last_commit" && -n "$current_commit" && "$last_commit" != "$current_commit" ]]; then
-            local changes files
-            changes=$(git -C "$wt_path" log --oneline "${last_commit}..${current_commit}" 2>/dev/null || true)
+            local changes files commit_count
+            changes=$(git -C "$wt_path" log --oneline "${last_commit}..${current_commit}" 2>/dev/null | head -20 || true)
             if [[ -n "$changes" ]]; then
                 files=$(git -C "$wt_path" diff --name-only "${last_commit}..${current_commit}" 2>/dev/null | head -20 || true)
                 {
@@ -12383,11 +12428,19 @@ prepare_repo_digest_for_worktree() {
                     printf '%s\n' '**Files Changed:**'
                     printf '%s\n' "$files"
                 } >> "$digest_file"
+                delta_appended="true"
             fi
+
+            commit_count=$(git -C "$wt_path" rev-list --count "${last_commit}..${current_commit}" 2>/dev/null || echo "")
+            [[ -n "$commit_count" ]] && log_debug "Digest delta: $commit_count commits since last review"
         fi
     fi
 
-    log_verbose "Loaded cached digest for $repo_id"
+    if [[ "$delta_appended" == "true" ]]; then
+        log_info "Loaded cached digest for $repo_id (with delta)"
+    else
+        log_info "Loaded cached digest for $repo_id (no changes)"
+    fi
     return 0
 }
 
@@ -12418,16 +12471,15 @@ update_digest_cache() {
     digest_size=$(wc -c < "$digest_file" 2>/dev/null || echo 0)
 
     local meta_file="$cache_dir/${repo_id//\//_}.meta.json"
-    cat > "$meta_file" <<EOF
-{
-  "last_commit": "$current_commit",
-  "last_update": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-  "run_id": "${REVIEW_RUN_ID:-unknown}",
-  "digest_size": $digest_size
-}
-EOF
+    printf '{\n  "repo": "%s",\n  "last_commit": "%s",\n  "last_review_at": "%s",\n  "digest_version": %s,\n  "digest_size": %s,\n  "run_id": "%s"\n}\n' \
+        "$repo_id" \
+        "$current_commit" \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        "1" \
+        "$digest_size" \
+        "${REVIEW_RUN_ID:-unknown}" > "$meta_file"
 
-    log_verbose "Updated digest cache for $repo_id"
+    log_info "Updated digest cache for $repo_id"
     return 0
 }
 
@@ -12503,7 +12555,7 @@ update_repo_digests_from_worktrees() {
     local repo_id wt_path
     while IFS= read -r repo_id; do
         [[ -z "$repo_id" ]] && continue
-        wt_path=$(jq -r --arg repo "$repo_id" '.[$repo].path // ""' "$mapping_file")
+        wt_path=$(jq -r --arg repo "$repo_id" '.[$repo].worktree_path // ""' "$mapping_file")
         [[ -n "$wt_path" ]] && update_digest_cache "$wt_path" "$repo_id"
     done < <(jq -r 'keys[]' "$mapping_file" 2>/dev/null)
 }
@@ -12792,11 +12844,12 @@ ensure_clean_or_fail() {
 }
 
 # Record worktree mapping to JSON file
-# Args: repo_id, worktree_path, branch_name
+# Args: repo_id, worktree_path, branch_name, base_ref
 record_worktree_mapping() {
     local repo_id="$1"
     local wt_path="$2"
     local wt_branch="$3"
+    local base_ref="${4:-}"
 
     local worktrees_dir
     worktrees_dir=$(get_worktrees_dir)
@@ -12816,11 +12869,14 @@ record_worktree_mapping() {
         [[ ! -f "$mapping_file" ]] && echo '{}' > "$mapping_file"
 
         local tmp_file="${mapping_file}.tmp.$$"
+        [[ -z "$base_ref" ]] && base_ref="HEAD"
+
         if jq --arg repo "$repo_id" \
               --arg path "$wt_path" \
               --arg branch "$wt_branch" \
+              --arg base "$base_ref" \
               --arg created "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-              '.[$repo] = {"path": $path, "branch": $branch, "created_at": $created}' \
+              '.[$repo] = {"worktree_path": $path, "branch": $branch, "base_ref": $base, "created_at": $created}' \
               "$mapping_file" > "$tmp_file"; then
             if mv "$tmp_file" "$mapping_file"; then
                 dir_lock_release "$lock_dir"
@@ -12860,7 +12916,7 @@ get_worktree_path() {
     if command -v jq &>/dev/null; then
         # Use _gwp_ prefix to avoid shadowing caller's output variable name
         local _gwp_path
-        _gwp_path=$(jq -r --arg repo "$repo_id" '.[$repo].path // ""' "$mapping_file")
+        _gwp_path=$(jq -r --arg repo "$repo_id" '.[$repo].worktree_path // ""' "$mapping_file")
         _set_out_var "$path_var" "$_gwp_path" || return 1
         [[ -n "$_gwp_path" ]] && return 0
     fi
@@ -12907,6 +12963,12 @@ prepare_review_worktrees() {
     for item in "${items[@]}"; do
         local repo_spec
         repo_spec="${item%%|*}"
+
+        # Preserve branch pins/custom names from config when possible.
+        local config_spec=""
+        if config_spec=$(find_repo_spec_for_repo_id "$repo_spec" 2>/dev/null); then
+            repo_spec="$config_spec"
+        fi
 
         # Resolve repo spec to get local path
         # shellcheck disable=SC2034  # resolved_repo_id used by resolve_repo_spec
@@ -12978,7 +13040,7 @@ prepare_review_worktrees() {
         prepare_repo_digest_for_worktree "$repo_id" "$wt_path" || true
 
         # Record mapping for later phases
-        if ! record_worktree_mapping "$repo_id" "$wt_path" "$wt_branch"; then
+        if ! record_worktree_mapping "$repo_id" "$wt_path" "$wt_branch" "$base_ref"; then
             log_warn "Worktree created but mapping failed for $repo_id"
             # Continue anyway - worktree is usable, just not tracked
         fi
@@ -13023,7 +13085,7 @@ cleanup_review_worktrees() {
             [[ -z "$repo_id" ]] && continue
 
             local wt_path wt_branch
-            wt_path=$(jq -r --arg repo "$repo_id" '.[$repo].path // ""' "$mapping_file")
+            wt_path=$(jq -r --arg repo "$repo_id" '.[$repo].worktree_path // ""' "$mapping_file")
             wt_branch=$(jq -r --arg repo "$repo_id" '.[$repo].branch // ""' "$mapping_file")
 
             if [[ -d "$wt_path" ]]; then
@@ -14552,7 +14614,7 @@ cmd_review_apply() {
         [[ -n "$repo_id" ]] || continue
 
         local wt_path
-        wt_path=$(jq -r --arg repo "$repo_id" '.[$repo].path // ""' "$mapping_file" 2>/dev/null || echo "")
+        wt_path=$(jq -r --arg repo "$repo_id" '.[$repo].worktree_path // ""' "$mapping_file" 2>/dev/null || echo "")
         if [[ -z "$wt_path" || ! -d "$wt_path" ]]; then
             log_error "Missing or invalid worktree path for $repo_id (mapping.json)"
             codes+=("2")

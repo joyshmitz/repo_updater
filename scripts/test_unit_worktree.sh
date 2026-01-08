@@ -33,6 +33,9 @@ source_ru_function "list_review_worktrees"
 source_ru_function "worktree_exists"
 source_ru_function "get_main_repo_path_from_worktree"
 source_ru_function "cleanup_review_worktrees"
+source_ru_function "get_digest_cache_dir"
+source_ru_function "prepare_repo_digest_for_worktree"
+source_ru_function "update_digest_cache"
 
 # Mock log functions for testing
 log_warn() { :; }
@@ -128,7 +131,7 @@ test_record_and_get_worktree_mapping() {
     setup_worktree_test
 
     # Record a mapping
-    record_worktree_mapping "owner/repo" "/path/to/worktree" "ru/review/test/owner-repo" 2>/dev/null
+    record_worktree_mapping "owner/repo" "/path/to/worktree" "ru/review/test/owner-repo" "main" 2>/dev/null
 
     # Verify mapping file exists
     local mapping_file
@@ -142,15 +145,23 @@ test_record_and_get_worktree_mapping() {
     else
         fail "get_worktree_path should succeed for recorded repo"
     fi
+
+    if command -v jq &>/dev/null; then
+        local mapped_path="" mapped_base=""
+        mapped_path=$(jq -r '."owner/repo".worktree_path // ""' "$mapping_file")
+        mapped_base=$(jq -r '."owner/repo".base_ref // ""' "$mapping_file")
+        assert_equals "/path/to/worktree" "$mapped_path" "Mapping should store worktree_path"
+        assert_equals "main" "$mapped_base" "Mapping should store base_ref"
+    fi
 }
 
 test_record_multiple_mappings() {
     setup_worktree_test
 
     # Record multiple mappings
-    record_worktree_mapping "owner/repo1" "/path/to/wt1" "branch1" 2>/dev/null
-    record_worktree_mapping "owner/repo2" "/path/to/wt2" "branch2" 2>/dev/null
-    record_worktree_mapping "other/repo3" "/path/to/wt3" "branch3" 2>/dev/null
+    record_worktree_mapping "owner/repo1" "/path/to/wt1" "branch1" "main" 2>/dev/null
+    record_worktree_mapping "owner/repo2" "/path/to/wt2" "branch2" "main" 2>/dev/null
+    record_worktree_mapping "other/repo3" "/path/to/wt3" "branch3" "main" 2>/dev/null
 
     # Verify all can be retrieved
     local wt1="" wt2="" wt3=""
@@ -178,7 +189,7 @@ test_get_worktree_mapping_from_item() {
     setup_worktree_test
 
     # Record a mapping
-    record_worktree_mapping "owner/repo" "/path/to/wt" "branch" 2>/dev/null
+    record_worktree_mapping "owner/repo" "/path/to/wt" "branch" "main" 2>/dev/null
 
     # Get mapping using work item format
     local repo_id="" wt_path=""
@@ -205,8 +216,8 @@ test_list_review_worktrees_with_entries() {
     setup_worktree_test
 
     # Record some mappings
-    record_worktree_mapping "owner/repo1" "/path/to/wt1" "branch1" 2>/dev/null
-    record_worktree_mapping "owner/repo2" "/path/to/wt2" "branch2" 2>/dev/null
+    record_worktree_mapping "owner/repo1" "/path/to/wt1" "branch1" "main" 2>/dev/null
+    record_worktree_mapping "owner/repo2" "/path/to/wt2" "branch2" "main" 2>/dev/null
 
     local result
     result=$(list_review_worktrees 2>/dev/null)
@@ -230,7 +241,7 @@ test_worktree_exists_recorded_but_no_dir() {
     setup_worktree_test
 
     # Record a mapping to a path that doesn't exist
-    record_worktree_mapping "owner/repo" "/nonexistent/path" "branch" 2>/dev/null
+    record_worktree_mapping "owner/repo" "/nonexistent/path" "branch" "main" 2>/dev/null
 
     assert_fails "Recorded but non-existent worktree should return false" worktree_exists "owner/repo"
 }
@@ -351,6 +362,178 @@ EOF
 }
 
 #==============================================================================
+# Tests: Digest Cache Functions (bd-ai1z)
+#==============================================================================
+
+test_digest_cache_copy() {
+    local test_name="prepare_repo_digest_for_worktree: copies cached digest to worktree"
+    log_test_start "$test_name"
+    setup_worktree_test
+
+    local main_repo
+    main_repo=$(create_test_repo "digest-copy-repo")
+    local wt_dir="$TEST_DIR/worktrees/digest-copy-wt"
+    mkdir -p "$(dirname "$wt_dir")"
+    git -C "$main_repo" worktree add "$wt_dir" -b test-branch 2>/dev/null
+    mkdir -p "$wt_dir/.ru"
+
+    local cache_dir
+    cache_dir=$(get_digest_cache_dir)
+    mkdir -p "$cache_dir"
+    echo "# Cached Digest for owner/digest-copy-repo" > "$cache_dir/owner_digest-copy-repo.md"
+
+    local current_sha
+    current_sha=$(git -C "$wt_dir" rev-parse HEAD)
+    printf '{"last_commit": "%s", "last_update": "2025-01-01T00:00:00Z"}\n' "$current_sha" \
+        > "$cache_dir/owner_digest-copy-repo.meta.json"
+
+    prepare_repo_digest_for_worktree "owner/digest-copy-repo" "$wt_dir" 2>/dev/null
+
+    assert_file_exists "$wt_dir/.ru/repo-digest.md" "Digest should be copied to worktree"
+    assert_file_contains "$wt_dir/.ru/repo-digest.md" "Cached Digest" "Digest content should match"
+
+    git -C "$main_repo" worktree remove "$wt_dir" 2>/dev/null || true
+    log_test_pass "$test_name"
+}
+
+test_digest_delta_computation() {
+    local test_name="prepare_repo_digest_for_worktree: appends delta when commits differ"
+    log_test_start "$test_name"
+    setup_worktree_test
+
+    local main_repo
+    main_repo=$(create_test_repo "delta-repo")
+    local old_sha
+    old_sha=$(git -C "$main_repo" rev-parse HEAD)
+
+    echo "new content" > "$main_repo/new-file.txt"
+    git -C "$main_repo" add new-file.txt
+    git -C "$main_repo" commit -m "First new commit" --quiet
+    echo "more content" >> "$main_repo/new-file.txt"
+    git -C "$main_repo" add new-file.txt
+    git -C "$main_repo" commit -m "Second new commit" --quiet
+
+    local wt_dir="$TEST_DIR/worktrees/delta-wt"
+    mkdir -p "$(dirname "$wt_dir")"
+    git -C "$main_repo" worktree add "$wt_dir" -b delta-branch 2>/dev/null
+    mkdir -p "$wt_dir/.ru"
+
+    local cache_dir
+    cache_dir=$(get_digest_cache_dir)
+    mkdir -p "$cache_dir"
+    echo "# Cached Digest" > "$cache_dir/owner_delta-repo.md"
+    printf '{"last_commit": "%s", "last_update": "2025-01-01T00:00:00Z"}\n' "$old_sha" \
+        > "$cache_dir/owner_delta-repo.meta.json"
+
+    prepare_repo_digest_for_worktree "owner/delta-repo" "$wt_dir" 2>/dev/null
+
+    assert_file_contains "$wt_dir/.ru/repo-digest.md" "Changes Since Last Review" \
+        "Delta section should be appended"
+    assert_file_contains "$wt_dir/.ru/repo-digest.md" "new commit" \
+        "Delta should contain commit messages"
+
+    git -C "$main_repo" worktree remove "$wt_dir" 2>/dev/null || true
+    log_test_pass "$test_name"
+}
+
+test_digest_cache_update() {
+    local test_name="update_digest_cache: saves digest and metadata to cache"
+    log_test_start "$test_name"
+    setup_worktree_test
+
+    local main_repo
+    main_repo=$(create_test_repo "cache-update-repo")
+    local wt_dir="$TEST_DIR/worktrees/cache-update-wt"
+    mkdir -p "$(dirname "$wt_dir")"
+    git -C "$main_repo" worktree add "$wt_dir" -b cache-branch 2>/dev/null
+    mkdir -p "$wt_dir/.ru"
+
+    echo "# New Digest Created by Agent" > "$wt_dir/.ru/repo-digest.md"
+    echo "Key patterns: async, factory" >> "$wt_dir/.ru/repo-digest.md"
+
+    update_digest_cache "$wt_dir" "owner/cache-update-repo" 2>/dev/null
+
+    local cache_dir
+    cache_dir=$(get_digest_cache_dir)
+
+    assert_file_exists "$cache_dir/owner_cache-update-repo.md" "Cache file should exist"
+    assert_file_exists "$cache_dir/owner_cache-update-repo.meta.json" "Meta file should exist"
+    assert_file_contains "$cache_dir/owner_cache-update-repo.md" "New Digest Created" \
+        "Cache should contain agent's digest"
+
+    git -C "$main_repo" worktree remove "$wt_dir" 2>/dev/null || true
+    log_test_pass "$test_name"
+}
+
+test_digest_metadata_schema() {
+    local test_name="update_digest_cache: creates valid metadata JSON with required fields"
+    log_test_start "$test_name"
+    setup_worktree_test
+
+    local main_repo
+    main_repo=$(create_test_repo "meta-schema-repo")
+    local wt_dir="$TEST_DIR/worktrees/meta-schema-wt"
+    mkdir -p "$(dirname "$wt_dir")"
+    git -C "$main_repo" worktree add "$wt_dir" -b meta-branch 2>/dev/null
+    mkdir -p "$wt_dir/.ru"
+
+    echo "# Test Digest" > "$wt_dir/.ru/repo-digest.md"
+    update_digest_cache "$wt_dir" "owner/meta-schema-repo" 2>/dev/null
+
+    local cache_dir
+    cache_dir=$(get_digest_cache_dir)
+    local meta_file="$cache_dir/owner_meta-schema-repo.meta.json"
+
+    if command -v jq &>/dev/null; then
+        if jq empty "$meta_file" 2>/dev/null; then
+            pass "Metadata is valid JSON"
+        else
+            fail "Metadata is not valid JSON"
+        fi
+        local last_commit last_update
+        last_commit=$(jq -r '.last_commit' "$meta_file" 2>/dev/null)
+        last_update=$(jq -r '.last_update' "$meta_file" 2>/dev/null)
+        assert_not_empty "$last_commit" "Metadata should have last_commit"
+        assert_not_empty "$last_update" "Metadata should have last_update"
+        if [[ "$last_commit" =~ ^[0-9a-f]{40}$ ]]; then
+            pass "last_commit is valid SHA"
+        else
+            fail "last_commit is not a valid SHA: $last_commit"
+        fi
+    else
+        skip_test "jq not available for JSON validation"
+    fi
+
+    git -C "$main_repo" worktree remove "$wt_dir" 2>/dev/null || true
+    log_test_pass "$test_name"
+}
+
+test_digest_cache_no_cache_exists() {
+    local test_name="prepare_repo_digest_for_worktree: returns success when no cache exists"
+    log_test_start "$test_name"
+    setup_worktree_test
+
+    local main_repo
+    main_repo=$(create_test_repo "no-cache-repo")
+    local wt_dir="$TEST_DIR/worktrees/no-cache-wt"
+    mkdir -p "$(dirname "$wt_dir")"
+    git -C "$main_repo" worktree add "$wt_dir" -b no-cache-branch 2>/dev/null
+    mkdir -p "$wt_dir/.ru"
+
+    prepare_repo_digest_for_worktree "owner/no-cache-repo" "$wt_dir" 2>/dev/null
+    assert_exit_code 0 "Should succeed when no cache exists" true
+
+    if [[ -f "$wt_dir/.ru/repo-digest.md" ]]; then
+        fail "Digest file should not exist when no cache available"
+    else
+        pass "No digest file created when no cache available"
+    fi
+
+    git -C "$main_repo" worktree remove "$wt_dir" 2>/dev/null || true
+    log_test_pass "$test_name"
+}
+
+#==============================================================================
 # Run All Tests
 #==============================================================================
 
@@ -387,6 +570,13 @@ run_test test_get_main_repo_path_from_worktree_main_repo
 run_test test_get_main_repo_path_from_worktree_not_git
 run_test test_get_main_repo_path_from_worktree_multiple_worktrees
 run_test test_cleanup_review_worktrees_refuses_outside_mapping_paths
+
+# Digest cache tests (bd-ai1z)
+run_test test_digest_cache_copy
+run_test test_digest_delta_computation
+run_test test_digest_cache_update
+run_test test_digest_metadata_schema
+run_test test_digest_cache_no_cache_exists
 
 # Print results
 print_results

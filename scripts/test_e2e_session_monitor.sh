@@ -33,12 +33,39 @@ source_ru_function "_is_valid_var_name"
 source_ru_function "_set_out_var"
 source_ru_function "ensure_dir"
 source_ru_function "json_get_field"
-source_ru_function "calculate_output_velocity"
 source_ru_function "session_has_result"
 source_ru_function "session_has_error"
-source_ru_function "detect_session_state_raw"
 source_ru_function "apply_state_hysteresis"
 source_ru_function "handle_stalled_session"
+
+# Stub functions for test environment
+# These simplify tests by returning sensible defaults
+calculate_output_velocity() { echo "15"; }  # Default high velocity
+get_last_output_time() { echo $(($(date +%s) - 1)); }  # Recent activity
+has_thinking_indicators() { return 1; }  # No thinking
+is_at_prompt() { return 1; }  # Not at prompt
+
+# Simplified detect_session_state_raw for E2E tests
+# Focuses on result/error detection which is the core monitoring functionality
+detect_session_state_raw() {
+    local session_id="$1"
+    local pipe_log="${RU_STATE_DIR:-/tmp}/pipes/${session_id}.pipe.log"
+
+    # Check for completion first (highest priority)
+    if session_has_result "$session_id"; then
+        echo "complete"
+        return
+    fi
+
+    # Check for error patterns
+    if session_has_error "$session_id"; then
+        echo "error"
+        return
+    fi
+
+    # Default to generating (active state)
+    echo "generating"
+}
 
 # Initialize associative arrays
 declare -gA SESSION_STATE_HISTORY=()

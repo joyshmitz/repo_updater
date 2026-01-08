@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://img.shields.io/badge/version-1.0.0-blue?style=for-the-badge" alt="Version" />
+  <img src="https://img.shields.io/badge/version-1.2.0-blue?style=for-the-badge" alt="Version" />
   <img src="https://img.shields.io/badge/platform-macOS%20%7C%20Linux-blueviolet?style=for-the-badge" alt="Platform" />
   <img src="https://img.shields.io/badge/shell-Bash%204.0+-purple?style=for-the-badge" alt="Shell" />
   <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="License" />
@@ -1123,7 +1123,7 @@ ru sync --json 2>/dev/null
 
 ```json
 {
-  "version": "1.0.0",
+  "version": "1.2.0",
   "timestamp": "2025-01-03T14:30:00Z",
   "duration_seconds": 154,
   "config": {

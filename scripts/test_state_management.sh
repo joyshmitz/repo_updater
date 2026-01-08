@@ -50,6 +50,17 @@ format_duration() { echo "${1}s"; }
 VERBOSE=false
 LOG_LEVEL=0
 
+# Portable alternative to head -n -N (BSD/macOS doesn't support negative counts)
+drop_last_lines() {
+    local n="${1:-1}"
+    local input total keep
+    input=$(cat)
+    total=$(printf '%s\n' "$input" | wc -l | tr -d ' ')
+    keep=$((total - n))
+    [[ "$keep" -lt 1 ]] && return 0
+    printf '%s\n' "$input" | head -n "$keep"
+}
+
 #------------------------------------------------------------------------------
 # Extract required functions from ru
 # Note: Use sed line ranges for functions with heredocs to avoid parse issues
@@ -64,7 +75,7 @@ awk '/^json_get_field\(\) \{/,/^}/' "$RU_SCRIPT" >> "$EXTRACT_FILE"
 awk '/^json_escape\(\) \{/,/^}/' "$RU_SCRIPT" >> "$EXTRACT_FILE"
 
 # Extract result tracking globals
-sed -n '/^# Global result tracking state/,/^# Initialize agent-sweep/p' "$RU_SCRIPT" | head -n -2 >> "$EXTRACT_FILE"
+sed -n '/^# Global result tracking state/,/^# Initialize agent-sweep/p' "$RU_SCRIPT" | drop_last_lines 2 >> "$EXTRACT_FILE"
 
 # Extract setup_agent_sweep_results function
 awk '/^setup_agent_sweep_results\(\) \{/,/^}/' "$RU_SCRIPT" >> "$EXTRACT_FILE"
@@ -78,7 +89,7 @@ awk '/^is_sweep_repo_completed\(\) \{/,/^}/' "$RU_SCRIPT" >> "$EXTRACT_FILE"
 awk '/^filter_sweep_completed_repos\(\) \{/,/^}/' "$RU_SCRIPT" >> "$EXTRACT_FILE"
 
 # Extract artifact capture section
-sed -n '/^# AGENT-SWEEP ARTIFACT CAPTURE/,/^# AGENT-SWEEP STATE PERSISTENCE/p' "$RU_SCRIPT" | head -n -3 >> "$EXTRACT_FILE"
+sed -n '/^# AGENT-SWEEP ARTIFACT CAPTURE/,/^# AGENT-SWEEP STATE PERSISTENCE/p' "$RU_SCRIPT" | drop_last_lines 3 >> "$EXTRACT_FILE"
 
 # Extract state persistence functions using line numbers (heredocs break awk /^}/ pattern)
 # save_agent_sweep_state: 1296-1361, load_agent_sweep_state: 1366-1430, cleanup_agent_sweep_state: 1433-1440

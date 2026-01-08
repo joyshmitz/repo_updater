@@ -40,19 +40,30 @@ LOG_LEVEL=0
 # Stub for ensure_dir
 ensure_dir() { mkdir -p "$1" 2>/dev/null; }
 
+# Portable alternative to head -n -N (BSD/macOS doesn't support negative counts)
+drop_last_lines() {
+    local n="${1:-1}"
+    local input total keep
+    input=$(cat)
+    total=$(printf '%s\n' "$input" | wc -l | tr -d ' ')
+    keep=$((total - n))
+    [[ "$keep" -lt 1 ]] && return 0
+    printf '%s\n' "$input" | head -n "$keep"
+}
+
 #------------------------------------------------------------------------------
 # Extract required functions from ru
 #------------------------------------------------------------------------------
 EXTRACT_FILE=$(mktemp)
 
 # Extract result tracking globals
-sed -n '/^# Global result tracking state/,/^# Initialize agent-sweep/p' "$RU_SCRIPT" | head -n -2 > "$EXTRACT_FILE"
+sed -n '/^# Global result tracking state/,/^# Initialize agent-sweep/p' "$RU_SCRIPT" | drop_last_lines 2 > "$EXTRACT_FILE"
 
 # Extract setup_agent_sweep_results function
 awk '/^setup_agent_sweep_results\(\) \{/,/^}/' "$RU_SCRIPT" >> "$EXTRACT_FILE"
 
 # Extract artifact capture section (from ARTIFACT CAPTURE header to STATE PERSISTENCE header)
-sed -n '/^# AGENT-SWEEP ARTIFACT CAPTURE/,/^# AGENT-SWEEP STATE PERSISTENCE/p' "$RU_SCRIPT" | head -n -3 >> "$EXTRACT_FILE"
+sed -n '/^# AGENT-SWEEP ARTIFACT CAPTURE/,/^# AGENT-SWEEP STATE PERSISTENCE/p' "$RU_SCRIPT" | drop_last_lines 3 >> "$EXTRACT_FILE"
 
 # shellcheck disable=SC1090
 source "$EXTRACT_FILE"

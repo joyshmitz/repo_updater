@@ -48,12 +48,23 @@ log_verbose() { :; }
 log_warn() { :; }
 log_error() { :; }
 
+# Portable alternative to head -n -N (BSD/macOS doesn't support negative counts)
+drop_last_lines() {
+    local n="${1:-1}"
+    local input total keep
+    input=$(cat)
+    total=$(printf '%s\n' "$input" | wc -l | tr -d ' ')
+    keep=$((total - n))
+    [[ "$keep" -lt 1 ]] && return 0
+    printf '%s\n' "$input" | head -n "$keep"
+}
+
 #------------------------------------------------------------------------------
 # Source the secret scan function at global scope
 # Extract from function comment to just before next function comment
 #------------------------------------------------------------------------------
 EXTRACT_FILE=$(mktemp)
-sed -n '/^# run_secret_scan:/,/^# run_quality_gates:/p' "$RU_SCRIPT" | head -n -1 > "$EXTRACT_FILE"
+sed -n '/^# run_secret_scan:/,/^# run_quality_gates:/p' "$RU_SCRIPT" | drop_last_lines 1 > "$EXTRACT_FILE"
 # shellcheck disable=SC1090
 source "$EXTRACT_FILE"
 rm -f "$EXTRACT_FILE"

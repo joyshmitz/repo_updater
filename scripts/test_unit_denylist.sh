@@ -52,12 +52,23 @@ log_warn() { :; }
 # Initialize required global arrays before sourcing extracted code
 declare -ga AGENT_SWEEP_DENYLIST_EXTRA_LOCAL=()
 
+# Portable alternative to head -n -N (BSD/macOS doesn't support negative counts)
+drop_last_lines() {
+    local n="${1:-1}"
+    local input total keep
+    input=$(cat)
+    total=$(printf '%s\n' "$input" | wc -l | tr -d ' ')
+    keep=$((total - n))
+    [[ "$keep" -lt 1 ]] && return 0
+    printf '%s\n' "$input" | head -n "$keep"
+}
+
 #------------------------------------------------------------------------------
 # Source the denylist functions at global scope (declare -a creates local vars in functions)
 # Extract from the array declaration to just before detect_review_driver
 #------------------------------------------------------------------------------
 EXTRACT_FILE=$(mktemp)
-sed -n '/^declare -a AGENT_SWEEP_DENYLIST_PATTERNS/,/^# Detect which review driver/p' "$RU_SCRIPT" | head -n -2 > "$EXTRACT_FILE"
+sed -n '/^declare -a AGENT_SWEEP_DENYLIST_PATTERNS/,/^# Detect which review driver/p' "$RU_SCRIPT" | drop_last_lines 2 > "$EXTRACT_FILE"
 # shellcheck disable=SC1090
 source "$EXTRACT_FILE"
 rm -f "$EXTRACT_FILE"

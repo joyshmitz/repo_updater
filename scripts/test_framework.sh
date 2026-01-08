@@ -674,6 +674,34 @@ log_event_json() {
 }
 
 #==============================================================================
+# Portable Utilities
+#==============================================================================
+
+# drop_last_lines - Remove the last N lines from input (portable alternative to head -n -N)
+# BSD/macOS head doesn't support negative line counts, so we use sed instead.
+# Usage: command | drop_last_lines 2  # Remove last 2 lines
+drop_last_lines() {
+    local n="${1:-1}"
+    if [[ "$n" -lt 1 ]]; then
+        cat
+        return
+    fi
+    # Build a sed command that deletes the last N lines
+    # For n=1: sed '$d' (delete last line)
+    # For n=2: sed 'N;$!P;$!D;$d' is complex, so we use a different approach
+    # We'll use head with line count calculated from wc -l
+    local input
+    input=$(cat)
+    local total
+    total=$(printf '%s\n' "$input" | wc -l | tr -d ' ')
+    local keep=$((total - n))
+    if [[ "$keep" -lt 1 ]]; then
+        return 0  # Nothing to output
+    fi
+    printf '%s\n' "$input" | head -n "$keep"
+}
+
+#==============================================================================
 # Core Assertion Functions
 #==============================================================================
 

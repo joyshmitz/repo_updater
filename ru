@@ -13011,21 +13011,34 @@ prepare_review_worktrees() {
         local safe_repo_id="${repo_id//\//_}"
         local wt_path="$worktrees_dir/$safe_repo_id"
         local wt_branch="ru/review/${REVIEW_RUN_ID:-unknown}/${repo_id//\//-}"
+        log_debug "Creating worktree for $repo_id at $wt_path"
 
         # Fetch latest from remote (quiet, ignore failures)
         git -C "$local_path" fetch --quiet 2>/dev/null || true
 
         # Determine base reference (respect branch pins)
         local base_ref="${branch:-HEAD}"
+        local base_ref_create="$base_ref"
+        local is_pinned="false"
+        [[ -n "$branch" ]] && is_pinned="true"
+
+        # If the pinned branch doesn't exist locally, try the remote-tracking ref for creation.
+        if [[ "$is_pinned" == "true" ]] && ! git -C "$local_path" rev-parse --verify "$base_ref" >/dev/null 2>&1; then
+            if git -C "$local_path" rev-parse --verify "origin/$base_ref" >/dev/null 2>&1; then
+                base_ref_create="origin/$base_ref"
+            fi
+        fi
+
+        log_debug "Using base ref: $base_ref (pinned: $is_pinned)"
 
         # Check if worktree already exists
         if [[ -d "$wt_path" ]]; then
             log_warn "Worktree already exists, reusing: $wt_path"
         else
             # Create worktree with new branch
-            if ! git -C "$local_path" worktree add -b "$wt_branch" "$wt_path" "$base_ref" >/dev/null 2>&1; then
+            if ! git -C "$local_path" worktree add -b "$wt_branch" "$wt_path" "$base_ref_create" >/dev/null 2>&1; then
                 # Branch may already exist from previous run, try without -b
-                if ! git -C "$local_path" worktree add "$wt_path" "$base_ref" >/dev/null 2>&1; then
+                if ! git -C "$local_path" worktree add "$wt_path" "$base_ref_create" >/dev/null 2>&1; then
                     log_error "Failed to create worktree for $repo_id"
                     ((failed++))
                     continue

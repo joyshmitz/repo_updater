@@ -352,7 +352,7 @@ test_cleanup_review_worktrees_refuses_outside_mapping_paths() {
 
     # Seed a corrupt mapping.json that points outside the run directory.
     cat > "$base/mapping.json" <<EOF
-{"owner/repo":{"path":"$outside","branch":"branch","created_at":"2026-01-01T00:00:00Z"}}
+{"owner/repo":{"worktree_path":"$outside","branch":"branch","base_ref":"main","created_at":"2026-01-01T00:00:00Z"}}
 EOF
 
     cleanup_review_worktrees "$REVIEW_RUN_ID" 2>/dev/null || true
@@ -384,7 +384,7 @@ test_digest_cache_copy() {
 
     local current_sha
     current_sha=$(git -C "$wt_dir" rev-parse HEAD)
-    printf '{"last_commit": "%s", "last_update": "2025-01-01T00:00:00Z"}\n' "$current_sha" \
+    printf '{"last_commit": "%s", "last_review_at": "2025-01-01T00:00:00Z", "digest_version": 1}\n' "$current_sha" \
         > "$cache_dir/owner_digest-copy-repo.meta.json"
 
     prepare_repo_digest_for_worktree "owner/digest-copy-repo" "$wt_dir" 2>/dev/null
@@ -422,7 +422,7 @@ test_digest_delta_computation() {
     cache_dir=$(get_digest_cache_dir)
     mkdir -p "$cache_dir"
     echo "# Cached Digest" > "$cache_dir/owner_delta-repo.md"
-    printf '{"last_commit": "%s", "last_update": "2025-01-01T00:00:00Z"}\n' "$old_sha" \
+    printf '{"last_commit": "%s", "last_review_at": "2025-01-01T00:00:00Z", "digest_version": 1}\n' "$old_sha" \
         > "$cache_dir/owner_delta-repo.meta.json"
 
     prepare_repo_digest_for_worktree "owner/delta-repo" "$wt_dir" 2>/dev/null
@@ -490,11 +490,15 @@ test_digest_metadata_schema() {
         else
             fail "Metadata is not valid JSON"
         fi
-        local last_commit last_update
+        local last_commit last_review_at digest_version repo_id
         last_commit=$(jq -r '.last_commit' "$meta_file" 2>/dev/null)
-        last_update=$(jq -r '.last_update' "$meta_file" 2>/dev/null)
+        last_review_at=$(jq -r '.last_review_at' "$meta_file" 2>/dev/null)
+        digest_version=$(jq -r '.digest_version' "$meta_file" 2>/dev/null)
+        repo_id=$(jq -r '.repo' "$meta_file" 2>/dev/null)
         assert_not_empty "$last_commit" "Metadata should have last_commit"
-        assert_not_empty "$last_update" "Metadata should have last_update"
+        assert_not_empty "$last_review_at" "Metadata should have last_review_at"
+        assert_equals "1" "$digest_version" "Metadata should have digest_version 1"
+        assert_equals "owner/meta-schema-repo" "$repo_id" "Metadata should have repo id"
         if [[ "$last_commit" =~ ^[0-9a-f]{40}$ ]]; then
             pass "last_commit is valid SHA"
         else
@@ -520,8 +524,8 @@ test_digest_cache_no_cache_exists() {
     git -C "$main_repo" worktree add "$wt_dir" -b no-cache-branch 2>/dev/null
     mkdir -p "$wt_dir/.ru"
 
-    prepare_repo_digest_for_worktree "owner/no-cache-repo" "$wt_dir" 2>/dev/null
-    assert_exit_code 0 "Should succeed when no cache exists" true
+    assert_exit_code 0 "Should succeed when no cache exists" \
+        prepare_repo_digest_for_worktree "owner/no-cache-repo" "$wt_dir"
 
     if [[ -f "$wt_dir/.ru/repo-digest.md" ]]; then
         fail "Digest file should not exist when no cache available"

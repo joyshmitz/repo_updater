@@ -8766,7 +8766,11 @@ calculate_output_velocity() {
         chars_added=0
     fi
 
-    # Velocity = chars / window
+    # Velocity = chars / window (guard against division by zero)
+    if [[ $window -le 0 ]]; then
+        echo "0"
+        return 0
+    fi
     local velocity=$((chars_added / window))
     echo "$velocity"
 }
@@ -9358,7 +9362,11 @@ monitor_sessions() {
                 active_count="${#repo_sessions[@]}"
             fi
             while can_start_new_session "$active_count" 2>/dev/null && [[ ${#pending_repos[@]} -gt 0 ]]; do
-                start_next_queued_session repo_sessions pending_repos repo_items 2>/dev/null || break
+                if start_next_queued_session repo_sessions pending_repos repo_items 2>/dev/null; then
+                    active_count=$((active_count + 1))
+                else
+                    break
+                fi
             done
         fi
 
@@ -9441,63 +9449,64 @@ start_next_queued_session() {
         local -n _repo_items_ref="_empty_items"
     fi
 
-    # Check if there are pending repos
-    if [[ ${#_pending_ref[@]} -eq 0 ]]; then
-        return 1
-    fi
+    # Try to start the next viable repo; skip failures without stalling the queue.
+    while [[ ${#_pending_ref[@]} -gt 0 ]]; do
+        # Get next repo from pending list
+        local repo_id="${_pending_ref[0]}"
+        _pending_ref=("${_pending_ref[@]:1}")  # Remove first element
 
-    # Get next repo from pending list
-    local repo_id="${_pending_ref[0]}"
-    _pending_ref=("${_pending_ref[@]:1}")  # Remove first element
+        # Get worktree path for this repo
+        local wt_path=""
+        if ! get_worktree_path "$repo_id" wt_path 2>/dev/null || [[ -z "$wt_path" ]]; then
+            log_warn "No worktree found for $repo_id, marking error"
+            update_review_state ".repos[\"$repo_id\"].status = \"error\""
+            continue
+        fi
 
-    # Get worktree path for this repo
-    local wt_path=""
-    if ! get_worktree_path "$repo_id" wt_path 2>/dev/null; then
-        log_warn "No worktree found for $repo_id, skipping"
-        return 1
-    fi
+        # Generate session ID
+        local session_id="ru-review-${REVIEW_RUN_ID:-$$}-${repo_id//\//-}"
 
-    # Generate session ID
-    local session_id="ru-review-${REVIEW_RUN_ID:-$$}-${repo_id//\//-}"
+        # Build review prompt for this repo
+        # shellcheck disable=SC2190  # False positive: _repo_items_ref is a nameref to associative array
+        local items_blob="${_repo_items_ref[$repo_id]:-}"
+        local -a repo_items=()
+        if [[ -n "$items_blob" ]]; then
+            while IFS= read -r line; do
+                # shellcheck disable=SC2190  # False positive: repo_items is indexed array, not associative
+                [[ -n "$line" ]] && repo_items+=("$line")
+            done <<< "$items_blob"
+        fi
 
-    # Build review prompt for this repo
-    # shellcheck disable=SC2190  # False positive: _repo_items_ref is a nameref to associative array
-    local items_blob="${_repo_items_ref[$repo_id]:-}"
-    local -a repo_items=()
-    if [[ -n "$items_blob" ]]; then
-        while IFS= read -r line; do
-            # shellcheck disable=SC2190  # False positive: repo_items is indexed array, not associative
-            [[ -n "$line" ]] && repo_items+=("$line")
-        done <<< "$items_blob"
-    fi
+        local items_json="[]"
+        if [[ ${#repo_items[@]} -gt 0 ]]; then
+            items_json=$(build_review_items_json "${repo_items[@]}")
+        fi
 
-    local items_json="[]"
-    if [[ ${#repo_items[@]} -gt 0 ]]; then
-        items_json=$(build_review_items_json "${repo_items[@]}")
-    fi
+        local prompt
+        prompt=$(generate_review_prompt "$repo_id" "$wt_path" "${REVIEW_RUN_ID:-unknown}" "$items_json")
 
-    local prompt
-    prompt=$(generate_review_prompt "$repo_id" "$wt_path" "${REVIEW_RUN_ID:-unknown}" "$items_json")
+        # Load and start driver
+        if [[ -z "${REVIEW_DRIVER_LOADED:-}" ]]; then
+            load_review_driver "${REVIEW_DRIVER:-local}" || return 1
+            REVIEW_DRIVER_LOADED=1
+        fi
 
-    # Load and start driver
-    if [[ -z "${REVIEW_DRIVER_LOADED:-}" ]]; then
-        load_review_driver "${REVIEW_DRIVER:-local}" || return 1
-        REVIEW_DRIVER_LOADED=1
-    fi
+        # Start session via driver
+        if ! driver_start_session "$wt_path" "$session_id" "$prompt"; then
+            log_error "Failed to start session for $repo_id"
+            update_review_state ".repos[\"$repo_id\"].status = \"error\""
+            continue
+        fi
 
-    # Start session via driver
-    if ! driver_start_session "$wt_path" "$session_id" "$prompt"; then
-        log_error "Failed to start session for $repo_id"
-        update_review_state ".repos[\"$repo_id\"].status = \"error\""
-        return 1
-    fi
+        # Track session
+        _sessions_ref["$repo_id"]="$session_id"
+        update_review_state ".repos[\"$repo_id\"].status = \"in_progress\" | .repos[\"$repo_id\"].session_id = \"$session_id\""
 
-    # Track session
-    _sessions_ref["$repo_id"]="$session_id"
-    update_review_state ".repos[\"$repo_id\"].status = \"in_progress\" | .repos[\"$repo_id\"].session_id = \"$session_id\""
+        log_info "Started session for $repo_id (${#_sessions_ref[@]} active)"
+        return 0
+    done
 
-    log_info "Started session for $repo_id (${#_sessions_ref[@]} active)"
-    return 0
+    return 1
 }
 
 #------------------------------------------------------------------------------
@@ -9889,6 +9898,16 @@ validate_agent_command() {
     cmd="${cmd#"${cmd%%[![:space:]]*}"}"
     cmd="${cmd%"${cmd##*[![:space:]]}"}"
 
+    # Reject newline-separated commands to prevent chaining via line breaks.
+    if [[ "$cmd" == *$'\n'* || "$cmd" == *$'\r'* ]]; then
+        jq -n \
+            --arg cmd "$cmd" \
+            --arg status "needs_approval" \
+            --arg reason "Command contains newline separators" \
+            '{command: $cmd, status: $status, reason: $reason}'
+        return 2
+    fi
+
     # Extract the base command (first token)
     local base_cmd="${cmd%%[[:space:]]*}"
     if [[ -z "$base_cmd" ]]; then
@@ -9902,7 +9921,7 @@ validate_agent_command() {
 
     # Security: Check for shell metacharacters that enable command chaining/injection
     # These could bypass base_cmd checks by executing additional commands
-    # Characters: ; | & ` $( ) && || (newlines handled by caller typically)
+    # Characters: ; | & ` $( ) && || (newlines handled above)
     if [[ "$cmd" =~ [\;\|\&\`] ]] || [[ "$cmd" =~ \$\( ]] || [[ "$cmd" =~ \&\& ]] || [[ "$cmd" =~ \|\| ]]; then
         jq -n \
             --arg cmd "$cmd" \

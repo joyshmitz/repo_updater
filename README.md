@@ -8,6 +8,10 @@
 <h1 align="center">ru</h1>
 <h3 align="center">Repo Updater</h3>
 
+<div align="center">
+  <img src="ru_illustration.webp" alt="ru - Repo Updater: Keep all your GitHub repositories synchronized with a single command">
+</div>
+
 <p align="center">
   <strong>A beautiful, automation-friendly CLI for synchronizing GitHub repositories</strong>
 </p>

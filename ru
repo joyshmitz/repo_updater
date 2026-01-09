@@ -9900,8 +9900,11 @@ validate_agent_command() {
 
     # Reject newline-separated commands to prevent chaining via line breaks.
     if [[ "$cmd" == *$'\n'* || "$cmd" == *$'\r'* ]]; then
+        # Pre-escape newlines for valid JSON (jq 1.8+ may not escape in output)
+        local escaped_cmd="${cmd//$'\n'/\\n}"
+        escaped_cmd="${escaped_cmd//$'\r'/\\r}"
         jq -n \
-            --arg cmd "$cmd" \
+            --arg cmd "$escaped_cmd" \
             --arg status "needs_approval" \
             --arg reason "Command contains newline separators" \
             '{command: $cmd, status: $status, reason: $reason}'

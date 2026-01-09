@@ -9227,16 +9227,17 @@ record_session_outcome() {
 get_repo_for_session() {
     local session_id="$1"
 
-    # Try to get from worktree mapping
-    if [[ -n "${RU_STATE_DIR:-}" ]]; then
-        local mapping_file="$RU_STATE_DIR/worktrees/${REVIEW_RUN_ID:-current}/mapping.json"
-        if [[ -f "$mapping_file" ]]; then
-            local repo_id
-            repo_id=$(jq -r --arg sid "$session_id" '.sessions[$sid].repo_id // empty' "$mapping_file" 2>/dev/null)
-            if [[ -n "$repo_id" ]]; then
-                echo "$repo_id"
-                return 0
-            fi
+    # Use review state to map session -> repo
+    local state_file
+    state_file=$(get_review_state_file 2>/dev/null || echo "")
+    if [[ -n "$state_file" && -f "$state_file" ]] && command -v jq &>/dev/null; then
+        local repo_id
+        repo_id=$(jq -r --arg sid "$session_id" \
+            '.repos | to_entries[] | select(.value.session_id == $sid) | .key' \
+            "$state_file" 2>/dev/null | head -1)
+        if [[ -n "$repo_id" ]]; then
+            echo "$repo_id"
+            return 0
         fi
     fi
 
@@ -9252,12 +9253,11 @@ get_repo_for_session() {
 get_worktree_for_session() {
     local session_id="$1"
 
-    # Try to get from worktree mapping
-    if [[ -n "${RU_STATE_DIR:-}" ]]; then
-        local mapping_file="$RU_STATE_DIR/worktrees/${REVIEW_RUN_ID:-current}/mapping.json"
-        if [[ -f "$mapping_file" ]]; then
-            local wt_path
-            wt_path=$(jq -r --arg sid "$session_id" '.sessions[$sid].worktree_path // empty' "$mapping_file" 2>/dev/null)
+    local repo_id
+    repo_id=$(get_repo_for_session "$session_id" 2>/dev/null || true)
+    if [[ -n "$repo_id" ]]; then
+        local wt_path=""
+        if get_worktree_path "$repo_id" wt_path 2>/dev/null; then
             if [[ -n "$wt_path" ]]; then
                 echo "$wt_path"
                 return 0
@@ -9279,6 +9279,7 @@ monitor_sessions() {
     local poll_interval="${2:-2}"
 
     declare -A sessions=()  # session_id -> confirmed_state
+    declare -A repo_sessions=()  # repo_id -> session_id
 
     log_verbose "Starting session monitor (poll=${poll_interval}s)"
 
@@ -9291,6 +9292,12 @@ monitor_sessions() {
         local session_id
         while IFS= read -r session_id; do
             [[ -z "$session_id" ]] && continue
+
+            local repo_id_for_session=""
+            repo_id_for_session=$(get_repo_for_session "$session_id" 2>/dev/null || true)
+            if [[ -n "$repo_id_for_session" && "$repo_id_for_session" != "$session_id" ]]; then
+                repo_sessions["$repo_id_for_session"]="$session_id"
+            fi
 
             # Initialize if new session
             if [[ -z "${sessions[$session_id]:-}" ]]; then
@@ -9318,10 +9325,12 @@ monitor_sessions() {
                     ;;
                 error)
                     handle_session_error "$session_id"
+                    [[ -n "$repo_id_for_session" && "$repo_id_for_session" != "$session_id" ]] && unset "repo_sessions[$repo_id_for_session]"
                     unset "sessions[$session_id]"
                     ;;
                 complete)
                     handle_session_complete "$session_id"
+                    [[ -n "$repo_id_for_session" && "$repo_id_for_session" != "$session_id" ]] && unset "repo_sessions[$repo_id_for_session]"
                     unset "sessions[$session_id]"
                     ;;
             esac
@@ -9339,7 +9348,7 @@ monitor_sessions() {
         local -A repo_items=()
         if has_pending_repos 2>/dev/null && get_pending_repos_from_state pending_repos 2>/dev/null; then
             while can_start_new_session "${#sessions[@]}" 2>/dev/null && [[ ${#pending_repos[@]} -gt 0 ]]; do
-                start_next_queued_session sessions pending_repos repo_items 2>/dev/null || break
+                start_next_queued_session repo_sessions pending_repos repo_items 2>/dev/null || break
             done
         fi
 
@@ -9447,6 +9456,7 @@ start_next_queued_session() {
     local -a repo_items=()
     if [[ -n "$items_blob" ]]; then
         while IFS= read -r line; do
+            # shellcheck disable=SC2190  # False positive: repo_items is indexed array, not associative
             [[ -n "$line" ]] && repo_items+=("$line")
         done <<< "$items_blob"
     fi

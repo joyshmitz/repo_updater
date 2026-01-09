@@ -2461,10 +2461,10 @@ agent_sweep_backoff_trigger() {
 
         # Add jitter (±25%) to prevent thundering herd
         # RANDOM is 0-32767, scale to ±25% of delay
-        local jitter_range=$((new_delay / 2))
+        local max_jitter=$((new_delay / 4))
         local jitter=0
-        if [[ $jitter_range -gt 0 ]]; then
-            jitter=$(( (RANDOM % jitter_range) - (jitter_range / 2) ))
+        if [[ $max_jitter -gt 0 ]]; then
+            jitter=$(( (RANDOM % (2 * max_jitter + 1)) - max_jitter ))
         fi
         new_delay=$((new_delay + jitter))
         [[ "$new_delay" -lt 5 ]] && new_delay=5  # Minimum 5 seconds
@@ -9612,13 +9612,15 @@ run_review_orchestration() {
 
             case "$confirmed_state" in
                 waiting)
-                    local reason
-                    reason=$(detect_wait_reason "$session_id" 2>/dev/null || echo "unknown")
-                    if [[ "$reason" == ask_user_question:* || "$reason" == agent_question:* ]]; then
+                    local wait_info reason
+                    wait_info=$(detect_wait_reason "$session_id" 2>/dev/null || echo "")
+                    reason=$(echo "$wait_info" | jq -r '.reason // "unknown"' 2>/dev/null)
+                    [[ -z "$reason" ]] && reason="unknown"
+                    if [[ "$reason" == "ask_user_question" || "$reason" == "agent_question_text" ]]; then
                         increment_questions_asked
                         if ! check_cost_budget; then
                             log_warn "Question budget reached, auto-skipping"
-                            driver_send_message "$session_id" "Skip this question and continue" 2>/dev/null || true
+                            driver_send_to_session "$session_id" "Skip this question and continue" 2>/dev/null || true
                         else
                             handle_waiting_session "$session_id"
                         fi
@@ -14364,10 +14366,11 @@ days_since_timestamp() {
 # Returns: 0 if recently reviewed, 1 if not
 item_recently_reviewed() {
     local item_key="$1"
-    local state_file="$RU_STATE_DIR/review-state.json"
+    local state_file
+    state_file=$(get_review_state_file 2>/dev/null || echo "")
     local skip_days="${REVIEW_SKIP_DAYS:-7}"
 
-    [[ ! -f "$state_file" ]] && return 1
+    [[ -z "$state_file" || ! -f "$state_file" ]] && return 1
 
     local last_review
     last_review=$(jq -r --arg key "$item_key" '.items[$key].last_review // ""' "$state_file" 2>/dev/null)

@@ -9256,9 +9256,17 @@ monitor_sessions() {
         done <<< "$session_list"
 
         # Start new sessions if governor allows
-        while can_start_new_session "${#sessions[@]}" 2>/dev/null && has_pending_repos 2>/dev/null; do
-            start_next_queued_session sessions 2>/dev/null || break
-        done
+        if declare -f governor_update &>/dev/null; then
+            governor_update
+        fi
+
+        # Rebuild pending repos from state and start sessions
+        local -a pending_repos=()
+        if has_pending_repos 2>/dev/null && get_pending_repos_from_state pending_repos 2>/dev/null; then
+            while can_start_new_session "${#sessions[@]}" 2>/dev/null && [[ ${#pending_repos[@]} -gt 0 ]]; do
+                start_next_queued_session sessions pending_repos 2>/dev/null || break
+            done
+        fi
 
         sleep "$poll_interval"
     done
@@ -9282,6 +9290,37 @@ has_pending_repos() {
         fi
     fi
     return 1
+}
+
+# Get pending repos from state file into an array
+# Args:
+#   $1 - Name of array variable to populate
+# Returns:
+#   0 on success, 1 if no state file or error
+get_pending_repos_from_state() {
+    local -n _out_arr=$1
+
+    _out_arr=()
+
+    if [[ -z "${RU_STATE_DIR:-}" ]]; then
+        return 1
+    fi
+
+    local state_file
+    state_file=$(get_review_state_file 2>/dev/null || echo "")
+    if [[ ! -f "$state_file" ]]; then
+        return 1
+    fi
+
+    local repo_list
+    repo_list=$(jq -r '.repos | to_entries[] | select(.value.status == "pending") | .key' "$state_file" 2>/dev/null || echo "")
+
+    local repo
+    while IFS= read -r repo; do
+        [[ -n "$repo" ]] && _out_arr+=("$repo")
+    done <<< "$repo_list"
+
+    return 0
 }
 
 # Start the next queued session from pending repos
@@ -9493,6 +9532,11 @@ run_review_orchestration() {
     touch "$lock_file"
 
     while [[ ${#pending_repos[@]} -gt 0 || ${#active_sessions[@]} -gt 0 ]]; do
+        # Refresh governor state to honor rate limits before starting sessions.
+        if declare -f governor_update &>/dev/null; then
+            governor_update
+        fi
+
         # Check cost budget before starting new sessions
         if ! check_cost_budget; then
             log_warn "Cost budget exceeded, stopping new sessions"
@@ -10604,6 +10648,16 @@ check_model_rate_limit() {
     local now
     now=$(date +%s)
     local five_min_ago=$((now - 300))
+    local backoff_until="${GOVERNOR_STATE[model_backoff_until]:-0}"
+
+    # Clear expired backoff even if no logs are found.
+    if [[ "${GOVERNOR_STATE[model_in_backoff]}" == "true" ]]; then
+        [[ "$backoff_until" =~ ^[0-9]+$ ]] || backoff_until=0
+        if [[ "$now" -ge "$backoff_until" ]]; then
+            GOVERNOR_STATE[model_in_backoff]="false"
+            log_info "Model rate limit backoff expired, resuming normal operation"
+        fi
+    fi
 
     local -a log_files=()
     if [[ -d "$log_dir" ]]; then
@@ -10646,14 +10700,6 @@ check_model_rate_limit() {
         GOVERNOR_STATE[model_in_backoff]="true"
         GOVERNOR_STATE[model_backoff_until]="$backoff_until"
         log_warn "Model rate limit detected ($recent_429s hits), backing off until $(date -d "@$backoff_until" +%H:%M:%S 2>/dev/null || date -r "$backoff_until" +%H:%M:%S 2>/dev/null || echo 'soon')"
-    else
-        # Check if backoff period has expired
-        if [[ "${GOVERNOR_STATE[model_in_backoff]}" == "true" ]]; then
-            if [[ "$now" -ge "${GOVERNOR_STATE[model_backoff_until]}" ]]; then
-                GOVERNOR_STATE[model_in_backoff]="false"
-                log_info "Model rate limit backoff expired, resuming normal operation"
-            fi
-        fi
     fi
 }
 
@@ -10809,8 +10855,17 @@ start_rate_limit_governor() {
 # This is the RECOMMENDED approach as it updates GOVERNOR_STATE in the current process.
 # Updates rate limits and adjusts parallelism in one call.
 governor_update() {
-    update_github_rate_limit
-    check_model_rate_limit
+    local now
+    now=$(date +%s)
+    local last_update="${GOVERNOR_STATE[last_update]:-0}"
+    [[ "$last_update" =~ ^[0-9]+$ ]] || last_update=0
+
+    # Throttle expensive rate limit checks (default: every 30s).
+    if (( now - last_update >= 30 )); then
+        update_github_rate_limit
+        check_model_rate_limit
+        GOVERNOR_STATE[last_update]="$now"
+    fi
     adjust_parallelism
 }
 

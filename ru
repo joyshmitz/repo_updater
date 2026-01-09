@@ -8881,8 +8881,7 @@ detect_session_state_raw() {
     fi
 
     # Check for error patterns (high priority)
-    local error_pattern
-    if error_pattern=$(session_has_error "$session_id" 2>&1); then
+    if session_has_error "$session_id" 2>/dev/null; then
         echo "error"
         return 0
     fi
@@ -14094,9 +14093,22 @@ prepare_review_worktrees() {
         local is_pinned="false"
         [[ -n "$branch" ]] && is_pinned="true"
 
-        # If the pinned branch doesn't exist locally, try the remote-tracking ref for creation.
-        if [[ "$is_pinned" == "true" ]] && ! git -C "$local_path" rev-parse --verify "$base_ref" >/dev/null 2>&1; then
-            if git -C "$local_path" rev-parse --verify "origin/$base_ref" >/dev/null 2>&1; then
+        if [[ "$is_pinned" == "true" ]]; then
+            # Ensure a local branch exists for apply/merge later (push requires a local branch).
+            if ! git -C "$local_path" rev-parse --verify "$base_ref" >/dev/null 2>&1; then
+                if git -C "$local_path" rev-parse --verify "origin/$base_ref" >/dev/null 2>&1; then
+                    if ! git -C "$local_path" branch --track "$base_ref" "origin/$base_ref" >/dev/null 2>&1; then
+                        log_error "Failed to create local tracking branch $base_ref for $repo_id"
+                        ((failed++))
+                        continue
+                    fi
+                fi
+            fi
+
+            # Prefer the local branch if available; otherwise fall back to remote ref.
+            if git -C "$local_path" rev-parse --verify "$base_ref" >/dev/null 2>&1; then
+                base_ref_create="$base_ref"
+            elif git -C "$local_path" rev-parse --verify "origin/$base_ref" >/dev/null 2>&1; then
                 base_ref_create="origin/$base_ref"
             fi
         fi

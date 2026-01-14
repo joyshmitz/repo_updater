@@ -33,3 +33,6 @@ beads.right.meta.json
 !issues.jsonl
 !metadata.json
 !config.json
+
+# bv (beads viewer) lock file
+.bv.lock

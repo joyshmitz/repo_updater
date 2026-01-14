@@ -2191,7 +2191,7 @@ cmd_dep_update() {
     # Check dependencies
     if ! command -v ntm &>/dev/null; then
         log_error "dep-update requires ntm (Named Tmux Manager)"
-        log_error "Install from: https://github.com/anthropics/ntm"
+        log_error "Install from: https://github.com/Dicklesworthstone/ntm"
         return 3
     fi
 
@@ -2259,9 +2259,11 @@ cmd_dep_update() {
         repo_name=$(basename "$repo_path")
 
         # Detect package managers in this repo
-        local managers
-        managers=$(detect_package_managers "$repo_path")
-        if [[ -z "$managers" || "$managers" == "[]" ]]; then
+        local managers_json
+        managers_json=$(detect_package_managers "$repo_path")
+        local managers_array
+        managers_array=$(echo "$managers_json" | jq -r '.managers // []' 2>/dev/null)
+        if [[ -z "$managers_array" || "$managers_array" == "[]" ]]; then
             log_debug "No package managers found in $repo_name, skipping"
             ((skipped++))
             continue
@@ -2269,12 +2271,11 @@ cmd_dep_update() {
 
         # Filter by manager if specified
         if [[ -n "$manager_filter" ]]; then
-            if ! echo "$managers" | jq -e ".[] | select(. == \"$manager_filter\")" &>/dev/null; then
+            if ! echo "$managers_json" | jq -e ".managers[] | select(. == \"$manager_filter\")" &>/dev/null; then
                 log_debug "Repo $repo_name does not use manager '$manager_filter', skipping"
                 ((skipped++))
                 continue
             fi
-            managers="[\"$manager_filter\"]"
         fi
 
         # Check for outdated dependencies
@@ -2317,9 +2318,9 @@ cmd_dep_update() {
         if [[ "$dry_run" == "true" ]]; then
             echo "Would update $total_outdated deps in: $repo_path"
             echo "$outdated_json" | jq -r '
-                to_entries | .[] | select(.key != "total_outdated") |
-                "\(.key):" as $mgr |
-                .value.packages // [] | .[] |
+                .results // [] | .[] |
+                "\(.manager):" as $mgr |
+                .outdated // [] | .[] |
                 "  \($mgr) \(.name): \(.current) -> \(.latest)"
             ' 2>/dev/null || true
             continue
@@ -2379,7 +2380,8 @@ cmd_dep_update() {
             completed|idle)
                 log_success "Successfully updated dependencies in $repo_name"
                 ((updated++))
-                results+=("{\"repo\":\"$repo_path\",\"status\":\"success\",\"deps_updated\":$total_outdated}")
+                results+=("$(jq -n --arg repo "$repo_path" --argjson deps "$total_outdated" \
+                    '{repo: $repo, status: "success", deps_updated: $deps}')")
 
                 # Push if not --no-push
                 if [[ "$no_push" != "true" ]]; then
@@ -2392,14 +2394,15 @@ cmd_dep_update() {
             timeout)
                 log_warn "Timeout while updating $repo_name"
                 ((failed++))
-                results+=("{\"repo\":\"$repo_path\",\"status\":\"timeout\"}")
+                results+=("$(jq -n --arg repo "$repo_path" '{repo: $repo, status: "timeout"}')")
                 ;;
             error|*)
                 local error_msg
                 error_msg=$(echo "$session_result" | jq -r '.error // "Unknown error"')
                 log_error "Failed to update $repo_name: $error_msg"
                 ((failed++))
-                results+=("{\"repo\":\"$repo_path\",\"status\":\"error\",\"error\":\"$error_msg\"}")
+                results+=("$(jq -n --arg repo "$repo_path" --arg err "$error_msg" \
+                    '{repo: $repo, status: "error", error: $err}')")
                 ;;
         esac
     done
@@ -2440,26 +2443,18 @@ _filter_outdated_deps() {
     local include_pat="$2"
     local exclude_pat="$3"
 
-    # Use jq to filter packages
+    # Use jq to filter packages in the results array
     local filtered
     filtered=$(echo "$json" | jq --arg inc "$include_pat" --arg exc "$exclude_pat" '
-        . as $orig |
-        to_entries | map(
-            if .key == "total_outdated" then
-                empty
-            else
-                .value.packages = (
-                    .value.packages // [] | map(
-                        select(
-                            (if $inc != "" then (.name | test($inc)) else true end) and
-                            (if $exc != "" then (.name | test($exc) | not) else true end)
-                        )
-                    )
-                ) |
-                .value.total_outdated = (.value.packages | length)
-            end
-        ) | from_entries |
-        . + {total_outdated: ([.[] | .total_outdated // 0] | add)}
+        .results = (.results // [] | map(
+            .outdated = (.outdated // [] | map(
+                select(
+                    (if $inc != "" then (.name | test($inc)) else true end) and
+                    (if $exc != "" then (.name | test($exc) | not) else true end)
+                )
+            ))
+        )) |
+        .total_outdated = ([.results[].outdated | length] | add // 0)
     ' 2>/dev/null) || filtered="$json"
 
     echo "$filtered"
@@ -2481,18 +2476,10 @@ _filter_major_updates() {
             ($lat | split(".")[0] // "0") as $lat_major |
             $curr_major != $lat_major;
 
-        . as $orig |
-        to_entries | map(
-            if .key == "total_outdated" then
-                empty
-            else
-                .value.packages = (
-                    .value.packages // [] | map(select(is_major_update | not))
-                ) |
-                .value.total_outdated = (.value.packages | length)
-            end
-        ) | from_entries |
-        . + {total_outdated: ([.[] | .total_outdated // 0] | add)}
+        .results = (.results // [] | map(
+            .outdated = (.outdated // [] | map(select(is_major_update | not)))
+        )) |
+        .total_outdated = ([.results[].outdated | length] | add // 0)
     ' 2>/dev/null) || filtered="$json"
 
     echo "$filtered"
@@ -2510,9 +2497,9 @@ _fetch_changelogs_for_outdated() {
     # Extract package info and fetch changelogs
     local packages
     packages=$(echo "$json" | jq -r '
-        to_entries | .[] | select(.key != "total_outdated") |
-        .key as $mgr |
-        .value.packages // [] | .[] |
+        .results // [] | .[] |
+        .manager as $mgr |
+        .outdated // [] | .[] |
         "\($mgr)|\(.name)|\(.current)|\(.latest)"
     ' 2>/dev/null)
 

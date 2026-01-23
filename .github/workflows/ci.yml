@@ -85,7 +85,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           brew install bash
-          echo "$(brew --prefix)/bin" >> $GITHUB_PATH
+          echo "$(brew --prefix bash)/bin" >> $GITHUB_PATH
 
       - name: Show bash version
         run: bash --version | head -1
@@ -138,7 +138,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           brew install bash
-          echo "$(brew --prefix)/bin" >> $GITHUB_PATH
+          echo "$(brew --prefix bash)/bin" >> $GITHUB_PATH
 
       - name: Run installer
         run: |
@@ -156,7 +156,7 @@ jobs:
         run: |
           # Use brew bash on macOS since ru requires bash >= 4.3
           if [[ "$(uname)" == "Darwin" ]]; then
-            "$(brew --prefix)/bin/bash" /tmp/ru-test/ru --version
+            "$(brew --prefix bash)/bin/bash" /tmp/ru-test/ru --version
           else
             /tmp/ru-test/ru --version
           fi
@@ -164,7 +164,7 @@ jobs:
       - name: Check help output
         run: |
           if [[ "$(uname)" == "Darwin" ]]; then
-            "$(brew --prefix)/bin/bash" /tmp/ru-test/ru --help | head -20
+            "$(brew --prefix bash)/bin/bash" /tmp/ru-test/ru --help | head -20
           else
             /tmp/ru-test/ru --help | head -20
           fi

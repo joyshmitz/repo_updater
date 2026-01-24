@@ -213,6 +213,8 @@ UPDATE_STRATEGY=""
 AUTOSTASH=""
 PARALLEL=""
 JSON_OUTPUT="false"
+OUTPUT_FORMAT=""  # text|json|toon (resolved after parse_args; env: RU_OUTPUT_FORMAT/TOON_DEFAULT_FORMAT)
+SHOW_STATS="false"
 QUIET="false"
 VERBOSE="false"
 DEBUG="false"
@@ -241,6 +243,10 @@ GUM_AVAILABLE="false"
 # Network timeout configuration (abort if transfer rate drops below threshold)
 GIT_TIMEOUT="${GIT_TIMEOUT:-30}"  # Seconds before aborting slow operations
 GIT_LOW_SPEED_LIMIT="${GIT_LOW_SPEED_LIMIT:-1000}"  # Bytes/second threshold
+
+# Optional TOON helpers (tru-backed). If missing, TOON output falls back to JSON.
+# shellcheck disable=SC1090
+source "${TOON_SH_PATH:-$HOME/.local/lib/toon.sh}" 2>/dev/null || true
 
 #==============================================================================
 # SECTION 4: CORE UTILITIES
@@ -4896,6 +4902,80 @@ redact_sensitive() {
     echo "$msg"
 }
 
+# Resolve structured output format.
+# Precedence: CLI (--format/--json) > RU_OUTPUT_FORMAT > TOON_DEFAULT_FORMAT > text
+resolve_output_format() {
+    local fmt="${OUTPUT_FORMAT:-}"
+
+    if [[ -z "$fmt" ]]; then
+        if [[ -n "${RU_OUTPUT_FORMAT:-}" ]]; then
+            fmt="$RU_OUTPUT_FORMAT"
+        elif [[ -n "${TOON_DEFAULT_FORMAT:-}" ]]; then
+            fmt="$TOON_DEFAULT_FORMAT"
+        else
+            fmt="text"
+        fi
+    fi
+
+    fmt="${fmt,,}"
+
+    case "$fmt" in
+        ""|text)
+            OUTPUT_FORMAT="text"
+            JSON_OUTPUT="false"
+            ;;
+        json)
+            OUTPUT_FORMAT="json"
+            JSON_OUTPUT="true"
+            ;;
+        toon)
+            OUTPUT_FORMAT="toon"
+            JSON_OUTPUT="true"
+            ;;
+        *)
+            log_error "Invalid --format: $fmt (expected text|json|toon)"
+            exit 4
+            ;;
+    esac
+
+    if [[ "$SHOW_STATS" == "true" ]]; then
+        export TOON_STATS=1
+    fi
+}
+
+emit_structured() {
+    # Args:
+    #   $1: JSON string
+    local json_str="${1:-}"
+
+    if [[ "$OUTPUT_FORMAT" != "toon" ]]; then
+        printf '%s\n' "$json_str"
+        return 0
+    fi
+
+    if ! declare -f toon_encode >/dev/null 2>&1; then
+        log_warn "toon.sh not available; falling back to JSON"
+        printf '%s\n' "$json_str"
+        return 0
+    fi
+
+    if ! toon_available >/dev/null 2>&1; then
+        log_warn "tru not available; falling back to JSON"
+        printf '%s\n' "$json_str"
+        return 0
+    fi
+
+    local toon_out
+    if toon_out="$(printf '%s' "$json_str" | toon_encode)"; then
+        printf '%s\n' "$toon_out"
+        return 0
+    fi
+
+    log_warn "TOON encode failed; falling back to JSON"
+    printf '%s\n' "$json_str"
+    return 0
+}
+
 # Output JSON to stdout (only in --json mode)
 output_json() {
     if [[ "$JSON_OUTPUT" == "true" ]]; then
@@ -5387,7 +5467,9 @@ COMMANDS:
 GLOBAL OPTIONS:
     -h, --help           Show this help message
     -v, --version        Show version
-    --json               Output JSON to stdout
+    --format FMT         Output format: text|json|toon (env: RU_OUTPUT_FORMAT, TOON_DEFAULT_FORMAT)
+    --json               Output JSON to stdout (alias for --format json)
+    --stats              Show JSON vs TOON token stats on stderr (or set TOON_STATS=1)
     -q, --quiet          Minimal output (errors only)
     --verbose            Detailed output
     --non-interactive    Never prompt (for CI/automation)
@@ -7265,12 +7347,25 @@ parse_args() {
                 ;;
             --json)
                 JSON_OUTPUT="true"
+                OUTPUT_FORMAT="json"
                 # Also pass to subcommands that handle --json internally
                 if [[ "$COMMAND" == "agent-sweep" ]]; then
                     ARGS+=("$1")
                 elif [[ -z "$COMMAND" ]]; then
                     pending_global_args+=("$1")
                 fi
+                shift
+                ;;
+            --format)
+                if [[ $# -lt 2 ]]; then
+                    log_error "--format requires an argument: text|json|toon"
+                    exit 4
+                fi
+                OUTPUT_FORMAT="$2"
+                shift 2
+                ;;
+            --stats)
+                SHOW_STATS="true"
                 shift
                 ;;
             -q|--quiet)
@@ -8258,7 +8353,9 @@ cmd_sync() {
 
     # Output JSON report if --json flag is set
     if [[ "$JSON_OUTPUT" == "true" ]]; then
-        generate_json_report "$CLONED" "$UPDATED" "$CURRENT" "$SKIPPED" "$CONFLICTS" "$FAILED" "$duration"
+        local json_report
+        json_report="$(generate_json_report "$CLONED" "$UPDATED" "$CURRENT" "$SKIPPED" "$CONFLICTS" "$FAILED" "$duration")"
+        emit_structured "$json_report"
     fi
 
     # Compute and use appropriate exit code
@@ -8289,40 +8386,44 @@ cmd_status() {
     fi
 
     if [[ "$JSON_OUTPUT" == "true" ]]; then
-        # JSON output mode
-        echo "["
-        local first="true"
-        for repo_spec in "${repos[@]}"; do
-            local url branch custom_name local_path repo_id
-            if ! resolve_repo_spec "$repo_spec" "$PROJECTS_DIR" "$LAYOUT" url branch custom_name local_path repo_id; then
-                continue
-            fi
-            local status="missing" ahead=0 behind=0 dirty="false" mismatch="false" branch_name=""
-            if [[ -d "$local_path" ]] && is_git_repo "$local_path"; then
-                local status_info
-                status_info=$(get_repo_status "$local_path" "$FETCH_REMOTES")
-                status=$(echo "$status_info" | sed 's/.*STATUS=\([^ ]*\).*/\1/')
-                ahead=$(echo "$status_info" | sed 's/.*AHEAD=\([^ ]*\).*/\1/')
-                behind=$(echo "$status_info" | sed 's/.*BEHIND=\([^ ]*\).*/\1/')
-                dirty=$(echo "$status_info" | sed 's/.*DIRTY=\([^ ]*\).*/\1/')
-                branch_name=$(echo "$status_info" | sed 's/.*BRANCH=\([^ ]*\).*/\1/')
-                # Check for remote URL mismatch
-                if check_remote_mismatch "$local_path" "$url"; then
-                    mismatch="true"
+        local status_json
+        status_json="$(
+            echo "["
+            local first="true"
+            for repo_spec in "${repos[@]}"; do
+                local url branch custom_name local_path repo_id
+                if ! resolve_repo_spec "$repo_spec" "$PROJECTS_DIR" "$LAYOUT" url branch custom_name local_path repo_id; then
+                    continue
                 fi
-            elif [[ -d "$local_path" ]]; then
-                status="not_git"
-            fi
-            [[ "$first" == "true" ]] || echo ","
-            first="false"
-            # Escape path for JSON safety (may contain special characters)
-            local safe_path safe_branch
-            safe_path=$(json_escape "$local_path")
-            safe_branch=$(json_escape "$branch_name")
-            printf '{"repo":"%s","path":"%s","status":"%s","branch":"%s","ahead":%d,"behind":%d,"dirty":%s,"mismatch":%s}' \
-                "$repo_id" "$safe_path" "$status" "$safe_branch" "$ahead" "$behind" "$dirty" "$mismatch"
-        done
-        echo "]"
+                local status="missing" ahead=0 behind=0 dirty="false" mismatch="false" branch_name=""
+                if [[ -d "$local_path" ]] && is_git_repo "$local_path"; then
+                    local status_info
+                    status_info=$(get_repo_status "$local_path" "$FETCH_REMOTES")
+                    status=$(echo "$status_info" | sed 's/.*STATUS=\([^ ]*\).*/\1/')
+                    ahead=$(echo "$status_info" | sed 's/.*AHEAD=\([^ ]*\).*/\1/')
+                    behind=$(echo "$status_info" | sed 's/.*BEHIND=\([^ ]*\).*/\1/')
+                    dirty=$(echo "$status_info" | sed 's/.*DIRTY=\([^ ]*\).*/\1/')
+                    branch_name=$(echo "$status_info" | sed 's/.*BRANCH=\([^ ]*\).*/\1/')
+                    # Check for remote URL mismatch
+                    if check_remote_mismatch "$local_path" "$url"; then
+                        mismatch="true"
+                    fi
+                elif [[ -d "$local_path" ]]; then
+                    status="not_git"
+                fi
+                [[ "$first" == "true" ]] || echo ","
+                first="false"
+                # Escape path for JSON safety (may contain special characters)
+                local safe_path safe_branch
+                safe_path=$(json_escape "$local_path")
+                safe_branch=$(json_escape "$branch_name")
+                printf '{"repo":"%s","path":"%s","status":"%s","branch":"%s","ahead":%d,"behind":%d,"dirty":%s,"mismatch":%s}' \
+                    "$repo_id" "$safe_path" "$status" "$safe_branch" "$ahead" "$behind" "$dirty" "$mismatch"
+            done
+            echo "]"
+        )"
+
+        emit_structured "$status_json"
     else
         # Human-readable output
         log_info "Repository Status ($total repos)"
@@ -8979,6 +9080,32 @@ cmd_list() {
         log_info "No repositories configured."
         log_info "Add repos with: ru add owner/repo"
         exit 0
+    fi
+
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        local list_json
+        list_json="$(
+            echo "["
+            local first="true"
+            for repo_spec in "${repos[@]}"; do
+                local url branch custom_name local_path repo_id
+                if ! resolve_repo_spec "$repo_spec" "$PROJECTS_DIR" "$LAYOUT" url branch custom_name local_path repo_id; then
+                    continue
+                fi
+
+                [[ "$first" == "true" ]] || echo ","
+                first="false"
+
+                local safe_url safe_path
+                safe_url=$(json_escape "$url")
+                safe_path=$(json_escape "$local_path")
+                printf '{"repo":"%s","url":"%s","path":"%s"}' "$repo_id" "$safe_url" "$safe_path"
+            done
+            echo "]"
+        )"
+
+        emit_structured "$list_json"
+        return 0
     fi
 
     log_info "Configured repositories (${#repos[@]}):"
@@ -20758,6 +20885,7 @@ main() {
     parse_args "$@"
     check_gum
     resolve_config
+    resolve_output_format
 
     # Create results file for this run
     RESULTS_FILE=$(mktemp_file) || { log_error "Failed to create temp file"; exit 3; }

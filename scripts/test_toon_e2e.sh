@@ -61,12 +61,19 @@ fi
 
 log_info "Test 2.2: ru --format toon status"
 if toon_output=$(ru --format toon status 2>/dev/null); then
-    if [[ -n "$toon_output" && "${toon_output:0:1}" != "{" && "${toon_output:0:1}" != "[" ]]; then
+    # TOON tabular format for arrays starts with [N]{header}:
+    # e.g., [112]{repo,path,status,...}:
+    if [[ -n "$toon_output" && "$toon_output" =~ ^\[([0-9]+)\]\{ ]]; then
+        record_pass "--format toon produces TOON tabular format"
+        toon_bytes=$(echo -n "$toon_output" | wc -c)
+        log_info "  TOON output: $toon_bytes bytes"
+    elif [[ -n "$toon_output" && "${toon_output:0:1}" != "{" ]]; then
+        # Non-tabular TOON (key: value format)
         record_pass "--format toon produces TOON"
         toon_bytes=$(echo -n "$toon_output" | wc -c)
         log_info "  TOON output: $toon_bytes bytes"
     else
-        # TOON might fall back to JSON
+        # Might be JSON fallback
         if echo "$toon_output" | jq . >/dev/null 2>&1; then
             record_skip "--format toon fell back to JSON"
         else
@@ -82,7 +89,8 @@ log ""
 log "--- Phase 3: Round-trip Verification ---"
 
 if [[ -n "${json_output:-}" && -n "${toon_output:-}" ]]; then
-    if [[ "${toon_output:0:1}" != "{" && "${toon_output:0:1}" != "[" ]]; then
+    # Handle both tabular format [N]{...} and key: value format
+    if [[ "$toon_output" =~ ^\[([0-9]+)\]\{ ]] || [[ "${toon_output:0:1}" != "{" ]]; then
         if decoded=$(echo "$toon_output" | tru --decode 2>/dev/null); then
             # TOON tabular format may have different structure
             # Just verify it decodes to valid JSON

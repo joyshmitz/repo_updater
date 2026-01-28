@@ -312,7 +312,7 @@ FORK_SYNC_BRANCHES=main
 FORK_SYNC_STRATEGY=ff-only
 
 # Block direct commits to main branch in forks
-# When true, ru fork-protect installs a pre-commit hook
+# [NOT YET IMPLEMENTED - reserved for future use]
 # Values: true | false
 # Default: false
 FORK_PROTECT_MAIN=false

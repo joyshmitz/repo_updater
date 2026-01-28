@@ -192,7 +192,7 @@ ru fork-sync [options] [repo...]
 | `--no-push` | Don't push (default) |
 | `--rescue` | Save local commits to rescue branch before reset (default) |
 | `--no-rescue` | Don't save local commits (dangerous!) |
-| `--dry-run` | Show what would be done without making changes |
+| `--dry-run` | Preview mode: no writes, no fetch, no mutations |
 | `--force` | Don't prompt for confirmation |
 
 **Examples:**
@@ -246,7 +246,7 @@ ru fork-clean [options] [repo...]
 | `--rescue` | Save polluted commits to rescue branch (default) |
 | `--no-rescue` | Discard polluted commits (dangerous!) |
 | `--push` | Push cleaned main to origin |
-| `--dry-run` | Show what would be done without making changes |
+| `--dry-run` | Preview mode: no writes, no fetch, no mutations |
 | `--force` | Don't prompt for confirmation |
 
 **Examples:**
@@ -289,7 +289,13 @@ Add to `~/.config/ru/config`:
 # FORK MANAGEMENT CONFIGURATION
 #------------------------------------------------------------------------------
 
-# Auto-detect and configure upstream remote when syncing
+# Auto-detect forks and configure upstream remote
+# When true:
+#   - Enables GitHub API calls to detect if repo is a fork
+#   - Auto-adds upstream remote when syncing forks
+# When false (default):
+#   - No GitHub API calls (offline-friendly)
+#   - Only repos with existing upstream remote are treated as forks
 # Values: true | false
 # Default: false
 FORK_AUTO_UPSTREAM=true

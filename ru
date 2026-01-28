@@ -181,6 +181,155 @@ DEFAULT_UPDATE_STRATEGY="ff-only"  # ff-only | rebase | merge
 DEFAULT_AUTOSTASH="false"
 DEFAULT_PARALLEL="4"
 
+#------------------------------------------------------------------------------
+# FORK MANAGEMENT DEFAULTS
+#------------------------------------------------------------------------------
+# These settings control how ru handles repositories that are forks of other
+# repositories (common pattern: your GitHub fork of someone else's project).
+#
+# Fork workflow overview:
+#   origin   = your fork (e.g., github.com/joyshmitz/repo)
+#   upstream = original repo (e.g., github.com/original-author/repo)
+#
+# The goal is to keep your fork's main branch in sync with upstream while
+# preserving your feature branches for contributions.
+#------------------------------------------------------------------------------
+
+# FORK_AUTO_UPSTREAM: Automatically detect and configure upstream remote
+# When enabled, ru will use the GitHub API (via gh) to detect if a repo is a
+# fork and automatically add the parent repository as the 'upstream' remote.
+#
+# Values: true | false
+# Default: false (explicit opt-in to avoid unexpected network calls)
+#
+# Example:
+#   You clone your fork: github.com/joyshmitz/awesome-project
+#   ru detects it's a fork of: github.com/original-author/awesome-project
+#   ru automatically runs: git remote add upstream https://github.com/original-author/awesome-project.git
+DEFAULT_FORK_AUTO_UPSTREAM="false"
+
+# FORK_SYNC_BRANCHES: Which branches to synchronize from upstream
+# Comma-separated list of branch names to keep in sync with upstream.
+# Supports exact names and patterns (future: glob patterns like 'release/*').
+#
+# Values: comma-separated branch names
+# Default: "main" (only sync the main branch)
+#
+# Examples:
+#   FORK_SYNC_BRANCHES=main
+#     → Only sync 'main' branch from upstream (safest, recommended)
+#
+#   FORK_SYNC_BRANCHES=main,develop
+#     → Sync both 'main' and 'develop' branches
+#     → Useful for projects with git-flow branching model
+#
+#   FORK_SYNC_BRANCHES=main,release/v1,release/v2
+#     → Sync main plus specific release branches
+#     → Useful when you need to backport fixes to older versions
+#
+#   FORK_SYNC_BRANCHES=main,docs/latest,feature/shared-lib
+#     → Sync main plus documentation branch and a shared feature branch
+#     → Useful for collaborative documentation or shared development
+#
+# WARNING: Do NOT include your personal feature branches here!
+#          Only include branches that should mirror upstream exactly.
+DEFAULT_FORK_SYNC_BRANCHES="main"
+
+# FORK_SYNC_STRATEGY: How to synchronize branches with upstream
+# Determines how local branch is updated when upstream has new commits.
+#
+# Values:
+#   reset    - Hard reset to upstream (git reset --hard upstream/branch)
+#              DANGER: Discards ALL local commits on this branch!
+#              Best for: branches that should be exact mirrors of upstream
+#
+#   ff-only  - Fast-forward only (git merge --ff-only upstream/branch)
+#              SAFE: Fails if local has commits not in upstream
+#              Best for: detecting accidental commits to protected branches
+#
+#   rebase   - Rebase local commits on top of upstream (git rebase upstream/branch)
+#              CAREFUL: Rewrites history, may cause conflicts
+#              Best for: keeping local changes on top of latest upstream
+#
+#   merge    - Merge upstream into local (git merge upstream/branch)
+#              SAFE: Preserves both histories, creates merge commit
+#              Best for: when you intentionally have local commits to keep
+#
+# Default: "ff-only" (safe, will alert you if main was polluted)
+#
+# Recommended combinations:
+#   For clean forks (no local changes):     reset or ff-only
+#   For forks with intentional changes:     merge or rebase
+#   For detecting pollution:                ff-only (will fail = alert)
+DEFAULT_FORK_SYNC_STRATEGY="ff-only"
+
+# FORK_PROTECT_MAIN: Block direct commits to main branch in forks
+# When enabled, ru can install a pre-commit hook that prevents accidental
+# commits directly to main/master in repositories detected as forks.
+#
+# Values: true | false
+# Default: false (opt-in, doesn't modify repo hooks without consent)
+#
+# How it works:
+#   1. Detects if current repo is a fork (has 'upstream' remote)
+#   2. If committing to main/master, hook shows error:
+#      "ERROR: Direct commits to main are blocked in forks."
+#      "Create a feature branch: git checkout -b feature/your-change"
+#   3. Commit is rejected, user must create a branch first
+#
+# Use cases:
+#   - Prevent agents from accidentally committing tests/debug to main
+#   - Enforce branch-based workflow for contributions
+#   - Keep main clean for easy upstream synchronization
+DEFAULT_FORK_PROTECT_MAIN="false"
+
+# FORK_RESCUE_POLLUTED: Save polluted commits before cleanup
+# When ru detects "pollution" (local commits on main that aren't in upstream)
+# and is asked to clean up, this setting controls whether those commits are
+# preserved in a rescue branch before being removed.
+#
+# Values: true | false
+# Default: true (safe, never lose work without explicit consent)
+#
+# Rescue branch naming: rescue/YYYY-MM-DD-HHMMSS
+# Example: rescue/2025-01-28-143052
+#
+# Workflow when pollution is detected:
+#   1. ru finds: main has 3 commits not in upstream/main
+#   2. If FORK_RESCUE_POLLUTED=true:
+#      - Creates: git branch rescue/2025-01-28-143052 main
+#      - Logs: "Saved 3 local commits to rescue/2025-01-28-143052"
+#   3. Resets main: git reset --hard upstream/main
+#   4. User can later cherry-pick or review rescued commits
+#
+# Typical pollution causes:
+#   - AI agent forgot to create feature branch before making changes
+#   - Developer accidentally committed to main instead of feature branch
+#   - Merged PR locally but forgot to reset main
+DEFAULT_FORK_RESCUE_POLLUTED="true"
+
+# FORK_PUSH_AFTER_SYNC: Push to origin after syncing with upstream
+# After successfully syncing a branch from upstream, this controls whether
+# ru automatically pushes the updated branch to your fork (origin).
+#
+# Values: true | false
+# Default: false (explicit opt-in, some users may want to review first)
+#
+# Workflow with FORK_PUSH_AFTER_SYNC=true:
+#   1. ru fork-sync detects: main is 5 commits behind upstream/main
+#   2. ru syncs: git fetch upstream && git reset --hard upstream/main
+#   3. ru pushes: git push origin main --force-with-lease
+#   4. Your GitHub fork's main now matches upstream
+#
+# Why --force-with-lease instead of --force:
+#   Safer! Fails if someone else pushed to your fork in the meantime.
+#   Prevents accidentally overwriting collaborator's work.
+#
+# When to use:
+#   - Solo developer on personal fork: true (convenient automation)
+#   - Team fork or public fork: false (review changes first)
+DEFAULT_FORK_PUSH_AFTER_SYNC="false"
+
 #==============================================================================
 # SECTION 2: ANSI COLOR DEFINITIONS
 #==============================================================================
@@ -243,6 +392,19 @@ GUM_AVAILABLE="false"
 # Network timeout configuration (abort if transfer rate drops below threshold)
 GIT_TIMEOUT="${GIT_TIMEOUT:-30}"  # Seconds before aborting slow operations
 GIT_LOW_SPEED_LIMIT="${GIT_LOW_SPEED_LIMIT:-1000}"  # Bytes/second threshold
+
+# Fork management runtime state
+# These are resolved from config during resolve_config() or set via CLI
+FORK_AUTO_UPSTREAM=""      # Auto-detect and add upstream remote
+FORK_SYNC_BRANCHES=""      # Branches to sync (comma-separated)
+FORK_SYNC_STRATEGY=""      # reset | ff-only | rebase | merge
+FORK_PROTECT_MAIN=""       # Install pre-commit hook to block main commits
+FORK_RESCUE_POLLUTED=""    # Save polluted commits to rescue branch
+FORK_PUSH_AFTER_SYNC=""    # Push to origin after sync
+
+# Fork detection cache (associative array: repo_path -> "true"|"false"|"unknown")
+# Caches GitHub API results to avoid repeated network calls within a session
+declare -A FORK_CACHE
 
 # Optional TOON helpers (tru-backed). If missing, TOON output falls back to JSON.
 # shellcheck disable=SC1090
@@ -5768,6 +5930,14 @@ resolve_config() {
     UPDATE_STRATEGY=$(get_config_value "UPDATE_STRATEGY" "$DEFAULT_UPDATE_STRATEGY" "$UPDATE_STRATEGY")
     AUTOSTASH=$(get_config_value "AUTOSTASH" "$DEFAULT_AUTOSTASH" "$AUTOSTASH")
     PARALLEL=$(get_config_value "PARALLEL" "$DEFAULT_PARALLEL" "$PARALLEL")
+
+    # Fork management configuration
+    FORK_AUTO_UPSTREAM=$(get_config_value "FORK_AUTO_UPSTREAM" "$DEFAULT_FORK_AUTO_UPSTREAM" "$FORK_AUTO_UPSTREAM")
+    FORK_SYNC_BRANCHES=$(get_config_value "FORK_SYNC_BRANCHES" "$DEFAULT_FORK_SYNC_BRANCHES" "$FORK_SYNC_BRANCHES")
+    FORK_SYNC_STRATEGY=$(get_config_value "FORK_SYNC_STRATEGY" "$DEFAULT_FORK_SYNC_STRATEGY" "$FORK_SYNC_STRATEGY")
+    FORK_PROTECT_MAIN=$(get_config_value "FORK_PROTECT_MAIN" "$DEFAULT_FORK_PROTECT_MAIN" "$FORK_PROTECT_MAIN")
+    FORK_RESCUE_POLLUTED=$(get_config_value "FORK_RESCUE_POLLUTED" "$DEFAULT_FORK_RESCUE_POLLUTED" "$FORK_RESCUE_POLLUTED")
+    FORK_PUSH_AFTER_SYNC=$(get_config_value "FORK_PUSH_AFTER_SYNC" "$DEFAULT_FORK_PUSH_AFTER_SYNC" "$FORK_PUSH_AFTER_SYNC")
 }
 
 # Set a configuration value in the config file
@@ -7299,6 +7469,511 @@ run_parallel_sync() {
 }
 
 #==============================================================================
+# SECTION 10.7: FORK MANAGEMENT
+#==============================================================================
+# Functions for detecting, configuring, and synchronizing forked repositories.
+#
+# Terminology:
+#   origin   = your fork (the remote you cloned from, usually your GitHub account)
+#   upstream = the original repository that your fork was created from
+#   fork     = a repository that was created by forking another repository
+#   pollution = commits on main/master that exist locally but not in upstream
+#
+# Typical fork workflow:
+#   1. Fork original repo on GitHub (creates your copy)
+#   2. Clone your fork locally (origin points to your fork)
+#   3. Add upstream remote (points to original repo)
+#   4. Create feature branches for your work
+#   5. Keep main in sync with upstream/main
+#   6. Submit PRs from feature branches to upstream
+#==============================================================================
+
+#------------------------------------------------------------------------------
+# is_fork - Detect if a repository is a fork of another repository
+#------------------------------------------------------------------------------
+# Uses GitHub API (via gh) to determine if the repository is a fork.
+# Results are cached in FORK_CACHE to avoid repeated API calls.
+#
+# Arguments:
+#   $1 - repo_path: Path to the local repository
+#
+# Returns:
+#   0 (true)  - Repository IS a fork
+#   1 (false) - Repository is NOT a fork (or detection failed)
+#
+# Side effects:
+#   - Populates FORK_CACHE[repo_path] with "true", "false", or "error"
+#   - May make network request to GitHub API (cached for session)
+#
+# Examples:
+#   if is_fork "/data/projects/my-fork"; then
+#       echo "This is a fork"
+#   fi
+#
+# Detection methods (in order of preference):
+#   1. Check cache (FORK_CACHE) - instant, no network
+#   2. Check if 'upstream' remote exists - fast, local only
+#   3. Query GitHub API via gh - authoritative but requires network
+#
+# Why multiple methods?
+#   - Cache: Performance optimization for repeated checks
+#   - upstream remote: Works offline, respects manual configuration
+#   - GitHub API: Authoritative source, can auto-configure upstream
+#------------------------------------------------------------------------------
+is_fork() {
+    local repo_path="$1"
+
+    # Validate input
+    if [[ -z "$repo_path" ]] || ! is_git_repo "$repo_path"; then
+        return 1
+    fi
+
+    # Check cache first (avoid repeated API calls)
+    if [[ -n "${FORK_CACHE[$repo_path]:-}" ]]; then
+        [[ "${FORK_CACHE[$repo_path]}" == "true" ]]
+        return $?
+    fi
+
+    # Method 1: Check if 'upstream' remote already exists
+    # This respects manual configuration and works offline
+    if git -C "$repo_path" remote get-url upstream &>/dev/null; then
+        FORK_CACHE[$repo_path]="true"
+        log_verbose "Fork detected (upstream remote exists): $repo_path"
+        return 0
+    fi
+
+    # Method 2: Query GitHub API via gh CLI
+    # Extract owner/repo from origin URL for API query
+    local origin_url owner repo
+    origin_url=$(get_remote_url "$repo_path" "origin") || {
+        FORK_CACHE[$repo_path]="error"
+        return 1
+    }
+
+    # Parse owner/repo from URL (handles HTTPS and SSH formats)
+    # Examples:
+    #   https://github.com/joyshmitz/repo.git -> joyshmitz/repo
+    #   git@github.com:joyshmitz/repo.git     -> joyshmitz/repo
+    if [[ "$origin_url" =~ github\.com[:/]([^/]+)/([^/.]+)(\.git)?$ ]]; then
+        owner="${BASH_REMATCH[1]}"
+        repo="${BASH_REMATCH[2]}"
+    else
+        # Non-GitHub URL or unparseable - assume not a fork
+        log_verbose "Cannot parse GitHub owner/repo from: $origin_url"
+        FORK_CACHE[$repo_path]="false"
+        return 1
+    fi
+
+    # Check if gh CLI is available
+    if ! command -v gh &>/dev/null; then
+        log_verbose "gh CLI not available for fork detection"
+        FORK_CACHE[$repo_path]="unknown"
+        return 1
+    fi
+
+    # Query GitHub API: GET /repos/{owner}/{repo}
+    # Response includes: { "fork": true/false, "parent": { "clone_url": "..." } }
+    local api_response is_fork_api
+    if api_response=$(gh api "repos/${owner}/${repo}" --jq '.fork' 2>/dev/null); then
+        if [[ "$api_response" == "true" ]]; then
+            FORK_CACHE[$repo_path]="true"
+            log_verbose "Fork detected (GitHub API): $repo_path"
+            return 0
+        else
+            FORK_CACHE[$repo_path]="false"
+            log_verbose "Not a fork (GitHub API): $repo_path"
+            return 1
+        fi
+    else
+        # API call failed (auth issues, rate limit, network error)
+        log_verbose "GitHub API call failed for: ${owner}/${repo}"
+        FORK_CACHE[$repo_path]="error"
+        return 1
+    fi
+}
+
+#------------------------------------------------------------------------------
+# get_fork_parent_url - Get the URL of the parent repository (upstream)
+#------------------------------------------------------------------------------
+# Queries GitHub API to get the clone URL of the original repository
+# that this fork was created from.
+#
+# Arguments:
+#   $1 - repo_path: Path to the local repository
+#
+# Output (stdout):
+#   The HTTPS clone URL of the parent repository
+#   Empty string if not a fork or detection failed
+#
+# Examples:
+#   parent_url=$(get_fork_parent_url "/data/projects/my-fork")
+#   # Returns: https://github.com/original-author/repo.git
+#
+# Use cases:
+#   - Auto-configuring upstream remote
+#   - Displaying fork relationship information
+#   - Validating upstream configuration
+#------------------------------------------------------------------------------
+get_fork_parent_url() {
+    local repo_path="$1"
+
+    # Get origin URL and parse owner/repo
+    local origin_url owner repo
+    origin_url=$(get_remote_url "$repo_path" "origin") || return 1
+
+    if [[ "$origin_url" =~ github\.com[:/]([^/]+)/([^/.]+)(\.git)?$ ]]; then
+        owner="${BASH_REMATCH[1]}"
+        repo="${BASH_REMATCH[2]}"
+    else
+        return 1
+    fi
+
+    # Check gh availability
+    if ! command -v gh &>/dev/null; then
+        return 1
+    fi
+
+    # Query GitHub API for parent repository URL
+    # .parent.clone_url contains the HTTPS URL of the original repo
+    local parent_url
+    parent_url=$(gh api "repos/${owner}/${repo}" --jq '.parent.clone_url // empty' 2>/dev/null)
+
+    if [[ -n "$parent_url" ]]; then
+        echo "$parent_url"
+        return 0
+    fi
+
+    return 1
+}
+
+#------------------------------------------------------------------------------
+# ensure_upstream - Ensure the 'upstream' remote is configured
+#------------------------------------------------------------------------------
+# For forked repositories, ensures that the 'upstream' remote points to
+# the original (parent) repository. Will auto-detect and configure if needed.
+#
+# Arguments:
+#   $1 - repo_path: Path to the local repository
+#
+# Returns:
+#   0 - upstream is configured (existed or was added)
+#   1 - Failed to configure (not a fork, API error, etc.)
+#
+# Side effects:
+#   - May add 'upstream' remote via: git remote add upstream <url>
+#   - Logs info/verbose messages about actions taken
+#
+# Behavior:
+#   1. If upstream already exists → validate and return success
+#   2. If not a fork → return failure (nothing to configure)
+#   3. If fork detected → query parent URL and add upstream remote
+#
+# Examples:
+#   # Auto-configure upstream for a fork
+#   if ensure_upstream "/data/projects/my-fork"; then
+#       git -C "/data/projects/my-fork" fetch upstream
+#   fi
+#
+#   # Typical output when upstream is added:
+#   # [INFO] Added upstream remote: https://github.com/original/repo.git
+#------------------------------------------------------------------------------
+ensure_upstream() {
+    local repo_path="$1"
+
+    # Validate input
+    if [[ -z "$repo_path" ]] || ! is_git_repo "$repo_path"; then
+        log_verbose "ensure_upstream: Invalid repo path: $repo_path"
+        return 1
+    fi
+
+    # Check if upstream already exists
+    local existing_upstream
+    if existing_upstream=$(git -C "$repo_path" remote get-url upstream 2>/dev/null); then
+        log_verbose "Upstream already configured: $existing_upstream"
+        return 0
+    fi
+
+    # Check if this is a fork (via API)
+    if ! is_fork "$repo_path"; then
+        log_verbose "Not a fork, skipping upstream configuration: $repo_path"
+        return 1
+    fi
+
+    # Get parent repository URL
+    local parent_url
+    parent_url=$(get_fork_parent_url "$repo_path")
+    if [[ -z "$parent_url" ]]; then
+        log_warn "Could not determine parent repository URL for: $repo_path"
+        return 1
+    fi
+
+    # Add upstream remote
+    if git -C "$repo_path" remote add upstream "$parent_url" 2>/dev/null; then
+        log_info "Added upstream remote: $parent_url"
+
+        # Fetch upstream refs immediately so they're available for status checks
+        log_verbose "Fetching upstream refs..."
+        git -C "$repo_path" fetch upstream --quiet 2>/dev/null || true
+
+        return 0
+    else
+        log_error "Failed to add upstream remote: $parent_url"
+        return 1
+    fi
+}
+
+#------------------------------------------------------------------------------
+# get_fork_status - Get synchronization status relative to upstream
+#------------------------------------------------------------------------------
+# Compares local branch state against both origin and upstream remotes.
+# Essential for detecting pollution and determining sync needs.
+#
+# Arguments:
+#   $1 - repo_path: Path to the local repository
+#   $2 - branch: Branch name to check (default: "main")
+#   $3 - do_fetch: Whether to fetch remotes first (default: "false")
+#
+# Output (stdout):
+#   Space-separated key=value pairs:
+#   FORK_STATUS=<status> AHEAD_ORIGIN=<n> BEHIND_ORIGIN=<n>
+#   AHEAD_UPSTREAM=<n> BEHIND_UPSTREAM=<n> POLLUTED=<bool>
+#
+# Status values:
+#   current       - Local branch matches both origin and upstream
+#   ahead_origin  - Local has commits not pushed to origin (your fork)
+#   behind_origin - Origin has commits not pulled locally
+#   ahead_upstream- Local has commits not in upstream (pollution if on main!)
+#   behind_upstream - Upstream has updates you haven't synced
+#   diverged      - Complex state, both ahead and behind somewhere
+#   no_upstream   - Upstream remote not configured
+#   not_fork      - Repository is not a fork
+#   error         - Could not determine status
+#
+# POLLUTED flag:
+#   true  - Local main has commits that don't exist in upstream/main
+#           This indicates accidental commits to main (pollution)
+#   false - Local main is clean relative to upstream
+#
+# Examples:
+#   # Check if main branch is polluted
+#   status=$(get_fork_status "/data/projects/my-fork" "main" "true")
+#   if [[ "$status" == *"POLLUTED=true"* ]]; then
+#       echo "WARNING: main branch has local commits not in upstream!"
+#   fi
+#
+#   # Parse individual values
+#   eval "$status"
+#   echo "Behind upstream by $BEHIND_UPSTREAM commits"
+#------------------------------------------------------------------------------
+get_fork_status() {
+    local repo_path="$1"
+    local branch="${2:-main}"
+    local do_fetch="${3:-false}"
+
+    # Validate input
+    if [[ -z "$repo_path" ]] || ! is_git_repo "$repo_path"; then
+        echo "FORK_STATUS=error AHEAD_ORIGIN=0 BEHIND_ORIGIN=0 AHEAD_UPSTREAM=0 BEHIND_UPSTREAM=0 POLLUTED=false"
+        return 1
+    fi
+
+    # Check if upstream remote exists
+    if ! git -C "$repo_path" remote get-url upstream &>/dev/null; then
+        echo "FORK_STATUS=no_upstream AHEAD_ORIGIN=0 BEHIND_ORIGIN=0 AHEAD_UPSTREAM=0 BEHIND_UPSTREAM=0 POLLUTED=false"
+        return 0
+    fi
+
+    # Fetch if requested
+    if [[ "$do_fetch" == "true" ]]; then
+        git -C "$repo_path" fetch origin --quiet 2>/dev/null || true
+        git -C "$repo_path" fetch upstream --quiet 2>/dev/null || true
+    fi
+
+    # Get ahead/behind counts relative to origin
+    local ahead_origin=0 behind_origin=0
+    local output
+    if output=$(git -C "$repo_path" rev-list --left-right --count "${branch}...origin/${branch}" 2>/dev/null); then
+        read -r ahead_origin behind_origin <<< "$output"
+    fi
+
+    # Get ahead/behind counts relative to upstream
+    local ahead_upstream=0 behind_upstream=0
+    if output=$(git -C "$repo_path" rev-list --left-right --count "${branch}...upstream/${branch}" 2>/dev/null); then
+        read -r ahead_upstream behind_upstream <<< "$output"
+    fi
+
+    # Determine pollution status
+    # Pollution = local commits on main that aren't in upstream
+    # This typically means someone accidentally committed to main instead of a feature branch
+    local polluted="false"
+    if [[ "$ahead_upstream" -gt 0 ]]; then
+        polluted="true"
+    fi
+
+    # Determine overall status
+    local status="current"
+    if [[ "$ahead_upstream" -gt 0 && "$behind_upstream" -gt 0 ]]; then
+        status="diverged"
+    elif [[ "$ahead_upstream" -gt 0 ]]; then
+        status="ahead_upstream"
+    elif [[ "$behind_upstream" -gt 0 ]]; then
+        status="behind_upstream"
+    elif [[ "$ahead_origin" -gt 0 ]]; then
+        status="ahead_origin"
+    elif [[ "$behind_origin" -gt 0 ]]; then
+        status="behind_origin"
+    fi
+
+    echo "FORK_STATUS=$status AHEAD_ORIGIN=$ahead_origin BEHIND_ORIGIN=$behind_origin AHEAD_UPSTREAM=$ahead_upstream BEHIND_UPSTREAM=$behind_upstream POLLUTED=$polluted"
+}
+
+#------------------------------------------------------------------------------
+# check_main_pollution - Check if main branch has unauthorized local commits
+#------------------------------------------------------------------------------
+# Simplified wrapper around get_fork_status specifically for pollution detection.
+# Useful for quick checks before sync operations.
+#
+# Arguments:
+#   $1 - repo_path: Path to the local repository
+#   $2 - do_fetch: Whether to fetch upstream first (default: "true")
+#
+# Returns:
+#   0 (true)  - main IS polluted (has local commits not in upstream)
+#   1 (false) - main is clean (or not a fork, or error)
+#
+# Output (stdout):
+#   If polluted: Number of polluting commits
+#   If clean: Empty
+#
+# Examples:
+#   # Simple check
+#   if check_main_pollution "/data/projects/my-fork"; then
+#       echo "WARNING: main is polluted!"
+#   fi
+#
+#   # Get number of polluting commits
+#   pollution_count=$(check_main_pollution "/data/projects/my-fork")
+#   if [[ -n "$pollution_count" ]]; then
+#       echo "Found $pollution_count unauthorized commits on main"
+#   fi
+#------------------------------------------------------------------------------
+check_main_pollution() {
+    local repo_path="$1"
+    local do_fetch="${2:-true}"
+
+    local status_line
+    status_line=$(get_fork_status "$repo_path" "main" "$do_fetch")
+
+    # Parse the AHEAD_UPSTREAM value
+    local ahead_upstream
+    if [[ "$status_line" =~ AHEAD_UPSTREAM=([0-9]+) ]]; then
+        ahead_upstream="${BASH_REMATCH[1]}"
+    else
+        return 1
+    fi
+
+    if [[ "$ahead_upstream" -gt 0 ]]; then
+        echo "$ahead_upstream"
+        return 0
+    fi
+
+    return 1
+}
+
+#------------------------------------------------------------------------------
+# list_pollution_commits - List commits that pollute main branch
+#------------------------------------------------------------------------------
+# Shows the actual commits that exist on local main but not in upstream/main.
+# Useful for understanding what needs to be rescued or removed.
+#
+# Arguments:
+#   $1 - repo_path: Path to the local repository
+#   $2 - format: Output format (default: "oneline")
+#        oneline - Short hash and subject (git log --oneline)
+#        full    - Full commit info (hash, author, date, message)
+#        hash    - Just commit hashes (for scripting)
+#
+# Output (stdout):
+#   List of commits in the requested format
+#
+# Examples:
+#   # Show polluting commits (default oneline format)
+#   list_pollution_commits "/data/projects/my-fork"
+#   # Output:
+#   # a1b2c3d Add debug logging
+#   # e4f5g6h Fix typo in config
+#
+#   # Get just hashes for scripting
+#   for hash in $(list_pollution_commits "/data/projects/my-fork" "hash"); do
+#       git show "$hash"
+#   done
+#------------------------------------------------------------------------------
+list_pollution_commits() {
+    local repo_path="$1"
+    local format="${2:-oneline}"
+
+    if [[ -z "$repo_path" ]] || ! is_git_repo "$repo_path"; then
+        return 1
+    fi
+
+    # Check upstream exists
+    if ! git -C "$repo_path" remote get-url upstream &>/dev/null; then
+        return 1
+    fi
+
+    # Build git log format string
+    local log_format
+    case "$format" in
+        oneline) log_format="--oneline" ;;
+        full)    log_format="--format=medium" ;;
+        hash)    log_format="--format=%H" ;;
+        *)       log_format="--oneline" ;;
+    esac
+
+    # Show commits on main that aren't in upstream/main
+    # upstream/main..main = commits reachable from main but not from upstream/main
+    git -C "$repo_path" log $log_format "upstream/main..main" 2>/dev/null
+}
+
+#------------------------------------------------------------------------------
+# parse_branch_list - Parse comma-separated branch list into array
+#------------------------------------------------------------------------------
+# Utility function to parse FORK_SYNC_BRANCHES config value.
+#
+# Arguments:
+#   $1 - branch_list: Comma-separated list of branch names
+#
+# Output (stdout):
+#   One branch name per line (for use with readarray/mapfile)
+#
+# Examples:
+#   # Parse config value
+#   readarray -t branches < <(parse_branch_list "main,develop,release/v1")
+#   for branch in "${branches[@]}"; do
+#       echo "Processing: $branch"
+#   done
+#
+#   # Handles whitespace
+#   parse_branch_list "main, develop , release/v1"
+#   # Output:
+#   # main
+#   # develop
+#   # release/v1
+#------------------------------------------------------------------------------
+parse_branch_list() {
+    local branch_list="$1"
+
+    # Split on comma, trim whitespace, output one per line
+    local IFS=','
+    local branch
+    for branch in $branch_list; do
+        # Trim leading/trailing whitespace
+        branch="${branch#"${branch%%[![:space:]]*}"}"
+        branch="${branch%"${branch##*[![:space:]]}"}"
+        [[ -n "$branch" ]] && echo "$branch"
+    done
+}
+
+#==============================================================================
 # SECTION 11: EXIT TRAP AND CLEANUP
 #==============================================================================
 
@@ -7558,7 +8233,7 @@ parse_args() {
                 INIT_EXAMPLE="true"
                 shift
                 ;;
-            sync|status|init|add|remove|list|doctor|self-update|config|prune|import|review|agent-sweep|ai-sync|dep-update)
+            sync|status|init|add|remove|list|doctor|self-update|config|prune|import|review|agent-sweep|ai-sync|dep-update|fork-status|fork-sync|fork-clean)
                 COMMAND="$1"
                 shift
                 ;;
@@ -8485,6 +9160,727 @@ cmd_status() {
         echo "" >&2
         log_info "Legend: * = uncommitted changes, mismatch = remote URL differs from config"
     fi
+}
+
+#------------------------------------------------------------------------------
+# cmd_fork_status - Show fork synchronization status for repositories
+#------------------------------------------------------------------------------
+# Displays detailed status of forked repositories relative to their upstream.
+# Helps identify which forks need syncing and which have pollution.
+#
+# Usage:
+#   ru fork-status [options] [repo...]
+#
+# Options:
+#   --json          Output in JSON format
+#   --check         Exit with code 2 if any repo is polluted (for CI/scripts)
+#   --fetch         Fetch from remotes before checking (slower but accurate)
+#   --no-fetch      Skip fetching (faster but may show stale data)
+#   --forks-only    Only show repos detected as forks (skip non-forks)
+#
+# Output columns:
+#   Repository   - Repo identifier (owner/repo or custom name)
+#   Fork Status  - Status relative to upstream:
+#                  current    = in sync with upstream
+#                  behind     = upstream has new commits
+#                  ahead      = local has commits not in upstream (pollution!)
+#                  diverged   = both have unique commits
+#                  no_upstream= upstream remote not configured
+#                  not_fork   = not detected as a fork
+#   Upstream Δ   - Commits ahead/behind upstream (local/upstream)
+#   Origin Δ     - Commits ahead/behind origin (local/origin)
+#   Polluted     - YES if main has unauthorized local commits
+#
+# Examples:
+#   # Check all configured repos
+#   ru fork-status
+#
+#   # Check specific repos
+#   ru fork-status joyshmitz/ntm joyshmitz/repo_updater
+#
+#   # CI mode: fail if any pollution detected
+#   ru fork-status --check || echo "Pollution detected!"
+#
+#   # JSON output for scripting
+#   ru fork-status --json | jq '.[] | select(.polluted == true)'
+#------------------------------------------------------------------------------
+cmd_fork_status() {
+    local do_fetch="$FETCH_REMOTES"
+    local check_mode="false"
+    local forks_only="false"
+    local specific_repos=()
+
+    # Parse command-specific arguments
+    for arg in "${ARGS[@]}"; do
+        case "$arg" in
+            --check)     check_mode="true" ;;
+            --fetch)     do_fetch="true" ;;
+            --no-fetch)  do_fetch="false" ;;
+            --forks-only) forks_only="true" ;;
+            -*)          log_warn "Unknown option: $arg" ;;
+            *)           specific_repos+=("$arg") ;;
+        esac
+    done
+
+    # Ensure config exists
+    if [[ ! -d "$RU_CONFIG_DIR" ]]; then
+        log_info "No configuration found. Run: ru init"
+        exit 0
+    fi
+
+    # Load repos (all from config or specific ones)
+    local repos=()
+    if [[ ${#specific_repos[@]} -gt 0 ]]; then
+        repos=("${specific_repos[@]}")
+    else
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && repos+=("$line")
+        done < <(get_all_repos)
+    fi
+
+    local total=${#repos[@]}
+    if [[ "$total" -eq 0 ]]; then
+        log_info "No repositories configured."
+        exit 0
+    fi
+
+    # Track pollution for --check mode
+    local has_pollution="false"
+    local pollution_count=0
+
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        # JSON output mode
+        local json_output
+        json_output="$(
+            echo "["
+            local first="true"
+            for repo_spec in "${repos[@]}"; do
+                local url branch custom_name local_path repo_id
+                if ! resolve_repo_spec "$repo_spec" "$PROJECTS_DIR" "$LAYOUT" url branch custom_name local_path repo_id; then
+                    continue
+                fi
+
+                # Skip if repo doesn't exist locally
+                if [[ ! -d "$local_path" ]] || ! is_git_repo "$local_path"; then
+                    continue
+                fi
+
+                # Check if it's a fork
+                local is_fork_repo="false"
+                if is_fork "$local_path"; then
+                    is_fork_repo="true"
+                elif [[ "$forks_only" == "true" ]]; then
+                    continue  # Skip non-forks in forks-only mode
+                fi
+
+                # Get fork status
+                local fork_status_line
+                fork_status_line=$(get_fork_status "$local_path" "main" "$do_fetch")
+
+                # Parse status values
+                local fork_status ahead_origin behind_origin ahead_upstream behind_upstream polluted
+                fork_status=$(echo "$fork_status_line" | sed 's/.*FORK_STATUS=\([^ ]*\).*/\1/')
+                ahead_origin=$(echo "$fork_status_line" | sed 's/.*AHEAD_ORIGIN=\([^ ]*\).*/\1/')
+                behind_origin=$(echo "$fork_status_line" | sed 's/.*BEHIND_ORIGIN=\([^ ]*\).*/\1/')
+                ahead_upstream=$(echo "$fork_status_line" | sed 's/.*AHEAD_UPSTREAM=\([^ ]*\).*/\1/')
+                behind_upstream=$(echo "$fork_status_line" | sed 's/.*BEHIND_UPSTREAM=\([^ ]*\).*/\1/')
+                polluted=$(echo "$fork_status_line" | sed 's/.*POLLUTED=\([^ ]*\).*/\1/')
+
+                # Track pollution
+                if [[ "$polluted" == "true" ]]; then
+                    has_pollution="true"
+                    ((pollution_count++))
+                fi
+
+                # Get upstream URL if available
+                local upstream_url=""
+                upstream_url=$(git -C "$local_path" remote get-url upstream 2>/dev/null || echo "")
+
+                [[ "$first" == "true" ]] || echo ","
+                first="false"
+
+                local safe_path safe_upstream
+                safe_path=$(json_escape "$local_path")
+                safe_upstream=$(json_escape "$upstream_url")
+
+                printf '{"repo":"%s","path":"%s","is_fork":%s,"fork_status":"%s","ahead_origin":%d,"behind_origin":%d,"ahead_upstream":%d,"behind_upstream":%d,"polluted":%s,"upstream_url":"%s"}' \
+                    "$repo_id" "$safe_path" "$is_fork_repo" "$fork_status" \
+                    "$ahead_origin" "$behind_origin" "$ahead_upstream" "$behind_upstream" \
+                    "$polluted" "$safe_upstream"
+            done
+            echo "]"
+        )"
+        emit_structured "$json_output"
+    else
+        # Human-readable output
+        log_info "Fork Status ($total repos)"
+        [[ "$do_fetch" == "true" ]] && log_info "Fetching remotes for accurate status..."
+        echo "" >&2
+
+        # Compute max lengths for formatting
+        local max_repo_len=12
+        for repo_spec in "${repos[@]}"; do
+            local url branch custom_name local_path repo_id
+            if resolve_repo_spec "$repo_spec" "$PROJECTS_DIR" "$LAYOUT" url branch custom_name local_path repo_id; then
+                [[ ${#repo_id} -gt $max_repo_len ]] && max_repo_len=${#repo_id}
+            fi
+        done
+
+        # Header
+        printf "%-${max_repo_len}s  %-14s  %-12s  %-12s  %s\n" \
+            "Repository" "Fork Status" "Upstream Δ" "Origin Δ" "Polluted" >&2
+        printf "%-${max_repo_len}s  %-14s  %-12s  %-12s  %s\n" \
+            "$(printf '%*s' "$max_repo_len" '' | tr ' ' '-')" \
+            "--------------" "------------" "------------" "--------" >&2
+
+        for repo_spec in "${repos[@]}"; do
+            local url branch custom_name local_path repo_id
+            if ! resolve_repo_spec "$repo_spec" "$PROJECTS_DIR" "$LAYOUT" url branch custom_name local_path repo_id; then
+                continue
+            fi
+
+            # Skip if repo doesn't exist locally
+            if [[ ! -d "$local_path" ]]; then
+                printf "%-${max_repo_len}s  ${DIM}%-14s${RESET}  %-12s  %-12s  %s\n" \
+                    "$repo_id" "missing" "-" "-" "-" >&2
+                continue
+            fi
+
+            if ! is_git_repo "$local_path"; then
+                printf "%-${max_repo_len}s  ${RED}%-14s${RESET}  %-12s  %-12s  %s\n" \
+                    "$repo_id" "not_git" "-" "-" "-" >&2
+                continue
+            fi
+
+            # Check if it's a fork
+            local is_fork_repo="false"
+            if is_fork "$local_path"; then
+                is_fork_repo="true"
+            elif [[ "$forks_only" == "true" ]]; then
+                continue
+            fi
+
+            # Get fork status
+            local fork_status_line
+            fork_status_line=$(get_fork_status "$local_path" "main" "$do_fetch")
+
+            # Parse status values
+            local fork_status ahead_origin behind_origin ahead_upstream behind_upstream polluted
+            fork_status=$(echo "$fork_status_line" | sed 's/.*FORK_STATUS=\([^ ]*\).*/\1/')
+            ahead_origin=$(echo "$fork_status_line" | sed 's/.*AHEAD_ORIGIN=\([^ ]*\).*/\1/')
+            behind_origin=$(echo "$fork_status_line" | sed 's/.*BEHIND_ORIGIN=\([^ ]*\).*/\1/')
+            ahead_upstream=$(echo "$fork_status_line" | sed 's/.*AHEAD_UPSTREAM=\([^ ]*\).*/\1/')
+            behind_upstream=$(echo "$fork_status_line" | sed 's/.*BEHIND_UPSTREAM=\([^ ]*\).*/\1/')
+            polluted=$(echo "$fork_status_line" | sed 's/.*POLLUTED=\([^ ]*\).*/\1/')
+
+            # Track pollution
+            if [[ "$polluted" == "true" ]]; then
+                has_pollution="true"
+                ((pollution_count++))
+            fi
+
+            # Format status with color
+            local status_display
+            case "$fork_status" in
+                current)         status_display="${GREEN}current${RESET}" ;;
+                behind_upstream) status_display="${YELLOW}behind${RESET}" ;;
+                ahead_upstream)  status_display="${RED}ahead${RESET}" ;;
+                diverged)        status_display="${RED}diverged${RESET}" ;;
+                no_upstream)     status_display="${DIM}no_upstream${RESET}" ;;
+                *)               status_display="$fork_status" ;;
+            esac
+
+            # Format pollution indicator
+            local polluted_display
+            if [[ "$polluted" == "true" ]]; then
+                polluted_display="${RED}YES${RESET}"
+            else
+                polluted_display="${GREEN}no${RESET}"
+            fi
+
+            # Format deltas
+            local upstream_delta origin_delta
+            if [[ "$fork_status" == "no_upstream" ]]; then
+                upstream_delta="-"
+            else
+                upstream_delta="${ahead_upstream}/${behind_upstream}"
+            fi
+            origin_delta="${ahead_origin}/${behind_origin}"
+
+            printf "%-${max_repo_len}s  %-14b  %-12s  %-12s  %-8b\n" \
+                "$repo_id" "$status_display" "$upstream_delta" "$origin_delta" "$polluted_display" >&2
+        done
+
+        echo "" >&2
+
+        # Summary
+        if [[ "$has_pollution" == "true" ]]; then
+            log_warn "Found $pollution_count repo(s) with pollution (local commits on main not in upstream)"
+            log_info "To see polluting commits: git log upstream/main..main"
+            log_info "To clean pollution: ru fork-clean <repo>"
+        else
+            log_success "All forks are clean (no pollution detected)"
+        fi
+
+        log_info ""
+        log_info "Legend:"
+        log_info "  Upstream Δ = commits ahead/behind upstream (your commits / their updates)"
+        log_info "  Origin Δ   = commits ahead/behind origin (unpushed / unpulled)"
+        log_info "  Polluted   = YES if main has local commits not in upstream"
+    fi
+
+    # Exit with error in check mode if pollution found
+    if [[ "$check_mode" == "true" && "$has_pollution" == "true" ]]; then
+        exit 2
+    fi
+}
+
+#------------------------------------------------------------------------------
+# cmd_fork_sync - Synchronize fork branches with upstream
+#------------------------------------------------------------------------------
+# Fetches from upstream and updates local branches to match.
+# Essential for keeping your fork in sync with the original project.
+#
+# Usage:
+#   ru fork-sync [options] [repo...]
+#
+# Options:
+#   --branches LIST  Branches to sync (comma-separated, default: from config)
+#   --strategy STR   Sync strategy: reset|ff-only|rebase|merge (default: from config)
+#   --push           Push synced branches to origin after sync
+#   --dry-run        Show what would be done without making changes
+#   --rescue         Save local commits to rescue branch before reset (default: from config)
+#   --no-rescue      Don't save local commits (discard them)
+#   --force          Don't prompt for confirmation
+#
+# Examples:
+#   # Sync main branch for all forks (using config defaults)
+#   ru fork-sync
+#
+#   # Sync specific branches
+#   ru fork-sync --branches "main,develop"
+#
+#   # Sync and push to origin
+#   ru fork-sync --push
+#
+#   # Sync specific repo with reset strategy
+#   ru fork-sync --strategy reset joyshmitz/ntm
+#------------------------------------------------------------------------------
+cmd_fork_sync() {
+    local sync_branches="$FORK_SYNC_BRANCHES"
+    local sync_strategy="$FORK_SYNC_STRATEGY"
+    local do_push="$FORK_PUSH_AFTER_SYNC"
+    local do_rescue="$FORK_RESCUE_POLLUTED"
+    local force_mode="false"
+    local specific_repos=()
+
+    # Parse command-specific arguments
+    for arg in "${ARGS[@]}"; do
+        case "$arg" in
+            --branches=*) sync_branches="${arg#--branches=}" ;;
+            --strategy=*) sync_strategy="${arg#--strategy=}" ;;
+            --push)       do_push="true" ;;
+            --no-push)    do_push="false" ;;
+            --rescue)     do_rescue="true" ;;
+            --no-rescue)  do_rescue="false" ;;
+            --force)      force_mode="true" ;;
+            -*)           log_warn "Unknown option: $arg" ;;
+            *)            specific_repos+=("$arg") ;;
+        esac
+    done
+
+    # Validate strategy
+    case "$sync_strategy" in
+        reset|ff-only|rebase|merge) ;;
+        *)
+            log_error "Invalid sync strategy: $sync_strategy"
+            log_info "Valid strategies: reset, ff-only, rebase, merge"
+            exit 4
+            ;;
+    esac
+
+    # Load repos
+    local repos=()
+    if [[ ${#specific_repos[@]} -gt 0 ]]; then
+        repos=("${specific_repos[@]}")
+    else
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && repos+=("$line")
+        done < <(get_all_repos)
+    fi
+
+    if [[ ${#repos[@]} -eq 0 ]]; then
+        log_info "No repositories to sync."
+        exit 0
+    fi
+
+    # Parse branch list
+    local branches=()
+    while IFS= read -r branch; do
+        [[ -n "$branch" ]] && branches+=("$branch")
+    done < <(parse_branch_list "$sync_branches")
+
+    log_info "Fork Sync"
+    log_info "  Strategy: $sync_strategy"
+    log_info "  Branches: ${branches[*]}"
+    log_info "  Push after sync: $do_push"
+    log_info "  Rescue polluted: $do_rescue"
+    echo "" >&2
+
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "[DRY RUN] Would sync ${#repos[@]} repos"
+    fi
+
+    local synced=0 failed=0 skipped=0
+
+    for repo_spec in "${repos[@]}"; do
+        local url branch custom_name local_path repo_id
+        if ! resolve_repo_spec "$repo_spec" "$PROJECTS_DIR" "$LAYOUT" url branch custom_name local_path repo_id; then
+            continue
+        fi
+
+        # Skip if not exists
+        if [[ ! -d "$local_path" ]] || ! is_git_repo "$local_path"; then
+            log_verbose "Skipping (not found): $repo_id"
+            ((skipped++))
+            continue
+        fi
+
+        # Ensure upstream is configured
+        if ! ensure_upstream "$local_path"; then
+            log_warn "Skipping (not a fork or can't configure upstream): $repo_id"
+            ((skipped++))
+            continue
+        fi
+
+        log_step "Syncing: $repo_id"
+
+        # Fetch upstream
+        log_verbose "  Fetching upstream..."
+        if ! git -C "$local_path" fetch upstream --quiet 2>/dev/null; then
+            log_error "  Failed to fetch upstream"
+            ((failed++))
+            continue
+        fi
+
+        # Sync each configured branch
+        local branch_failed="false"
+        for sync_branch in "${branches[@]}"; do
+            log_verbose "  Syncing branch: $sync_branch"
+
+            # Check if branch exists locally
+            if ! git -C "$local_path" rev-parse --verify "$sync_branch" &>/dev/null; then
+                log_verbose "    Branch $sync_branch doesn't exist locally, skipping"
+                continue
+            fi
+
+            # Check if upstream branch exists
+            if ! git -C "$local_path" rev-parse --verify "upstream/$sync_branch" &>/dev/null; then
+                log_verbose "    Branch upstream/$sync_branch doesn't exist, skipping"
+                continue
+            fi
+
+            # Get current branch to restore later
+            local current_branch
+            current_branch=$(git -C "$local_path" symbolic-ref --short HEAD 2>/dev/null || echo "")
+
+            # Check for pollution and rescue if needed
+            local ahead_count
+            ahead_count=$(git -C "$local_path" rev-list --count "upstream/${sync_branch}..${sync_branch}" 2>/dev/null || echo "0")
+
+            if [[ "$ahead_count" -gt 0 && "$do_rescue" == "true" && "$sync_strategy" == "reset" ]]; then
+                local rescue_branch="rescue/$(date +%Y-%m-%d-%H%M%S)-${sync_branch}"
+                if [[ "$DRY_RUN" != "true" ]]; then
+                    git -C "$local_path" branch "$rescue_branch" "$sync_branch" 2>/dev/null
+                    log_info "  Saved $ahead_count commits to: $rescue_branch"
+                else
+                    log_info "  [DRY RUN] Would save $ahead_count commits to rescue branch"
+                fi
+            fi
+
+            # Checkout the branch
+            if [[ "$DRY_RUN" != "true" ]]; then
+                if ! git -C "$local_path" checkout "$sync_branch" --quiet 2>/dev/null; then
+                    log_warn "    Failed to checkout $sync_branch"
+                    branch_failed="true"
+                    continue
+                fi
+            fi
+
+            # Apply sync strategy
+            local sync_cmd_output
+            case "$sync_strategy" in
+                reset)
+                    if [[ "$DRY_RUN" != "true" ]]; then
+                        if git -C "$local_path" reset --hard "upstream/${sync_branch}" 2>/dev/null; then
+                            log_success "  Reset $sync_branch to upstream/${sync_branch}"
+                        else
+                            log_error "  Failed to reset $sync_branch"
+                            branch_failed="true"
+                        fi
+                    else
+                        log_info "  [DRY RUN] Would reset $sync_branch to upstream/${sync_branch}"
+                    fi
+                    ;;
+                ff-only)
+                    if [[ "$DRY_RUN" != "true" ]]; then
+                        if sync_cmd_output=$(git -C "$local_path" merge --ff-only "upstream/${sync_branch}" 2>&1); then
+                            log_success "  Fast-forwarded $sync_branch"
+                        else
+                            if [[ "$sync_cmd_output" == *"Not possible to fast-forward"* ]]; then
+                                log_warn "  Cannot fast-forward $sync_branch (has local commits)"
+                                log_info "    Use --strategy reset to force sync, or resolve manually"
+                            else
+                                log_error "  Failed to merge: $sync_cmd_output"
+                            fi
+                            branch_failed="true"
+                        fi
+                    else
+                        log_info "  [DRY RUN] Would fast-forward $sync_branch"
+                    fi
+                    ;;
+                rebase)
+                    if [[ "$DRY_RUN" != "true" ]]; then
+                        if git -C "$local_path" rebase "upstream/${sync_branch}" 2>/dev/null; then
+                            log_success "  Rebased $sync_branch onto upstream/${sync_branch}"
+                        else
+                            log_error "  Rebase failed (conflicts?). Run: cd $local_path && git rebase --abort"
+                            git -C "$local_path" rebase --abort 2>/dev/null || true
+                            branch_failed="true"
+                        fi
+                    else
+                        log_info "  [DRY RUN] Would rebase $sync_branch onto upstream/${sync_branch}"
+                    fi
+                    ;;
+                merge)
+                    if [[ "$DRY_RUN" != "true" ]]; then
+                        if git -C "$local_path" merge "upstream/${sync_branch}" -m "Merge upstream/${sync_branch} into ${sync_branch}" 2>/dev/null; then
+                            log_success "  Merged upstream/${sync_branch} into $sync_branch"
+                        else
+                            log_error "  Merge failed. Resolve conflicts in: $local_path"
+                            branch_failed="true"
+                        fi
+                    else
+                        log_info "  [DRY RUN] Would merge upstream/${sync_branch} into $sync_branch"
+                    fi
+                    ;;
+            esac
+
+            # Push to origin if requested
+            if [[ "$do_push" == "true" && "$branch_failed" != "true" ]]; then
+                if [[ "$DRY_RUN" != "true" ]]; then
+                    if git -C "$local_path" push origin "$sync_branch" --force-with-lease 2>/dev/null; then
+                        log_success "  Pushed $sync_branch to origin"
+                    else
+                        log_warn "  Failed to push $sync_branch to origin"
+                    fi
+                else
+                    log_info "  [DRY RUN] Would push $sync_branch to origin"
+                fi
+            fi
+
+            # Restore original branch
+            if [[ "$DRY_RUN" != "true" && -n "$current_branch" && "$current_branch" != "$sync_branch" ]]; then
+                git -C "$local_path" checkout "$current_branch" --quiet 2>/dev/null || true
+            fi
+        done
+
+        if [[ "$branch_failed" == "true" ]]; then
+            ((failed++))
+        else
+            ((synced++))
+        fi
+    done
+
+    echo "" >&2
+    log_info "Summary: $synced synced, $failed failed, $skipped skipped"
+
+    [[ "$failed" -gt 0 ]] && exit 1
+    exit 0
+}
+
+#------------------------------------------------------------------------------
+# cmd_fork_clean - Clean pollution from fork main branches
+#------------------------------------------------------------------------------
+# Removes unauthorized local commits from main branch, optionally rescuing them.
+# Use this to restore main to a clean state matching upstream.
+#
+# Usage:
+#   ru fork-clean [options] [repo...]
+#
+# Options:
+#   --rescue         Save polluted commits to rescue branch (default)
+#   --no-rescue      Discard polluted commits (dangerous!)
+#   --push           Push cleaned main to origin
+#   --dry-run        Show what would be done without making changes
+#   --force          Don't prompt for confirmation
+#
+# Examples:
+#   # Clean all polluted forks (with rescue)
+#   ru fork-clean
+#
+#   # Clean specific repo without rescue (discard commits)
+#   ru fork-clean --no-rescue joyshmitz/ntm
+#
+#   # Clean and push to origin
+#   ru fork-clean --push --force
+#------------------------------------------------------------------------------
+cmd_fork_clean() {
+    local do_rescue="$FORK_RESCUE_POLLUTED"
+    local do_push="false"
+    local force_mode="false"
+    local specific_repos=()
+
+    # Parse command-specific arguments
+    for arg in "${ARGS[@]}"; do
+        case "$arg" in
+            --rescue)    do_rescue="true" ;;
+            --no-rescue) do_rescue="false" ;;
+            --push)      do_push="true" ;;
+            --force)     force_mode="true" ;;
+            -*)          log_warn "Unknown option: $arg" ;;
+            *)           specific_repos+=("$arg") ;;
+        esac
+    done
+
+    # Load repos
+    local repos=()
+    if [[ ${#specific_repos[@]} -gt 0 ]]; then
+        repos=("${specific_repos[@]}")
+    else
+        while IFS= read -r line; do
+            [[ -n "$line" ]] && repos+=("$line")
+        done < <(get_all_repos)
+    fi
+
+    if [[ ${#repos[@]} -eq 0 ]]; then
+        log_info "No repositories to clean."
+        exit 0
+    fi
+
+    log_info "Fork Clean"
+    log_info "  Rescue commits: $do_rescue"
+    log_info "  Push after clean: $do_push"
+    echo "" >&2
+
+    local cleaned=0 skipped=0 failed=0
+
+    for repo_spec in "${repos[@]}"; do
+        local url branch custom_name local_path repo_id
+        if ! resolve_repo_spec "$repo_spec" "$PROJECTS_DIR" "$LAYOUT" url branch custom_name local_path repo_id; then
+            continue
+        fi
+
+        # Skip if not exists
+        if [[ ! -d "$local_path" ]] || ! is_git_repo "$local_path"; then
+            ((skipped++))
+            continue
+        fi
+
+        # Check if it's a fork with upstream
+        if ! git -C "$local_path" remote get-url upstream &>/dev/null; then
+            log_verbose "Skipping (no upstream): $repo_id"
+            ((skipped++))
+            continue
+        fi
+
+        # Fetch upstream to get latest
+        git -C "$local_path" fetch upstream --quiet 2>/dev/null || true
+
+        # Check for pollution
+        local pollution_count
+        pollution_count=$(check_main_pollution "$local_path" "false")
+
+        if [[ -z "$pollution_count" || "$pollution_count" -eq 0 ]]; then
+            log_verbose "Clean (no pollution): $repo_id"
+            ((skipped++))
+            continue
+        fi
+
+        log_step "Cleaning: $repo_id ($pollution_count polluting commits)"
+
+        # Show polluting commits
+        if [[ "$VERBOSE" == "true" || "$DRY_RUN" == "true" ]]; then
+            log_verbose "  Polluting commits:"
+            list_pollution_commits "$local_path" "oneline" | while read -r line; do
+                log_verbose "    $line"
+            done
+        fi
+
+        # Confirmation if not force mode
+        if [[ "$force_mode" != "true" && "$DRY_RUN" != "true" ]]; then
+            if can_prompt; then
+                log_warn "This will reset main to upstream/main"
+                [[ "$do_rescue" != "true" ]] && log_warn "Polluting commits will be DISCARDED!"
+                read -p "Continue? [y/N] " -n 1 -r
+                echo
+                if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                    log_info "Skipped: $repo_id"
+                    ((skipped++))
+                    continue
+                fi
+            fi
+        fi
+
+        # Save current branch
+        local current_branch
+        current_branch=$(git -C "$local_path" symbolic-ref --short HEAD 2>/dev/null || echo "")
+
+        # Rescue commits if requested
+        if [[ "$do_rescue" == "true" ]]; then
+            local rescue_branch="rescue/$(date +%Y-%m-%d-%H%M%S)"
+            if [[ "$DRY_RUN" != "true" ]]; then
+                git -C "$local_path" branch "$rescue_branch" main 2>/dev/null
+                log_success "  Saved commits to: $rescue_branch"
+            else
+                log_info "  [DRY RUN] Would save commits to: $rescue_branch"
+            fi
+        fi
+
+        # Clean main
+        if [[ "$DRY_RUN" != "true" ]]; then
+            # Checkout main
+            if ! git -C "$local_path" checkout main --quiet 2>/dev/null; then
+                log_error "  Failed to checkout main"
+                ((failed++))
+                continue
+            fi
+
+            # Reset to upstream
+            if git -C "$local_path" reset --hard upstream/main 2>/dev/null; then
+                log_success "  Reset main to upstream/main"
+            else
+                log_error "  Failed to reset main"
+                ((failed++))
+                continue
+            fi
+
+            # Push if requested
+            if [[ "$do_push" == "true" ]]; then
+                if git -C "$local_path" push origin main --force-with-lease 2>/dev/null; then
+                    log_success "  Pushed main to origin"
+                else
+                    log_warn "  Failed to push to origin"
+                fi
+            fi
+
+            # Restore original branch
+            if [[ -n "$current_branch" && "$current_branch" != "main" ]]; then
+                git -C "$local_path" checkout "$current_branch" --quiet 2>/dev/null || true
+            fi
+
+            ((cleaned++))
+        else
+            log_info "  [DRY RUN] Would reset main to upstream/main"
+            ((cleaned++))
+        fi
+    done
+
+    echo "" >&2
+    log_info "Summary: $cleaned cleaned, $failed failed, $skipped skipped"
+
+    [[ "$failed" -gt 0 ]] && exit 1
+    exit 0
 }
 
 cmd_init() {
@@ -20893,21 +22289,24 @@ main() {
 
     # Dispatch to command
     case "$COMMAND" in
-        sync)       cmd_sync ;;
-        status)     cmd_status ;;
-        init)       cmd_init ;;
-        add)        cmd_add ;;
-        remove)     cmd_remove ;;
-        list)       cmd_list ;;
-        doctor)     cmd_doctor ;;
+        sync)        cmd_sync ;;
+        status)      cmd_status ;;
+        init)        cmd_init ;;
+        add)         cmd_add ;;
+        remove)      cmd_remove ;;
+        list)        cmd_list ;;
+        doctor)      cmd_doctor ;;
         self-update) cmd_self_update ;;
-        config)     cmd_config ;;
-        prune)      cmd_prune ;;
-        import)     cmd_import ;;
-        review)     cmd_review ;;
+        config)      cmd_config ;;
+        prune)       cmd_prune ;;
+        import)      cmd_import ;;
+        review)      cmd_review ;;
         agent-sweep) cmd_agent_sweep ;;
-        ai-sync)    cmd_ai_sync ;;
-        dep-update) cmd_dep_update ;;
+        ai-sync)     cmd_ai_sync ;;
+        dep-update)  cmd_dep_update ;;
+        fork-status) cmd_fork_status ;;
+        fork-sync)   cmd_fork_sync ;;
+        fork-clean)  cmd_fork_clean ;;
         *)
             log_error "Unknown command: $COMMAND"
             show_help

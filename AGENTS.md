@@ -225,6 +225,11 @@ One-liner curl-bash installation with checksum verification. XDG-compliant confi
 | `self-update` | Update ru | `--check` (check only, do not update) |
 | `config` | Show/set configuration | `--print`, `--set KEY=VALUE` |
 | `robot-docs` | Machine-readable CLI docs (JSON) | `<topic>`: quickstart, commands, examples, exit-codes, formats, schemas, all |
+| `fork-status` | Show fork sync status vs upstream | `--check`, `--forks-only`, `--json` |
+| `fork-sync` | Sync fork branches with upstream | `--branches`, `--strategy`, `--push`, `--dry-run` |
+| `fork-clean` | Clean pollution from main branch | `--rescue`, `--push`, `--dry-run` |
+
+See [FORK_MANAGEMENT.md](FORK_MANAGEMENT.md) for detailed fork workflow documentation.
 
 ### Repo Layout
 

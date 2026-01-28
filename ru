@@ -264,23 +264,13 @@ DEFAULT_FORK_SYNC_BRANCHES="main"
 DEFAULT_FORK_SYNC_STRATEGY="ff-only"
 
 # FORK_PROTECT_MAIN: Block direct commits to main branch in forks
-# When enabled, ru can install a pre-commit hook that prevents accidental
+# [NOT YET IMPLEMENTED - reserved for future use]
+#
+# When implemented, will install a pre-commit hook that prevents accidental
 # commits directly to main/master in repositories detected as forks.
 #
 # Values: true | false
-# Default: false (opt-in, doesn't modify repo hooks without consent)
-#
-# How it works:
-#   1. Detects if current repo is a fork (has 'upstream' remote)
-#   2. If committing to main/master, hook shows error:
-#      "ERROR: Direct commits to main are blocked in forks."
-#      "Create a feature branch: git checkout -b feature/your-change"
-#   3. Commit is rejected, user must create a branch first
-#
-# Use cases:
-#   - Prevent agents from accidentally committing tests/debug to main
-#   - Enforce branch-based workflow for contributions
-#   - Keep main clean for easy upstream synchronization
+# Default: false
 DEFAULT_FORK_PROTECT_MAIN="false"
 
 # FORK_RESCUE_POLLUTED: Save polluted commits before cleanup
@@ -398,7 +388,7 @@ GIT_LOW_SPEED_LIMIT="${GIT_LOW_SPEED_LIMIT:-1000}"  # Bytes/second threshold
 FORK_AUTO_UPSTREAM=""      # Auto-detect and add upstream remote
 FORK_SYNC_BRANCHES=""      # Branches to sync (comma-separated)
 FORK_SYNC_STRATEGY=""      # reset | ff-only | rebase | merge
-FORK_PROTECT_MAIN=""       # Install pre-commit hook to block main commits
+FORK_PROTECT_MAIN=""       # [NOT YET IMPLEMENTED] Pre-commit hook to block main commits
 FORK_RESCUE_POLLUTED=""    # Save polluted commits to rescue branch
 FORK_PUSH_AFTER_SYNC=""    # Push to origin after sync
 
@@ -5648,9 +5638,9 @@ COMMANDS:
     prune           Find and manage orphan repositories
     import <file>   Import repos from file with auto visibility detection
     review          Review GitHub issues and PRs using Claude Code
-    fork-status     Show fork sync status against upstream
-    fork-sync       Sync fork with upstream remote
-    fork-clean      Clean main branch pollution (creates rescue branch)
+    fork-status     Show fork synchronization status
+    fork-sync       Sync fork branches with upstream
+    fork-clean      Clean pollution from fork default branches
     robot-docs      Machine-readable CLI documentation (JSON)
 
 GLOBAL OPTIONS:
@@ -5738,6 +5728,30 @@ REVIEW OPTIONS:
     --max-runtime=MIN    Time budget in minutes
     --max-questions=N    Question budget before pausing
 
+FORK-STATUS OPTIONS:
+    --check              Exit 2 if any fork has pollution (for CI)
+    --fetch              Fetch remotes before checking (default)
+    --no-fetch           Use cached state, don't fetch
+    --forks-only         Only show repos detected as forks
+    --json               Output in JSON format
+
+FORK-SYNC OPTIONS:
+    --branches LIST      Branches to sync (default: main)
+    --strategy STRAT     Sync strategy: reset, ff-only, rebase, merge
+    --push               Push to origin after sync
+    --no-push            Don't push (default)
+    --rescue             Save local commits before reset (default)
+    --no-rescue          Discard local commits
+    --force              Skip confirmation prompts
+    --dry-run            Show what would happen
+
+FORK-CLEAN OPTIONS:
+    --rescue             Save polluted commits to rescue branch (default)
+    --no-rescue          Discard polluted commits
+    --push               Push cleaned branch to origin
+    --force              Skip confirmation prompts
+    --dry-run            Show what would happen
+
 ROBOT-DOCS OPTIONS:
     <topic>              Topic: quickstart, commands, examples, exit-codes, formats, schemas, all
 
@@ -5758,11 +5772,10 @@ EXAMPLES:
     ru review --apply    Execute approved changes from plan
     ru review --basic    Answer queued review questions
     ru review --analytics Show review analytics dashboard
-    ru fork-status        Show fork sync status for all repos with upstream
-    ru fork-sync          Sync all forks with upstream (ff-only)
-    ru fork-sync --rebase Rebase local work onto upstream
-    ru fork-clean         Clean main branch pollution (creates rescue branch)
-    ru fork-clean --dry-run Preview what fork-clean would do
+    ru fork-status       Show fork sync status for all repos
+    ru fork-sync         Sync all forks with upstream (ff-only)
+    ru fork-sync --strategy reset  Force reset to upstream
+    ru fork-clean        Clean polluted commits from fork defaults
     ru robot-docs         Show all CLI docs as JSON (all topics)
     ru robot-docs commands Show command/flag documentation as JSON
 
@@ -7554,6 +7567,58 @@ run_parallel_sync() {
 #==============================================================================
 
 #------------------------------------------------------------------------------
+# get_default_branch - Get the default branch name for a repository
+#------------------------------------------------------------------------------
+# Detects the repository's default branch by checking the symbolic ref of
+# origin/HEAD. Falls back to "main" if detection fails.
+#
+# Arguments:
+#   $1 - repo_path: Path to the local repository
+#
+# Output (stdout):
+#   The default branch name (e.g., "main", "master", "develop")
+#
+# Returns:
+#   0 - Success (branch name printed to stdout)
+#   1 - Failed to detect (still prints fallback "main")
+#
+# Examples:
+#   branch=$(get_default_branch "/data/projects/my-repo")
+#   echo "Default branch is: $branch"
+#------------------------------------------------------------------------------
+get_default_branch() {
+    local repo_path="$1"
+    local head_ref
+
+    # Method 1: Try origin/HEAD symbolic ref (most reliable, local only)
+    if head_ref=$(git -C "$repo_path" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null); then
+        # head_ref is like "origin/main" - strip the "origin/" prefix
+        echo "${head_ref#origin/}"
+        return 0
+    fi
+
+    # Method 2: Check if common default branches exist in origin remote (local refs only)
+    for branch in main master; do
+        if git -C "$repo_path" rev-parse --verify "refs/remotes/origin/$branch" &>/dev/null; then
+            echo "$branch"
+            return 0
+        fi
+    done
+
+    # Method 3: Use git config default (user's preference)
+    if head_ref=$(git config --get init.defaultBranch 2>/dev/null); then
+        if [[ -n "$head_ref" ]]; then
+            echo "$head_ref"
+            return 0
+        fi
+    fi
+
+    # Ultimate fallback
+    echo "main"
+    return 1
+}
+
+#------------------------------------------------------------------------------
 # is_fork - Detect if a repository is a fork of another repository
 #------------------------------------------------------------------------------
 # Uses GitHub API (via gh) to determine if the repository is a fork.
@@ -7619,9 +7684,11 @@ is_fork() {
     # Examples:
     #   https://github.com/joyshmitz/repo.git -> joyshmitz/repo
     #   git@github.com:joyshmitz/repo.git     -> joyshmitz/repo
-    if [[ "$origin_url" =~ github\.com[:/]([^/]+)/([^/.]+)(\.git)?$ ]]; then
+    #   github.com/owner/my.repo.name.git     -> owner/my.repo.name
+    if [[ "$origin_url" =~ github\.com[:/]([^/]+)/([^/]+)$ ]]; then
         owner="${BASH_REMATCH[1]}"
         repo="${BASH_REMATCH[2]}"
+        repo="${repo%.git}"  # Strip .git suffix if present
     else
         # Non-GitHub URL or unparseable - assume not a fork
         log_verbose "Cannot parse GitHub owner/repo from: $origin_url"
@@ -7638,7 +7705,7 @@ is_fork() {
 
     # Query GitHub API: GET /repos/{owner}/{repo}
     # Response includes: { "fork": true/false, "parent": { "clone_url": "..." } }
-    local api_response is_fork_api
+    local api_response
     if api_response=$(gh api "repos/${owner}/${repo}" --jq '.fork' 2>/dev/null); then
         if [[ "$api_response" == "true" ]]; then
             FORK_CACHE[$repo_path]="true"
@@ -7686,9 +7753,10 @@ get_fork_parent_url() {
     local origin_url owner repo
     origin_url=$(get_remote_url "$repo_path" "origin") || return 1
 
-    if [[ "$origin_url" =~ github\.com[:/]([^/]+)/([^/.]+)(\.git)?$ ]]; then
+    if [[ "$origin_url" =~ github\.com[:/]([^/]+)/([^/]+)$ ]]; then
         owner="${BASH_REMATCH[1]}"
         repo="${BASH_REMATCH[2]}"
+        repo="${repo%.git}"  # Strip .git suffix if present
     else
         return 1
     fi
@@ -7758,6 +7826,12 @@ ensure_upstream() {
         return 0
     fi
 
+    # Respect FORK_AUTO_UPSTREAM setting - don't auto-configure if disabled
+    if [[ "$FORK_AUTO_UPSTREAM" != "true" ]]; then
+        log_verbose "Auto-upstream disabled (FORK_AUTO_UPSTREAM=$FORK_AUTO_UPSTREAM); skipping"
+        return 1
+    fi
+
     # Check if this is a fork (via API)
     if ! is_fork "$repo_path"; then
         log_verbose "Not a fork, skipping upstream configuration: $repo_path"
@@ -7770,6 +7844,12 @@ ensure_upstream() {
     if [[ -z "$parent_url" ]]; then
         log_warn "Could not determine parent repository URL for: $repo_path"
         return 1
+    fi
+
+    # Respect DRY_RUN - don't actually modify remotes
+    if [[ "$DRY_RUN" == "true" ]]; then
+        log_info "  [DRY RUN] Would add upstream: $parent_url"
+        return 0
     fi
 
     # Add upstream remote
@@ -7924,9 +8004,10 @@ get_fork_status() {
 check_main_pollution() {
     local repo_path="$1"
     local do_fetch="${2:-true}"
+    local branch="${3:-$(get_default_branch "$repo_path")}"
 
     local status_line
-    status_line=$(get_fork_status "$repo_path" "main" "$do_fetch")
+    status_line=$(get_fork_status "$repo_path" "$branch" "$do_fetch")
 
     # Parse the AHEAD_UPSTREAM value
     local ahead_upstream
@@ -7975,6 +8056,7 @@ check_main_pollution() {
 list_pollution_commits() {
     local repo_path="$1"
     local format="${2:-oneline}"
+    local branch="${3:-$(get_default_branch "$repo_path")}"
 
     if [[ -z "$repo_path" ]] || ! is_git_repo "$repo_path"; then
         return 1
@@ -7994,9 +8076,9 @@ list_pollution_commits() {
         *)       log_format="--oneline" ;;
     esac
 
-    # Show commits on main that aren't in upstream/main
-    # upstream/main..main = commits reachable from main but not from upstream/main
-    git -C "$repo_path" log $log_format "upstream/main..main" 2>/dev/null
+    # Show commits on branch that aren't in upstream/branch
+    # upstream/branch..branch = commits reachable from branch but not from upstream/branch
+    git -C "$repo_path" log $log_format "upstream/${branch}..${branch}" 2>/dev/null
 }
 
 #------------------------------------------------------------------------------
@@ -9346,9 +9428,10 @@ cmd_fork_status() {
                     continue  # Skip non-forks in forks-only mode
                 fi
 
-                # Get fork status
-                local fork_status_line
-                fork_status_line=$(get_fork_status "$local_path" "main" "$do_fetch")
+                # Get fork status (using repo's default branch)
+                local default_branch fork_status_line
+                default_branch=$(get_default_branch "$local_path")
+                fork_status_line=$(get_fork_status "$local_path" "$default_branch" "$do_fetch")
 
                 # Parse status values
                 local fork_status ahead_origin behind_origin ahead_upstream behind_upstream polluted
@@ -9433,9 +9516,10 @@ cmd_fork_status() {
                 continue
             fi
 
-            # Get fork status
-            local fork_status_line
-            fork_status_line=$(get_fork_status "$local_path" "main" "$do_fetch")
+            # Get fork status (using repo's default branch)
+            local default_branch fork_status_line
+            default_branch=$(get_default_branch "$local_path")
+            fork_status_line=$(get_fork_status "$local_path" "$default_branch" "$do_fetch")
 
             # Parse status values
             local fork_status ahead_origin behind_origin ahead_upstream behind_upstream polluted
@@ -9547,11 +9631,31 @@ cmd_fork_sync() {
     local force_mode="false"
     local specific_repos=()
 
-    # Parse command-specific arguments
-    for arg in "${ARGS[@]}"; do
+    # Parse command-specific arguments (supports both --opt=val and --opt val)
+    local i=0
+    while [[ $i -lt ${#ARGS[@]} ]]; do
+        local arg="${ARGS[$i]}"
         case "$arg" in
             --branches=*) sync_branches="${arg#--branches=}" ;;
+            --branches)
+                # Validate next argument exists and isn't another flag
+                if [[ $((i+1)) -ge ${#ARGS[@]} ]] || [[ "${ARGS[$((i+1))]}" == -* ]]; then
+                    log_error "--branches requires a value (e.g., --branches main,develop)"
+                    exit 4
+                fi
+                ((i++))
+                sync_branches="${ARGS[$i]}"
+                ;;
             --strategy=*) sync_strategy="${arg#--strategy=}" ;;
+            --strategy)
+                # Validate next argument exists and isn't another flag
+                if [[ $((i+1)) -ge ${#ARGS[@]} ]] || [[ "${ARGS[$((i+1))]}" == -* ]]; then
+                    log_error "--strategy requires a value (reset, ff-only, rebase, merge)"
+                    exit 4
+                fi
+                ((i++))
+                sync_strategy="${ARGS[$i]}"
+                ;;
             --push)       do_push="true" ;;
             --no-push)    do_push="false" ;;
             --rescue)     do_rescue="true" ;;
@@ -9560,6 +9664,7 @@ cmd_fork_sync() {
             -*)           log_warn "Unknown option: $arg" ;;
             *)            specific_repos+=("$arg") ;;
         esac
+        ((i++))
     done
 
     # Validate strategy
@@ -9626,18 +9731,59 @@ cmd_fork_sync() {
             continue
         fi
 
+        # Check for uncommitted changes before destructive operations
+        local stashed="false"
+        if has_uncommitted_changes "$local_path"; then
+            if [[ "$AUTOSTASH" == "true" ]]; then
+                if [[ "$DRY_RUN" != "true" ]]; then
+                    git -C "$local_path" stash push -u -m "ru fork-sync autostash" >/dev/null 2>&1 || true
+                    stashed="true"
+                    log_verbose "  Auto-stashed uncommitted changes"
+                else
+                    log_info "  [DRY RUN] Would auto-stash uncommitted changes"
+                fi
+            else
+                log_warn "Skipping (uncommitted changes, use AUTOSTASH=true or commit/stash first): $repo_id"
+                ((skipped++))
+                continue
+            fi
+        fi
+
         log_step "Syncing: $repo_id"
 
+        # Check if upstream actually exists (ensure_upstream may have been dry-run)
+        local upstream_exists="false"
+        if git -C "$local_path" remote get-url upstream &>/dev/null; then
+            upstream_exists="true"
+        fi
+
         # Fetch upstream
-        log_verbose "  Fetching upstream..."
-        if ! git -C "$local_path" fetch upstream --quiet 2>/dev/null; then
-            log_error "  Failed to fetch upstream"
+        if [[ "$upstream_exists" == "true" ]]; then
+            log_verbose "  Fetching upstream..."
+            if ! git -C "$local_path" fetch upstream --quiet 2>/dev/null; then
+                log_error "  Failed to fetch upstream"
+                # Restore stash before failing
+                if [[ "$stashed" == "true" ]]; then
+                    git -C "$local_path" stash pop >/dev/null 2>&1 || true
+                fi
+                ((failed++))
+                continue
+            fi
+        elif [[ "$DRY_RUN" == "true" ]]; then
+            log_info "  [DRY RUN] Would add upstream and fetch"
+        else
+            log_error "  Upstream remote not configured"
+            # Restore stash before failing
+            if [[ "$stashed" == "true" ]]; then
+                git -C "$local_path" stash pop >/dev/null 2>&1 || true
+            fi
             ((failed++))
             continue
         fi
 
         # Sync each configured branch
         local branch_failed="false"
+        local branches_synced=0
         for sync_branch in "${branches[@]}"; do
             log_verbose "  Syncing branch: $sync_branch"
 
@@ -9647,9 +9793,16 @@ cmd_fork_sync() {
                 continue
             fi
 
-            # Check if upstream branch exists
-            if ! git -C "$local_path" rev-parse --verify "upstream/$sync_branch" &>/dev/null; then
-                log_verbose "    Branch upstream/$sync_branch doesn't exist, skipping"
+            # Check if upstream branch exists (skip check in dry-run without upstream)
+            if [[ "$upstream_exists" == "true" ]]; then
+                if ! git -C "$local_path" rev-parse --verify "upstream/$sync_branch" &>/dev/null; then
+                    log_verbose "    Branch upstream/$sync_branch doesn't exist, skipping"
+                    continue
+                fi
+            elif [[ "$DRY_RUN" == "true" ]]; then
+                # In dry-run without upstream, just report what would happen
+                log_info "  [DRY RUN] Would sync $sync_branch with upstream/$sync_branch"
+                ((branches_synced++))
                 continue
             fi
 
@@ -9661,8 +9814,23 @@ cmd_fork_sync() {
             local ahead_count
             ahead_count=$(git -C "$local_path" rev-list --count "upstream/${sync_branch}..${sync_branch}" 2>/dev/null || echo "0")
 
+            # Confirmation for destructive reset when there are local commits
+            if [[ "$ahead_count" -gt 0 && "$sync_strategy" == "reset" && "$force_mode" != "true" && "$DRY_RUN" != "true" ]]; then
+                if can_prompt; then
+                    log_warn "  $sync_branch has $ahead_count local commit(s) that will be reset"
+                    [[ "$do_rescue" != "true" ]] && log_warn "  These commits will be DISCARDED!"
+                    read -p "  Continue? [y/N] " -n 1 -r
+                    echo
+                    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                        log_info "  Skipped: $sync_branch"
+                        continue
+                    fi
+                fi
+            fi
+
             if [[ "$ahead_count" -gt 0 && "$do_rescue" == "true" && "$sync_strategy" == "reset" ]]; then
-                local rescue_branch="rescue/$(date +%Y-%m-%d-%H%M%S)-${sync_branch}"
+                local rescue_branch
+                rescue_branch="rescue/$(date +%Y-%m-%d-%H%M%S)-${sync_branch}"
                 if [[ "$DRY_RUN" != "true" ]]; then
                     git -C "$local_path" branch "$rescue_branch" "$sync_branch" 2>/dev/null
                     log_info "  Saved $ahead_count commits to: $rescue_branch"
@@ -9687,18 +9855,21 @@ cmd_fork_sync() {
                     if [[ "$DRY_RUN" != "true" ]]; then
                         if git -C "$local_path" reset --hard "upstream/${sync_branch}" 2>/dev/null; then
                             log_success "  Reset $sync_branch to upstream/${sync_branch}"
+                            ((branches_synced++))
                         else
                             log_error "  Failed to reset $sync_branch"
                             branch_failed="true"
                         fi
                     else
                         log_info "  [DRY RUN] Would reset $sync_branch to upstream/${sync_branch}"
+                        ((branches_synced++))
                     fi
                     ;;
                 ff-only)
                     if [[ "$DRY_RUN" != "true" ]]; then
                         if sync_cmd_output=$(git -C "$local_path" merge --ff-only "upstream/${sync_branch}" 2>&1); then
                             log_success "  Fast-forwarded $sync_branch"
+                            ((branches_synced++))
                         else
                             if [[ "$sync_cmd_output" == *"Not possible to fast-forward"* ]]; then
                                 log_warn "  Cannot fast-forward $sync_branch (has local commits)"
@@ -9710,12 +9881,14 @@ cmd_fork_sync() {
                         fi
                     else
                         log_info "  [DRY RUN] Would fast-forward $sync_branch"
+                        ((branches_synced++))
                     fi
                     ;;
                 rebase)
                     if [[ "$DRY_RUN" != "true" ]]; then
                         if git -C "$local_path" rebase "upstream/${sync_branch}" 2>/dev/null; then
                             log_success "  Rebased $sync_branch onto upstream/${sync_branch}"
+                            ((branches_synced++))
                         else
                             log_error "  Rebase failed (conflicts?). Run: cd $local_path && git rebase --abort"
                             git -C "$local_path" rebase --abort 2>/dev/null || true
@@ -9723,18 +9896,21 @@ cmd_fork_sync() {
                         fi
                     else
                         log_info "  [DRY RUN] Would rebase $sync_branch onto upstream/${sync_branch}"
+                        ((branches_synced++))
                     fi
                     ;;
                 merge)
                     if [[ "$DRY_RUN" != "true" ]]; then
                         if git -C "$local_path" merge "upstream/${sync_branch}" -m "Merge upstream/${sync_branch} into ${sync_branch}" 2>/dev/null; then
                             log_success "  Merged upstream/${sync_branch} into $sync_branch"
+                            ((branches_synced++))
                         else
                             log_error "  Merge failed. Resolve conflicts in: $local_path"
                             branch_failed="true"
                         fi
                     else
                         log_info "  [DRY RUN] Would merge upstream/${sync_branch} into $sync_branch"
+                        ((branches_synced++))
                     fi
                     ;;
             esac
@@ -9758,10 +9934,23 @@ cmd_fork_sync() {
             fi
         done
 
+        # Restore stashed changes if we auto-stashed
+        if [[ "$stashed" == "true" && "$DRY_RUN" != "true" ]]; then
+            if git -C "$local_path" stash pop >/dev/null 2>&1; then
+                log_verbose "  Restored auto-stashed changes"
+            else
+                log_warn "  Failed to restore stashed changes. Run: cd $local_path && git stash pop"
+            fi
+        fi
+
+        # Determine repo status based on branch results
         if [[ "$branch_failed" == "true" ]]; then
             ((failed++))
-        else
+        elif [[ "$branches_synced" -gt 0 ]]; then
             ((synced++))
+        else
+            # No branches were synced (all skipped due to missing branches)
+            ((skipped++))
         fi
     done
 
@@ -9857,15 +10046,41 @@ cmd_fork_clean() {
             continue
         fi
 
+        # Check for uncommitted changes before destructive operations
+        local stashed="false"
+        if has_uncommitted_changes "$local_path"; then
+            if [[ "$AUTOSTASH" == "true" ]]; then
+                if [[ "$DRY_RUN" != "true" ]]; then
+                    git -C "$local_path" stash push -u -m "ru fork-clean autostash" >/dev/null 2>&1 || true
+                    stashed="true"
+                    log_verbose "  Auto-stashed uncommitted changes"
+                else
+                    log_info "  [DRY RUN] Would auto-stash uncommitted changes"
+                fi
+            else
+                log_warn "Skipping (uncommitted changes, use AUTOSTASH=true or commit/stash first): $repo_id"
+                ((skipped++))
+                continue
+            fi
+        fi
+
         # Fetch upstream to get latest
         git -C "$local_path" fetch upstream --quiet 2>/dev/null || true
 
+        # Get default branch for this repo
+        local default_branch
+        default_branch=$(get_default_branch "$local_path")
+
         # Check for pollution
         local pollution_count
-        pollution_count=$(check_main_pollution "$local_path" "false")
+        pollution_count=$(check_main_pollution "$local_path" "false" "$default_branch")
 
         if [[ -z "$pollution_count" || "$pollution_count" -eq 0 ]]; then
             log_verbose "Clean (no pollution): $repo_id"
+            # Restore stash before skipping
+            if [[ "$stashed" == "true" ]]; then
+                git -C "$local_path" stash pop >/dev/null 2>&1 || true
+            fi
             ((skipped++))
             continue
         fi
@@ -9875,7 +10090,7 @@ cmd_fork_clean() {
         # Show polluting commits
         if [[ "$VERBOSE" == "true" || "$DRY_RUN" == "true" ]]; then
             log_verbose "  Polluting commits:"
-            list_pollution_commits "$local_path" "oneline" | while read -r line; do
+            list_pollution_commits "$local_path" "oneline" "$default_branch" | while read -r line; do
                 log_verbose "    $line"
             done
         fi
@@ -9883,12 +10098,16 @@ cmd_fork_clean() {
         # Confirmation if not force mode
         if [[ "$force_mode" != "true" && "$DRY_RUN" != "true" ]]; then
             if can_prompt; then
-                log_warn "This will reset main to upstream/main"
+                log_warn "This will reset $default_branch to upstream/$default_branch"
                 [[ "$do_rescue" != "true" ]] && log_warn "Polluting commits will be DISCARDED!"
                 read -p "Continue? [y/N] " -n 1 -r
                 echo
                 if [[ ! $REPLY =~ ^[Yy]$ ]]; then
                     log_info "Skipped: $repo_id"
+                    # Restore stash before skipping
+                    if [[ "$stashed" == "true" ]]; then
+                        git -C "$local_path" stash pop >/dev/null 2>&1 || true
+                    fi
                     ((skipped++))
                     continue
                 fi
@@ -9901,50 +10120,68 @@ cmd_fork_clean() {
 
         # Rescue commits if requested
         if [[ "$do_rescue" == "true" ]]; then
-            local rescue_branch="rescue/$(date +%Y-%m-%d-%H%M%S)"
+            local rescue_branch
+            rescue_branch="rescue/$(date +%Y-%m-%d-%H%M%S)"
             if [[ "$DRY_RUN" != "true" ]]; then
-                git -C "$local_path" branch "$rescue_branch" main 2>/dev/null
+                git -C "$local_path" branch "$rescue_branch" "$default_branch" 2>/dev/null
                 log_success "  Saved commits to: $rescue_branch"
             else
                 log_info "  [DRY RUN] Would save commits to: $rescue_branch"
             fi
         fi
 
-        # Clean main
+        # Clean default branch
         if [[ "$DRY_RUN" != "true" ]]; then
-            # Checkout main
-            if ! git -C "$local_path" checkout main --quiet 2>/dev/null; then
-                log_error "  Failed to checkout main"
+            # Checkout default branch
+            if ! git -C "$local_path" checkout "$default_branch" --quiet 2>/dev/null; then
+                log_error "  Failed to checkout $default_branch"
+                # Restore stash before failing
+                if [[ "$stashed" == "true" ]]; then
+                    git -C "$local_path" stash pop >/dev/null 2>&1 || true
+                fi
                 ((failed++))
                 continue
             fi
 
             # Reset to upstream
-            if git -C "$local_path" reset --hard upstream/main 2>/dev/null; then
-                log_success "  Reset main to upstream/main"
+            if git -C "$local_path" reset --hard "upstream/$default_branch" 2>/dev/null; then
+                log_success "  Reset $default_branch to upstream/$default_branch"
             else
-                log_error "  Failed to reset main"
+                log_error "  Failed to reset $default_branch"
+                # Restore stash before failing
+                if [[ "$stashed" == "true" ]]; then
+                    git -C "$local_path" stash pop >/dev/null 2>&1 || true
+                fi
                 ((failed++))
                 continue
             fi
 
             # Push if requested
             if [[ "$do_push" == "true" ]]; then
-                if git -C "$local_path" push origin main --force-with-lease 2>/dev/null; then
-                    log_success "  Pushed main to origin"
+                if git -C "$local_path" push origin "$default_branch" --force-with-lease 2>/dev/null; then
+                    log_success "  Pushed $default_branch to origin"
                 else
                     log_warn "  Failed to push to origin"
                 fi
             fi
 
             # Restore original branch
-            if [[ -n "$current_branch" && "$current_branch" != "main" ]]; then
+            if [[ -n "$current_branch" && "$current_branch" != "$default_branch" ]]; then
                 git -C "$local_path" checkout "$current_branch" --quiet 2>/dev/null || true
+            fi
+
+            # Restore stashed changes if we auto-stashed
+            if [[ "$stashed" == "true" ]]; then
+                if git -C "$local_path" stash pop >/dev/null 2>&1; then
+                    log_verbose "  Restored auto-stashed changes"
+                else
+                    log_warn "  Failed to restore stashed changes. Run: cd $local_path && git stash pop"
+                fi
             fi
 
             ((cleaned++))
         else
-            log_info "  [DRY RUN] Would reset main to upstream/main"
+            log_info "  [DRY RUN] Would reset $default_branch to upstream/$default_branch"
             ((cleaned++))
         fi
     done

@@ -92,7 +92,7 @@ rm -rf "$TEMP_DIR"  # cleanup
 - **Beautiful gum-powered terminal UI** with intelligent ANSI fallbacks
 - **Intelligent clone/pull logic** using git plumbing (not string parsing)
 - **Automation-grade design**: meaningful exit codes, non-interactive mode, JSON output
-- **Subcommand architecture**: `sync`, `status`, `init`, `add`, `list`, `doctor`, `self-update`, `config`
+- **Subcommand architecture**: `sync`, `status`, `init`, `add`, `list`, `doctor`, `self-update`, `config`, `fork-status`, `fork-sync`, `fork-clean`
 
 ### Subcommands
 
@@ -106,6 +106,11 @@ rm -rf "$TEMP_DIR"  # cleanup
 | `doctor` | System diagnostics | (none) |
 | `self-update` | Update ru | `--check` (check only, don't update) |
 | `config` | Show/set configuration | `--print`, `--set KEY=VALUE` |
+| `fork-status` | Show fork sync status vs upstream | `--check`, `--forks-only`, `--json` |
+| `fork-sync` | Sync fork branches with upstream | `--branches`, `--strategy`, `--push`, `--dry-run` |
+| `fork-clean` | Clean pollution from main branch | `--rescue`, `--push`, `--dry-run` |
+
+See [FORK_MANAGEMENT.md](FORK_MANAGEMENT.md) for detailed fork workflow documentation.
 
 ---
 

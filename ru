@@ -7605,8 +7605,9 @@ get_default_branch() {
         fi
     done
 
-    # Method 3: Use git config default (user's preference)
-    if head_ref=$(git config --get init.defaultBranch 2>/dev/null); then
+    # Method 3: Use global git config default (user's preference for new repos)
+    # Note: init.defaultBranch is typically a global setting, not per-repo
+    if head_ref=$(git config --global --get init.defaultBranch 2>/dev/null); then
         if [[ -n "$head_ref" ]]; then
             echo "$head_ref"
             return 0
@@ -7673,6 +7674,13 @@ is_fork() {
     fi
 
     # Method 2: Query GitHub API via gh CLI
+    # Only if FORK_AUTO_UPSTREAM is enabled (explicit opt-in to network calls)
+    if [[ "$FORK_AUTO_UPSTREAM" != "true" ]]; then
+        log_verbose "API fork detection disabled (FORK_AUTO_UPSTREAM=$FORK_AUTO_UPSTREAM)"
+        FORK_CACHE[$repo_path]="unknown"
+        return 1
+    fi
+
     # Extract owner/repo from origin URL for API query
     local origin_url owner repo
     origin_url=$(get_remote_url "$repo_path" "origin") || {
@@ -9757,17 +9765,21 @@ cmd_fork_sync() {
             upstream_exists="true"
         fi
 
-        # Fetch upstream
+        # Fetch upstream (skip in dry-run to avoid mutating local refs)
         if [[ "$upstream_exists" == "true" ]]; then
-            log_verbose "  Fetching upstream..."
-            if ! git -C "$local_path" fetch upstream --quiet 2>/dev/null; then
-                log_error "  Failed to fetch upstream"
-                # Restore stash before failing
-                if [[ "$stashed" == "true" ]]; then
-                    git -C "$local_path" stash pop >/dev/null 2>&1 || true
+            if [[ "$DRY_RUN" == "true" ]]; then
+                log_info "  [DRY RUN] Would fetch upstream"
+            else
+                log_verbose "  Fetching upstream..."
+                if ! git -C "$local_path" fetch upstream --quiet 2>/dev/null; then
+                    log_error "  Failed to fetch upstream"
+                    # Restore stash before failing
+                    if [[ "$stashed" == "true" ]]; then
+                        git -C "$local_path" stash pop >/dev/null 2>&1 || true
+                    fi
+                    ((failed++))
+                    continue
                 fi
-                ((failed++))
-                continue
             fi
         elif [[ "$DRY_RUN" == "true" ]]; then
             log_info "  [DRY RUN] Would add upstream and fetch"
@@ -10064,8 +10076,12 @@ cmd_fork_clean() {
             fi
         fi
 
-        # Fetch upstream to get latest
-        git -C "$local_path" fetch upstream --quiet 2>/dev/null || true
+        # Fetch upstream to get latest (skip in dry-run)
+        if [[ "$DRY_RUN" != "true" ]]; then
+            git -C "$local_path" fetch upstream --quiet 2>/dev/null || true
+        else
+            log_info "  [DRY RUN] Would fetch upstream"
+        fi
 
         # Get default branch for this repo
         local default_branch

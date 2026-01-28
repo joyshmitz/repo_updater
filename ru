@@ -5806,6 +5806,13 @@ show_quick_menu() {
         gum style "    $(gum style --foreground 82 'self-update')    Update ru to the latest version" >&2
         printf '\n' >&2
 
+        # Fork management
+        gum style --foreground 39 --bold "  Fork Management" >&2
+        gum style "    $(gum style --foreground 82 'fork-status')    Show fork sync status" >&2
+        gum style "    $(gum style --foreground 82 'fork-sync')      Sync forks with upstream" >&2
+        gum style "    $(gum style --foreground 82 'fork-clean')     Clean pollution from forks" >&2
+        printf '\n' >&2
+
         # Quick examples
         gum style --foreground 214 --bold "QUICK START" >&2
         printf '\n' >&2
@@ -5863,6 +5870,13 @@ show_quick_menu() {
         printf '%b\n' "    ${GREEN}doctor${RESET}         Run system diagnostics" >&2
         printf '%b\n' "    ${GREEN}prune${RESET}          Find and manage orphan repositories" >&2
         printf '%b\n' "    ${GREEN}self-update${RESET}    Update ru to the latest version" >&2
+        printf '\n' >&2
+
+        # Fork management
+        printf '%b\n' "  ${BOLD}${CYAN}Fork Management${RESET}" >&2
+        printf '%b\n' "    ${GREEN}fork-status${RESET}    Show fork sync status" >&2
+        printf '%b\n' "    ${GREEN}fork-sync${RESET}      Sync forks with upstream" >&2
+        printf '%b\n' "    ${GREEN}fork-clean${RESET}     Clean pollution from forks" >&2
         printf '\n' >&2
 
         # Quick examples

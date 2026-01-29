@@ -8243,7 +8243,7 @@ parse_args() {
                 shift
                 ;;
             --plan|--apply|--push|--analytics|--basic|--status|--mode=*|--repos=*|--skip-days=*|--priority=*|--max-repos=*|--max-runtime=*|--max-questions=*|--invalidate-cache=*|--auto-answer=*)
-                if [[ "$COMMAND" == "review" || "$COMMAND" == "agent-sweep" ]]; then
+                if [[ "$COMMAND" == "review" || "$COMMAND" == "agent-sweep" || "$COMMAND" == "fork-sync" || "$COMMAND" == "fork-clean" ]]; then
                     ARGS+=("$1")
                     shift
                 elif [[ -z "$COMMAND" ]]; then

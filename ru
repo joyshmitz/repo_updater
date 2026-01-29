@@ -5708,6 +5708,7 @@ FORK OPTIONS:
     fork-sync [repo...]     Sync forks with upstream
       --strategy=STR       Sync strategy: ff-only, reset, rebase, merge
       --branches=LIST      Branches to sync (comma-separated)
+      --pull-origin        Pull from origin before syncing (fix behind_origin)
       --push               Push to origin after sync
       --dry-run            Preview without making changes
     fork-clean [repo...]    Clean pollution from main
@@ -8264,7 +8265,7 @@ parse_args() {
                 ARGS+=("$1")
                 shift
                 ;;
-            --plan|--apply|--push|--analytics|--basic|--status|--mode=*|--repos=*|--skip-days=*|--priority=*|--max-repos=*|--max-runtime=*|--max-questions=*|--invalidate-cache=*|--auto-answer=*)
+            --plan|--apply|--push|--pull-origin|--analytics|--basic|--status|--mode=*|--repos=*|--skip-days=*|--priority=*|--max-repos=*|--max-runtime=*|--max-questions=*|--invalidate-cache=*|--auto-answer=*)
                 if [[ "$COMMAND" == "review" || "$COMMAND" == "agent-sweep" || "$COMMAND" == "fork-sync" || "$COMMAND" == "fork-clean" ]]; then
                     ARGS+=("$1")
                     shift
@@ -9469,6 +9470,7 @@ cmd_fork_status() {
 # Options:
 #   --branches LIST  Branches to sync (comma-separated, default: from config)
 #   --strategy STR   Sync strategy: reset|ff-only|rebase|merge (default: from config)
+#   --pull-origin    Pull from origin before syncing with upstream (fix behind_origin)
 #   --push           Push synced branches to origin after sync
 #   --dry-run        Show what would be done without making changes
 #   --rescue         Save local commits to rescue branch before reset (default: from config)
@@ -9485,6 +9487,9 @@ cmd_fork_status() {
 #   # Sync and push to origin
 #   ru fork-sync --push
 #
+#   # Full sync: pull from origin, sync with upstream, push back
+#   ru fork-sync --pull-origin --push
+#
 #   # Sync specific repo with reset strategy
 #   ru fork-sync --strategy reset joyshmitz/ntm
 #------------------------------------------------------------------------------
@@ -9493,6 +9498,7 @@ cmd_fork_sync() {
     local sync_strategy="$FORK_SYNC_STRATEGY"
     local do_push="$FORK_PUSH_AFTER_SYNC"
     local do_rescue="$FORK_RESCUE_POLLUTED"
+    local do_pull_origin="false"
     local force_mode="false"
     local specific_repos=()
 
@@ -9503,6 +9509,7 @@ cmd_fork_sync() {
             --strategy=*) sync_strategy="${arg#--strategy=}" ;;
             --push)       do_push="true" ;;
             --no-push)    do_push="false" ;;
+            --pull-origin) do_pull_origin="true" ;;
             --rescue)     do_rescue="true" ;;
             --no-rescue)  do_rescue="false" ;;
             --force)      force_mode="true" ;;
@@ -9545,6 +9552,7 @@ cmd_fork_sync() {
     log_info "Fork Sync"
     log_info "  Strategy: $sync_strategy"
     log_info "  Branches: ${branches[*]}"
+    log_info "  Pull from origin first: $do_pull_origin"
     log_info "  Push after sync: $do_push"
     log_info "  Rescue polluted: $do_rescue"
     echo "" >&2
@@ -9576,6 +9584,28 @@ cmd_fork_sync() {
         fi
 
         log_step "Syncing: $repo_id"
+
+        # Pull from origin first if requested (to sync with remote changes)
+        if [[ "$do_pull_origin" == "true" ]]; then
+            log_verbose "  Pulling from origin..."
+            if [[ "$DRY_RUN" != "true" ]]; then
+                # Fetch origin first
+                git -C "$local_path" fetch origin --quiet 2>/dev/null
+                # Get current branch
+                local current_br
+                current_br=$(git -C "$local_path" symbolic-ref --short HEAD 2>/dev/null || echo "")
+                if [[ -n "$current_br" ]]; then
+                    # Try to fast-forward from origin
+                    if git -C "$local_path" merge --ff-only "origin/${current_br}" 2>/dev/null; then
+                        log_success "  Pulled from origin/${current_br}"
+                    else
+                        log_verbose "  Could not fast-forward from origin (may have local changes)"
+                    fi
+                fi
+            else
+                log_info "  [DRY RUN] Would pull from origin"
+            fi
+        fi
 
         # Fetch upstream
         log_verbose "  Fetching upstream..."

@@ -5625,6 +5625,9 @@ COMMANDS:
     prune           Find and manage orphan repositories
     import <file>   Import repos from file with auto visibility detection
     review          Review GitHub issues and PRs using Claude Code
+    fork-status     Show fork sync status relative to upstream
+    fork-sync       Sync fork branches with upstream
+    fork-clean      Clean pollution from fork main branches
 
 GLOBAL OPTIONS:
     -h, --help           Show this help message
@@ -5697,6 +5700,21 @@ REVIEW OPTIONS:
     --max-runtime=MIN    Time budget in minutes
     --max-questions=N    Question budget before pausing
 
+FORK OPTIONS:
+    fork-status [repo...]   Show fork status (supports specific repos)
+      --check              Exit code 2 if pollution detected (CI mode)
+      --forks-only         Only show repos detected as forks
+      --no-fetch           Skip fetching remotes
+    fork-sync [repo...]     Sync forks with upstream
+      --strategy=STR       Sync strategy: ff-only, reset, rebase, merge
+      --branches=LIST      Branches to sync (comma-separated)
+      --push               Push to origin after sync
+      --dry-run            Preview without making changes
+    fork-clean [repo...]    Clean pollution from main
+      --push               Push cleaned main to origin
+      --no-rescue          Don't save commits to rescue branch
+      --dry-run            Preview without making changes
+
 EXAMPLES:
     ru sync              Sync all configured repos
     ru sync --dry-run    Preview sync without changes
@@ -5714,6 +5732,10 @@ EXAMPLES:
     ru review --apply    Execute approved changes from plan
     ru review --basic    Answer queued review questions
     ru review --analytics Show review analytics dashboard
+    ru fork-status       Show fork sync status for all repos
+    ru fork-status owner/repo  Check specific repo
+    ru fork-sync --push  Sync forks and push to origin
+    ru fork-clean        Clean polluted main branches
 
 CONFIGURATION:
     Config:  ~/.config/ru/config

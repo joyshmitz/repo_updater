@@ -188,6 +188,7 @@ ru fork-sync [options] [repo...]
 |--------|-------------|
 | `--branches=LIST` | Branches to sync, comma-separated (default: from config) |
 | `--strategy=STR` | Sync strategy: `reset`, `ff-only`, `rebase`, `merge` |
+| `--pull-origin` | Pull from origin before syncing (fixes behind_origin status) |
 | `--push` | Push synced branches to origin after sync |
 | `--no-push` | Don't push (default) |
 | `--rescue` | Save local commits to rescue branch before reset (default) |
@@ -209,6 +210,9 @@ ru fork-sync --branches "main,develop"
 
 # Sync and push to origin
 ru fork-sync --push
+
+# Full sync: pull from origin, sync with upstream, push back
+ru fork-sync --pull-origin --push
 
 # Force reset to upstream (with rescue)
 ru fork-sync --strategy reset

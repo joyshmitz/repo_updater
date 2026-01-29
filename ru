@@ -5735,7 +5735,8 @@ EXAMPLES:
     ru review --analytics Show review analytics dashboard
     ru fork-status       Show fork sync status for all repos
     ru fork-status owner/repo  Check specific repo
-    ru fork-sync --push  Sync forks and push to origin
+    ru fork-sync --push  Sync upstream → local → origin
+    ru fork-sync --pull-origin --push  Full sync: origin → local → upstream → origin
     ru fork-clean        Clean polluted main branches
 
 CONFIGURATION:

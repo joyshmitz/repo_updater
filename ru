@@ -5800,6 +5800,13 @@ show_quick_menu() {
         gum style "    $(gum style --foreground 212 --bold 'import') <file>   $(gum style --foreground 212 'Import repos from file (auto-detects visibility)')" >&2
         printf '\n' >&2
 
+        # Fork management
+        gum style --foreground 39 --bold "  Fork Management" >&2
+        gum style "    $(gum style --foreground 82 'fork-status')    Show fork sync status vs upstream" >&2
+        gum style "    $(gum style --foreground 82 'fork-sync')      Sync forks with upstream" >&2
+        gum style "    $(gum style --foreground 82 'fork-clean')     Clean polluted main branches" >&2
+        printf '\n' >&2
+
         # Setup & maintenance
         gum style --foreground 39 --bold "  Setup & Maintenance" >&2
         gum style "    $(gum style --foreground 82 'init')           Initialize configuration directory" >&2
@@ -5821,6 +5828,9 @@ show_quick_menu() {
         printf '\n' >&2
         gum style --faint "  # Import repos from a file" >&2
         gum style --foreground 212 "  ru import my_repos.txt" >&2
+        printf '\n' >&2
+        gum style --faint "  # Sync forks: upstream → local → origin" >&2
+        gum style --foreground 82 "  ru fork-sync --push" >&2
         printf '\n' >&2
 
         # Footer
@@ -5859,6 +5869,13 @@ show_quick_menu() {
         printf '%b\n' "    ${BOLD}${MAGENTA}import${RESET} <file>   ${MAGENTA}Import repos from file (auto-detects visibility)${RESET}" >&2
         printf '\n' >&2
 
+        # Fork management
+        printf '%b\n' "  ${BOLD}${CYAN}Fork Management${RESET}" >&2
+        printf '%b\n' "    ${GREEN}fork-status${RESET}    Show fork sync status vs upstream" >&2
+        printf '%b\n' "    ${GREEN}fork-sync${RESET}      Sync forks with upstream" >&2
+        printf '%b\n' "    ${GREEN}fork-clean${RESET}     Clean polluted main branches" >&2
+        printf '\n' >&2
+
         # Setup & maintenance
         printf '%b\n' "  ${BOLD}${CYAN}Setup & Maintenance${RESET}" >&2
         printf '%b\n' "    ${GREEN}init${RESET}           Initialize configuration directory" >&2
@@ -5880,6 +5897,9 @@ show_quick_menu() {
         printf '\n' >&2
         printf '%b\n' "  ${DIM}# Import repos from a file${RESET}" >&2
         printf '%b\n' "  ${MAGENTA}ru import my_repos.txt${RESET}" >&2
+        printf '\n' >&2
+        printf '%b\n' "  ${DIM}# Sync forks: upstream → local → origin${RESET}" >&2
+        printf '%b\n' "  ${GREEN}ru fork-sync --push${RESET}" >&2
         printf '\n' >&2
 
         # Footer

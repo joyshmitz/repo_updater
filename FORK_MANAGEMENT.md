@@ -123,6 +123,8 @@ ru fork-status [options] [repo...]
 | `--fetch` | Fetch from remotes before checking (default) |
 | `--no-fetch` | Skip fetching (faster but may show stale data) |
 | `--forks-only` | Only show repos detected as forks |
+| `--auto-upstream` | Auto-detect forks via GitHub API |
+| `--no-auto-upstream` | Offline mode, use existing upstream remotes (default) |
 
 **Output columns:**
 
@@ -194,6 +196,8 @@ ru fork-sync [options] [repo...]
 | `--no-rescue` | Don't save local commits (dangerous!) |
 | `--dry-run` | Preview mode: no writes, no fetch, no mutations |
 | `--force` | Don't prompt for confirmation |
+| `--auto-upstream` | Auto-detect forks via GitHub API |
+| `--no-auto-upstream` | Offline mode, use existing upstream remotes (default) |
 
 **Examples:**
 

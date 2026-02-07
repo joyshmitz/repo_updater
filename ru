@@ -5715,8 +5715,6 @@ FORK-CLEAN OPTIONS:
     --rescue             Save polluted commits to rescue branch (default)
     --no-rescue          Discard polluted commits
     --push               Push cleaned branch to origin
-    --auto-upstream      Auto-detect forks via GitHub API
-    --no-auto-upstream   Offline mode, use existing upstream remotes (default)
     --force              Skip confirmation prompts
     --dry-run            Show what would happen
 
@@ -9420,68 +9418,71 @@ cmd_fork_status() {
     local pollution_count=0
 
     if [[ "$JSON_OUTPUT" == "true" ]]; then
-        # JSON output mode
-        local json_output
-        json_output="$(
-            echo "["
-            local first="true"
-            for repo_spec in "${repos[@]}"; do
-                local url branch custom_name local_path repo_id
-                if ! resolve_repo_spec "$repo_spec" "$PROJECTS_DIR" "$LAYOUT" url branch custom_name local_path repo_id; then
-                    continue
-                fi
+        # JSON output mode - build JSON and track pollution outside subshell
+        local json_entries=()
 
-                # Skip if repo doesn't exist locally
-                if [[ ! -d "$local_path" ]] || ! is_git_repo "$local_path"; then
-                    continue
-                fi
+        for repo_spec in "${repos[@]}"; do
+            local url branch custom_name local_path repo_id
+            if ! resolve_repo_spec "$repo_spec" "$PROJECTS_DIR" "$LAYOUT" url branch custom_name local_path repo_id; then
+                continue
+            fi
 
-                # Check if it's a fork
-                local is_fork_repo="false"
-                if is_fork "$local_path"; then
-                    is_fork_repo="true"
-                elif [[ "$forks_only" == "true" ]]; then
-                    continue  # Skip non-forks in forks-only mode
-                fi
+            # Skip if repo doesn't exist locally
+            if [[ ! -d "$local_path" ]] || ! is_git_repo "$local_path"; then
+                continue
+            fi
 
-                # Get fork status (using repo's default branch)
-                local default_branch fork_status_line
-                default_branch=$(get_default_branch "$local_path")
-                fork_status_line=$(get_fork_status "$local_path" "$default_branch" "$do_fetch")
+            # Check if it's a fork
+            local is_fork_repo="false"
+            if is_fork "$local_path"; then
+                is_fork_repo="true"
+            elif [[ "$forks_only" == "true" ]]; then
+                continue  # Skip non-forks in forks-only mode
+            fi
 
-                # Parse status values
-                local fork_status ahead_origin behind_origin ahead_upstream behind_upstream polluted
-                fork_status=$(echo "$fork_status_line" | sed 's/.*FORK_STATUS=\([^ ]*\).*/\1/')
-                ahead_origin=$(echo "$fork_status_line" | sed 's/.*AHEAD_ORIGIN=\([^ ]*\).*/\1/')
-                behind_origin=$(echo "$fork_status_line" | sed 's/.*BEHIND_ORIGIN=\([^ ]*\).*/\1/')
-                ahead_upstream=$(echo "$fork_status_line" | sed 's/.*AHEAD_UPSTREAM=\([^ ]*\).*/\1/')
-                behind_upstream=$(echo "$fork_status_line" | sed 's/.*BEHIND_UPSTREAM=\([^ ]*\).*/\1/')
-                polluted=$(echo "$fork_status_line" | sed 's/.*POLLUTED=\([^ ]*\).*/\1/')
+            # Get fork status (using repo's default branch)
+            local default_branch fork_status_line
+            default_branch=$(get_default_branch "$local_path")
+            fork_status_line=$(get_fork_status "$local_path" "$default_branch" "$do_fetch")
 
-                # Track pollution
-                if [[ "$polluted" == "true" ]]; then
-                    has_pollution="true"
-                    ((pollution_count++))
-                fi
+            # Parse status values
+            local fork_status ahead_origin behind_origin ahead_upstream behind_upstream polluted
+            fork_status=$(echo "$fork_status_line" | sed 's/.*FORK_STATUS=\([^ ]*\).*/\1/')
+            ahead_origin=$(echo "$fork_status_line" | sed 's/.*AHEAD_ORIGIN=\([^ ]*\).*/\1/')
+            behind_origin=$(echo "$fork_status_line" | sed 's/.*BEHIND_ORIGIN=\([^ ]*\).*/\1/')
+            ahead_upstream=$(echo "$fork_status_line" | sed 's/.*AHEAD_UPSTREAM=\([^ ]*\).*/\1/')
+            behind_upstream=$(echo "$fork_status_line" | sed 's/.*BEHIND_UPSTREAM=\([^ ]*\).*/\1/')
+            polluted=$(echo "$fork_status_line" | sed 's/.*POLLUTED=\([^ ]*\).*/\1/')
 
-                # Get upstream URL if available
-                local upstream_url=""
-                upstream_url=$(git -C "$local_path" remote get-url upstream 2>/dev/null || echo "")
+            # Track pollution (now outside subshell)
+            if [[ "$polluted" == "true" ]]; then
+                has_pollution="true"
+                ((pollution_count++))
+            fi
 
-                [[ "$first" == "true" ]] || echo ","
-                first="false"
+            # Get upstream URL if available
+            local upstream_url=""
+            upstream_url=$(git -C "$local_path" remote get-url upstream 2>/dev/null || echo "")
 
-                local safe_path safe_upstream
-                safe_path=$(json_escape "$local_path")
-                safe_upstream=$(json_escape "$upstream_url")
+            local safe_path safe_upstream
+            safe_path=$(json_escape "$local_path")
+            safe_upstream=$(json_escape "$upstream_url")
 
-                printf '{"repo":"%s","path":"%s","is_fork":%s,"fork_status":"%s","ahead_origin":%d,"behind_origin":%d,"ahead_upstream":%d,"behind_upstream":%d,"polluted":%s,"upstream_url":"%s"}' \
-                    "$repo_id" "$safe_path" "$is_fork_repo" "$fork_status" \
-                    "$ahead_origin" "$behind_origin" "$ahead_upstream" "$behind_upstream" \
-                    "$polluted" "$safe_upstream"
-            done
-            echo "]"
-        )"
+            json_entries+=("$(printf '{"repo":"%s","path":"%s","is_fork":%s,"fork_status":"%s","ahead_origin":%d,"behind_origin":%d,"ahead_upstream":%d,"behind_upstream":%d,"polluted":%s,"upstream_url":"%s"}' \
+                "$repo_id" "$safe_path" "$is_fork_repo" "$fork_status" \
+                "$ahead_origin" "$behind_origin" "$ahead_upstream" "$behind_upstream" \
+                "$polluted" "$safe_upstream")")
+        done
+
+        # Build final JSON array
+        local json_output="["
+        local first="true"
+        for entry in "${json_entries[@]}"; do
+            [[ "$first" == "true" ]] || json_output+=","
+            first="false"
+            json_output+="$entry"
+        done
+        json_output+="]"
         emit_structured "$json_output"
     else
         # Human-readable output
@@ -9746,8 +9747,11 @@ cmd_fork_sync() {
     for repo_spec in "${repos[@]}"; do
         local url branch custom_name local_path repo_id
         if ! resolve_repo_spec "$repo_spec" "$PROJECTS_DIR" "$LAYOUT" url branch custom_name local_path repo_id; then
+            ((current++))
             continue
         fi
+
+        ((current++))
 
         # Skip if not exists
         if [[ ! -d "$local_path" ]] || ! is_git_repo "$local_path"; then
@@ -9781,7 +9785,6 @@ cmd_fork_sync() {
             fi
         fi
 
-        ((current++))
         log_step "[$current/$total] $repo_id"
 
         # Check if upstream actually exists (ensure_upstream may have been dry-run)
@@ -9869,7 +9872,16 @@ cmd_fork_sync() {
                 local rescue_branch
                 rescue_branch="rescue/$(date +%Y-%m-%d-%H%M%S)-${sync_branch}"
                 if [[ "$DRY_RUN" != "true" ]]; then
-                    git -C "$local_path" branch "$rescue_branch" "$sync_branch" 2>/dev/null
+                    # Validate rescue branch creation before destructive reset
+                    if ! git -C "$local_path" branch "$rescue_branch" "$sync_branch" 2>/dev/null; then
+                        # Try with unique suffix if name collision
+                        rescue_branch="rescue/$(date +%Y-%m-%d-%H%M%S)-${sync_branch}-$$"
+                        if ! git -C "$local_path" branch "$rescue_branch" "$sync_branch" 2>/dev/null; then
+                            log_error "  Failed to create rescue branch, aborting reset to prevent commit loss"
+                            branch_failed="true"
+                            continue
+                        fi
+                    fi
                     log_info "  Saved $ahead_count commits to: $rescue_branch"
                 else
                     log_info "  [DRY RUN] Would save $ahead_count commits to rescue branch"
@@ -10034,26 +10046,20 @@ cmd_fork_sync() {
 cmd_fork_clean() {
     local do_rescue="$FORK_RESCUE_POLLUTED"
     local do_push="false"
-    local auto_upstream="$FORK_AUTO_UPSTREAM"
     local force_mode="false"
     local specific_repos=()
 
     # Parse command-specific arguments
     for arg in "${ARGS[@]}"; do
         case "$arg" in
-            --rescue)           do_rescue="true" ;;
-            --no-rescue)        do_rescue="false" ;;
-            --push)             do_push="true" ;;
-            --auto-upstream)    auto_upstream="true" ;;
-            --no-auto-upstream) auto_upstream="false" ;;
-            --force)            force_mode="true" ;;
-            -*)                 log_warn "Unknown option: $arg" ;;
-            *)                  specific_repos+=("$arg") ;;
+            --rescue)    do_rescue="true" ;;
+            --no-rescue) do_rescue="false" ;;
+            --push)      do_push="true" ;;
+            --force)     force_mode="true" ;;
+            -*)          log_warn "Unknown option: $arg" ;;
+            *)           specific_repos+=("$arg") ;;
         esac
     done
-
-    # Export for use in helper functions
-    FORK_AUTO_UPSTREAM="$auto_upstream"
 
     # Load repos
     local repos=()
@@ -10184,7 +10190,20 @@ cmd_fork_clean() {
             local rescue_branch
             rescue_branch="rescue/$(date +%Y-%m-%d-%H%M%S)"
             if [[ "$DRY_RUN" != "true" ]]; then
-                git -C "$local_path" branch "$rescue_branch" "$default_branch" 2>/dev/null
+                # Validate rescue branch creation before destructive reset
+                if ! git -C "$local_path" branch "$rescue_branch" "$default_branch" 2>/dev/null; then
+                    # Try with unique suffix if name collision
+                    rescue_branch="rescue/$(date +%Y-%m-%d-%H%M%S)-$$"
+                    if ! git -C "$local_path" branch "$rescue_branch" "$default_branch" 2>/dev/null; then
+                        log_error "  Failed to create rescue branch, aborting to prevent commit loss"
+                        # Restore stash before failing
+                        if [[ "$stashed" == "true" ]]; then
+                            git -C "$local_path" stash pop >/dev/null 2>&1 || true
+                        fi
+                        ((failed++))
+                        continue
+                    fi
+                fi
                 log_success "  Saved commits to: $rescue_branch"
             else
                 log_info "  [DRY RUN] Would save commits to: $rescue_branch"

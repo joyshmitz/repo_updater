@@ -5695,6 +5695,8 @@ FORK-STATUS OPTIONS:
     --fetch              Fetch remotes before checking (default)
     --no-fetch           Use cached state, don't fetch
     --forks-only         Only show repos detected as forks
+    --auto-upstream      Auto-detect forks via GitHub API
+    --no-auto-upstream   Offline mode, use existing upstream remotes (default)
     --json               Output in JSON format
 
 FORK-SYNC OPTIONS:
@@ -5704,6 +5706,8 @@ FORK-SYNC OPTIONS:
     --no-push            Don't push (default)
     --rescue             Save local commits before reset (default)
     --no-rescue          Discard local commits
+    --auto-upstream      Auto-detect forks via GitHub API
+    --no-auto-upstream   Offline mode, use existing upstream remotes (default)
     --force              Skip confirmation prompts
     --dry-run            Show what would happen
 
@@ -5711,6 +5715,8 @@ FORK-CLEAN OPTIONS:
     --rescue             Save polluted commits to rescue branch (default)
     --no-rescue          Discard polluted commits
     --push               Push cleaned branch to origin
+    --auto-upstream      Auto-detect forks via GitHub API
+    --no-auto-upstream   Offline mode, use existing upstream remotes (default)
     --force              Skip confirmation prompts
     --dry-run            Show what would happen
 
@@ -8349,7 +8355,7 @@ parse_args() {
                 COMMAND="$1"
                 shift
                 ;;
-            --paths|--print|--set=*|--check|--archive|--delete|--private|--public|--from-cwd|--review)
+            --paths|--print|--set=*|--check|--archive|--delete|--private|--public|--from-cwd|--review|--auto-upstream|--no-auto-upstream|--forks-only)
                 # Subcommand-specific options - pass through to ARGS
                 ARGS+=("$1")
                 shift
@@ -9367,19 +9373,25 @@ cmd_fork_status() {
     local do_fetch="$FETCH_REMOTES"
     local check_mode="false"
     local forks_only="false"
+    local auto_upstream="$FORK_AUTO_UPSTREAM"
     local specific_repos=()
 
     # Parse command-specific arguments
     for arg in "${ARGS[@]}"; do
         case "$arg" in
-            --check)     check_mode="true" ;;
-            --fetch)     do_fetch="true" ;;
-            --no-fetch)  do_fetch="false" ;;
-            --forks-only) forks_only="true" ;;
-            -*)          log_warn "Unknown option: $arg" ;;
-            *)           specific_repos+=("$arg") ;;
+            --check)          check_mode="true" ;;
+            --fetch)          do_fetch="true" ;;
+            --no-fetch)       do_fetch="false" ;;
+            --forks-only)     forks_only="true" ;;
+            --auto-upstream)  auto_upstream="true" ;;
+            --no-auto-upstream) auto_upstream="false" ;;
+            -*)               log_warn "Unknown option: $arg" ;;
+            *)                specific_repos+=("$arg") ;;
         esac
     done
+
+    # Export for use in helper functions
+    FORK_AUTO_UPSTREAM="$auto_upstream"
 
     # Ensure config exists
     if [[ ! -d "$RU_CONFIG_DIR" ]]; then
@@ -9632,6 +9644,7 @@ cmd_fork_sync() {
     local sync_strategy="$FORK_SYNC_STRATEGY"
     local do_push="$FORK_PUSH_AFTER_SYNC"
     local do_rescue="$FORK_RESCUE_POLLUTED"
+    local auto_upstream="$FORK_AUTO_UPSTREAM"
     local force_mode="false"
     local specific_repos=()
 
@@ -9664,12 +9677,17 @@ cmd_fork_sync() {
             --no-push)    do_push="false" ;;
             --rescue)     do_rescue="true" ;;
             --no-rescue)  do_rescue="false" ;;
+            --auto-upstream)    auto_upstream="true" ;;
+            --no-auto-upstream) auto_upstream="false" ;;
             --force)      force_mode="true" ;;
             -*)           log_warn "Unknown option: $arg" ;;
             *)            specific_repos+=("$arg") ;;
         esac
         ((i++))
     done
+
+    # Export for use in helper functions
+    FORK_AUTO_UPSTREAM="$auto_upstream"
 
     # Validate strategy
     case "$sync_strategy" in
@@ -10016,20 +10034,26 @@ cmd_fork_sync() {
 cmd_fork_clean() {
     local do_rescue="$FORK_RESCUE_POLLUTED"
     local do_push="false"
+    local auto_upstream="$FORK_AUTO_UPSTREAM"
     local force_mode="false"
     local specific_repos=()
 
     # Parse command-specific arguments
     for arg in "${ARGS[@]}"; do
         case "$arg" in
-            --rescue)    do_rescue="true" ;;
-            --no-rescue) do_rescue="false" ;;
-            --push)      do_push="true" ;;
-            --force)     force_mode="true" ;;
-            -*)          log_warn "Unknown option: $arg" ;;
-            *)           specific_repos+=("$arg") ;;
+            --rescue)           do_rescue="true" ;;
+            --no-rescue)        do_rescue="false" ;;
+            --push)             do_push="true" ;;
+            --auto-upstream)    auto_upstream="true" ;;
+            --no-auto-upstream) auto_upstream="false" ;;
+            --force)            force_mode="true" ;;
+            -*)                 log_warn "Unknown option: $arg" ;;
+            *)                  specific_repos+=("$arg") ;;
         esac
     done
+
+    # Export for use in helper functions
+    FORK_AUTO_UPSTREAM="$auto_upstream"
 
     # Load repos
     local repos=()

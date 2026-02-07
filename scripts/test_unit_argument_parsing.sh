@@ -410,6 +410,106 @@ test_review_status_option_before_command_passed_to_args() {
     assert_contains "${ARGS[*]}" "--status" "--status preserved when provided before command"
 }
 
+test_fork_sync_push_option_passed_to_args() {
+    reset_globals
+    parse_args fork-sync --push
+
+    assert_equals "fork-sync" "$COMMAND" "fork-sync sets COMMAND=fork-sync"
+    assert_contains "${ARGS[*]}" "--push" "--push passed to ARGS for fork-sync"
+}
+
+test_fork_sync_push_before_command_passed_to_args() {
+    reset_globals
+    parse_args --push fork-sync
+
+    assert_equals "fork-sync" "$COMMAND" "fork-sync sets COMMAND with leading --push"
+    assert_contains "${ARGS[*]}" "--push" "--push preserved when provided before fork-sync command"
+}
+
+test_fork_sync_no_push_option_passed_to_args() {
+    reset_globals
+    parse_args fork-sync --no-push
+
+    assert_equals "fork-sync" "$COMMAND" "fork-sync sets COMMAND=fork-sync"
+    assert_contains "${ARGS[*]}" "--no-push" "--no-push passed to ARGS for fork-sync"
+}
+
+test_fork_sync_branches_equals_option_passed_to_args() {
+    reset_globals
+    parse_args fork-sync --branches=main,develop
+
+    assert_equals "fork-sync" "$COMMAND" "fork-sync sets COMMAND=fork-sync"
+    assert_contains "${ARGS[*]}" "--branches=main,develop" "--branches=LIST passed to ARGS for fork-sync"
+}
+
+test_fork_sync_branches_value_option_passed_to_args() {
+    reset_globals
+    parse_args fork-sync --branches main,develop
+
+    assert_equals "fork-sync" "$COMMAND" "fork-sync sets COMMAND=fork-sync"
+    assert_equals "--branches" "${ARGS[0]}" "--branches flag preserved in ARGS"
+    assert_equals "main,develop" "${ARGS[1]}" "--branches value preserved in ARGS"
+}
+
+test_fork_sync_strategy_equals_option_passed_to_args() {
+    reset_globals
+    parse_args fork-sync --strategy=ff-only
+
+    assert_equals "fork-sync" "$COMMAND" "fork-sync sets COMMAND=fork-sync"
+    assert_contains "${ARGS[*]}" "--strategy=ff-only" "--strategy=STR passed to ARGS for fork-sync"
+}
+
+test_fork_sync_strategy_value_option_passed_to_args() {
+    reset_globals
+    parse_args fork-sync --strategy ff-only
+
+    assert_equals "fork-sync" "$COMMAND" "fork-sync sets COMMAND=fork-sync"
+    assert_equals "--strategy" "${ARGS[0]}" "--strategy flag preserved in ARGS"
+    assert_equals "ff-only" "${ARGS[1]}" "--strategy value preserved in ARGS"
+}
+
+test_fork_sync_branches_before_command_passed_to_args() {
+    reset_globals
+    parse_args --branches main,develop fork-sync
+
+    assert_equals "fork-sync" "$COMMAND" "fork-sync sets COMMAND when --branches is before command"
+    assert_equals "--branches" "${ARGS[0]}" "--branches flag preserved when provided before command"
+    assert_equals "main,develop" "${ARGS[1]}" "--branches value preserved when provided before command"
+}
+
+test_fork_sync_strategy_before_command_passed_to_args() {
+    reset_globals
+    parse_args --strategy reset fork-sync
+
+    assert_equals "fork-sync" "$COMMAND" "fork-sync sets COMMAND when --strategy is before command"
+    assert_equals "--strategy" "${ARGS[0]}" "--strategy flag preserved when provided before command"
+    assert_equals "reset" "${ARGS[1]}" "--strategy value preserved when provided before command"
+}
+
+test_fork_sync_rescue_option_passed_to_args() {
+    reset_globals
+    parse_args fork-sync --rescue
+
+    assert_equals "fork-sync" "$COMMAND" "fork-sync sets COMMAND=fork-sync"
+    assert_contains "${ARGS[*]}" "--rescue" "--rescue passed to ARGS for fork-sync"
+}
+
+test_fork_clean_no_rescue_option_passed_to_args() {
+    reset_globals
+    parse_args fork-clean --no-rescue
+
+    assert_equals "fork-clean" "$COMMAND" "fork-clean sets COMMAND=fork-clean"
+    assert_contains "${ARGS[*]}" "--no-rescue" "--no-rescue passed to ARGS for fork-clean"
+}
+
+test_fork_clean_force_option_passed_to_args() {
+    reset_globals
+    parse_args fork-clean --force
+
+    assert_equals "fork-clean" "$COMMAND" "fork-clean sets COMMAND=fork-clean"
+    assert_contains "${ARGS[*]}" "--force" "--force passed to ARGS for fork-clean"
+}
+
 #==============================================================================
 # Tests: Positional Arguments
 #==============================================================================
@@ -593,6 +693,24 @@ run_test test_set_option_passed_to_args
 run_test test_check_option_passed_to_args
 run_test test_archive_option_passed_to_args
 run_test test_delete_option_passed_to_args
+run_test test_review_auto_answer_option_passed_to_args
+run_test test_review_invalidate_cache_option_passed_to_args
+run_test test_review_auto_answer_value_form_passed_to_args
+run_test test_review_invalidate_cache_value_form_passed_to_args
+run_test test_review_status_option_passed_to_args
+run_test test_review_status_option_before_command_passed_to_args
+run_test test_fork_sync_push_option_passed_to_args
+run_test test_fork_sync_push_before_command_passed_to_args
+run_test test_fork_sync_no_push_option_passed_to_args
+run_test test_fork_sync_branches_equals_option_passed_to_args
+run_test test_fork_sync_branches_value_option_passed_to_args
+run_test test_fork_sync_strategy_equals_option_passed_to_args
+run_test test_fork_sync_strategy_value_option_passed_to_args
+run_test test_fork_sync_branches_before_command_passed_to_args
+run_test test_fork_sync_strategy_before_command_passed_to_args
+run_test test_fork_sync_rescue_option_passed_to_args
+run_test test_fork_clean_no_rescue_option_passed_to_args
+run_test test_fork_clean_force_option_passed_to_args
 
 # Positional arguments
 run_test test_positional_argument_passed_to_args

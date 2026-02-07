@@ -8576,6 +8576,92 @@ print_summary() {
     fi
 }
 
+# Print fork sync summary with consistent formatting
+print_fork_summary() {
+    local synced="${1:-0}"
+    local failed="${2:-0}"
+    local skipped="${3:-0}"
+    local duration="${4:-0}"
+    local total=$((synced + failed + skipped))
+
+    # Format duration
+    local duration_str
+    if [[ "$duration" -ge 60 ]]; then
+        local mins=$((duration / 60))
+        local secs=$((duration % 60))
+        duration_str="${mins}m ${secs}s"
+    else
+        duration_str="${duration}s"
+    fi
+
+    if [[ "$GUM_AVAILABLE" == "true" ]]; then
+        local summary_text=""
+        summary_text+="             📊 Fork Sync Summary\n"
+        summary_text+="─────────────────────────────────────────\n"
+        [[ $synced -gt 0 ]] && summary_text+="  ✅ Synced:     $synced repos\n"
+        [[ $skipped -gt 0 ]] && summary_text+="  ⏭️  Skipped:    $skipped repos\n"
+        [[ $failed -gt 0 ]] && summary_text+="  ❌ Failed:     $failed repos\n"
+        summary_text+="─────────────────────────────────────────\n"
+        summary_text+="  Total: $total repos processed in $duration_str\n"
+
+        printf '%b' "$summary_text" | gum style --border rounded --padding "0 1" --border-foreground 212 >&2
+    else
+        echo "" >&2
+        printf '%b\n' "${BOLD}╭─────────────────────────────────────────────────────────────╮${RESET}" >&2
+        printf '%b\n' "${BOLD}│                  📊 Fork Sync Summary                       │${RESET}" >&2
+        printf '%b\n' "${BOLD}├─────────────────────────────────────────────────────────────┤${RESET}" >&2
+        [[ $synced -gt 0 ]] && printf '%b\n' "${BOLD}│${RESET}  ${GREEN}✅${RESET} Synced:     $synced repos                                   ${BOLD}│${RESET}" >&2
+        [[ $skipped -gt 0 ]] && printf '%b\n' "${BOLD}│${RESET}  ⏭️  Skipped:    $skipped repos                                   ${BOLD}│${RESET}" >&2
+        [[ $failed -gt 0 ]] && printf '%b\n' "${BOLD}│${RESET}  ${RED}❌${RESET} Failed:     $failed repos                                   ${BOLD}│${RESET}" >&2
+        printf '%b\n' "${BOLD}├─────────────────────────────────────────────────────────────┤${RESET}" >&2
+        printf '%b\n' "${BOLD}│${RESET}  Total: $total repos processed in $duration_str                      ${BOLD}│${RESET}" >&2
+        printf '%b\n' "${BOLD}╰─────────────────────────────────────────────────────────────╯${RESET}" >&2
+    fi
+}
+
+# Print fork clean summary with consistent formatting
+print_fork_clean_summary() {
+    local cleaned="${1:-0}"
+    local failed="${2:-0}"
+    local skipped="${3:-0}"
+    local duration="${4:-0}"
+    local total=$((cleaned + failed + skipped))
+
+    # Format duration
+    local duration_str
+    if [[ "$duration" -ge 60 ]]; then
+        local mins=$((duration / 60))
+        local secs=$((duration % 60))
+        duration_str="${mins}m ${secs}s"
+    else
+        duration_str="${duration}s"
+    fi
+
+    if [[ "$GUM_AVAILABLE" == "true" ]]; then
+        local summary_text=""
+        summary_text+="            📊 Fork Clean Summary\n"
+        summary_text+="─────────────────────────────────────────\n"
+        [[ $cleaned -gt 0 ]] && summary_text+="  ✅ Cleaned:    $cleaned repos\n"
+        [[ $skipped -gt 0 ]] && summary_text+="  ⏭️  Skipped:    $skipped repos\n"
+        [[ $failed -gt 0 ]] && summary_text+="  ❌ Failed:     $failed repos\n"
+        summary_text+="─────────────────────────────────────────\n"
+        summary_text+="  Total: $total repos processed in $duration_str\n"
+
+        printf '%b' "$summary_text" | gum style --border rounded --padding "0 1" --border-foreground 212 >&2
+    else
+        echo "" >&2
+        printf '%b\n' "${BOLD}╭─────────────────────────────────────────────────────────────╮${RESET}" >&2
+        printf '%b\n' "${BOLD}│                 📊 Fork Clean Summary                       │${RESET}" >&2
+        printf '%b\n' "${BOLD}├─────────────────────────────────────────────────────────────┤${RESET}" >&2
+        [[ $cleaned -gt 0 ]] && printf '%b\n' "${BOLD}│${RESET}  ${GREEN}✅${RESET} Cleaned:    $cleaned repos                                   ${BOLD}│${RESET}" >&2
+        [[ $skipped -gt 0 ]] && printf '%b\n' "${BOLD}│${RESET}  ⏭️  Skipped:    $skipped repos                                   ${BOLD}│${RESET}" >&2
+        [[ $failed -gt 0 ]] && printf '%b\n' "${BOLD}│${RESET}  ${RED}❌${RESET} Failed:     $failed repos                                   ${BOLD}│${RESET}" >&2
+        printf '%b\n' "${BOLD}├─────────────────────────────────────────────────────────────┤${RESET}" >&2
+        printf '%b\n' "${BOLD}│${RESET}  Total: $total repos processed in $duration_str                      ${BOLD}│${RESET}" >&2
+        printf '%b\n' "${BOLD}╰─────────────────────────────────────────────────────────────╯${RESET}" >&2
+    fi
+}
+
 # Print actionable conflict resolution help
 # Reads from RESULTS_FILE to find repos with issues
 print_conflict_help() {
@@ -9655,6 +9741,10 @@ cmd_fork_sync() {
         [[ -n "$branch" ]] && branches+=("$branch")
     done < <(parse_branch_list "$sync_branches")
 
+    # Track start time for duration reporting
+    local start_time
+    start_time=$(date +%s)
+
     log_info "Fork Sync"
     log_info "  Strategy: $sync_strategy"
     log_info "  Branches: ${branches[*]}"
@@ -9662,9 +9752,15 @@ cmd_fork_sync() {
     log_info "  Rescue polluted: $do_rescue"
     echo "" >&2
 
+    local total=${#repos[@]}
+    local current=0
+
     if [[ "$DRY_RUN" == "true" ]]; then
-        log_info "[DRY RUN] Would sync ${#repos[@]} repos"
+        log_info "[DRY RUN] Would sync $total repos"
+    else
+        log_info "Syncing $total repositories..."
     fi
+    echo "" >&2
 
     local synced=0 failed=0 skipped=0
 
@@ -9706,7 +9802,8 @@ cmd_fork_sync() {
             fi
         fi
 
-        log_step "Syncing: $repo_id"
+        ((current++))
+        log_step "[$current/$total] $repo_id"
 
         # Check if upstream actually exists (ensure_upstream may have been dry-run)
         local upstream_exists="false"
@@ -9916,7 +10013,14 @@ cmd_fork_sync() {
     done
 
     echo "" >&2
-    log_info "Summary: $synced synced, $failed failed, $skipped skipped"
+
+    # Calculate duration
+    local end_time duration
+    end_time=$(date +%s)
+    duration=$((end_time - start_time))
+
+    # Print summary using consistent format with sync command
+    print_fork_summary "$synced" "$failed" "$skipped" "$duration"
 
     [[ "$failed" -gt 0 ]] && exit 1
     exit 0
@@ -9981,14 +10085,21 @@ cmd_fork_clean() {
         exit 0
     fi
 
+    # Track start time for duration reporting
+    local start_time
+    start_time=$(date +%s)
+
     log_info "Fork Clean"
     log_info "  Rescue commits: $do_rescue"
     log_info "  Push after clean: $do_push"
     echo "" >&2
 
+    local total=${#repos[@]}
+    local current=0
     local cleaned=0 skipped=0 failed=0
 
     for repo_spec in "${repos[@]}"; do
+        ((current++))
         local url branch custom_name local_path repo_id
         if ! resolve_repo_spec "$repo_spec" "$PROJECTS_DIR" "$LAYOUT" url branch custom_name local_path repo_id; then
             continue
@@ -10050,7 +10161,7 @@ cmd_fork_clean() {
             continue
         fi
 
-        log_step "Cleaning: $repo_id ($pollution_count polluting commits)"
+        log_step "[$current/$total] $repo_id ($pollution_count polluting commits)"
 
         # Show polluting commits
         if [[ "$VERBOSE" == "true" || "$DRY_RUN" == "true" ]]; then
@@ -10152,7 +10263,14 @@ cmd_fork_clean() {
     done
 
     echo "" >&2
-    log_info "Summary: $cleaned cleaned, $failed failed, $skipped skipped"
+
+    # Calculate duration
+    local end_time duration
+    end_time=$(date +%s)
+    duration=$((end_time - start_time))
+
+    # Print summary using consistent format
+    print_fork_clean_summary "$cleaned" "$failed" "$skipped" "$duration"
 
     [[ "$failed" -gt 0 ]] && exit 1
     exit 0

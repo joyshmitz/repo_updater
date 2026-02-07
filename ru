@@ -8176,6 +8176,7 @@ trap cleanup EXIT
 parse_args() {
     local -a pending_review_args=()
     local -a pending_global_args=()
+    local -a pending_fork_args=()
 
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -8335,9 +8336,61 @@ parse_args() {
                 fi
                 shift
                 ;;
-            --major|--no-push|--no-untracked)
+            --major|--no-untracked)
                 if [[ "$COMMAND" == "ai-sync" || "$COMMAND" == "dep-update" ]]; then
                     ARGS+=("$1")
+                else
+                    log_error "Unknown option: $1"
+                    show_help
+                    exit 4
+                fi
+                shift
+                ;;
+            --push)
+                if [[ "$COMMAND" == "review" || "$COMMAND" == "agent-sweep" || "$COMMAND" == "fork-sync" || "$COMMAND" == "fork-clean" ]]; then
+                    ARGS+=("$1")
+                elif [[ -z "$COMMAND" ]]; then
+                    pending_review_args+=("$1")
+                else
+                    log_error "Unknown option: $1"
+                    show_help
+                    exit 4
+                fi
+                shift
+                ;;
+            --no-push)
+                if [[ "$COMMAND" == "ai-sync" || "$COMMAND" == "dep-update" || "$COMMAND" == "fork-sync" ]]; then
+                    ARGS+=("$1")
+                elif [[ -z "$COMMAND" ]]; then
+                    pending_fork_args+=("$1")
+                else
+                    log_error "Unknown option: $1"
+                    show_help
+                    exit 4
+                fi
+                shift
+                ;;
+            --branches|--strategy)
+                if [[ $# -lt 2 ]]; then
+                    log_error "$1 requires a value"
+                    exit 4
+                fi
+                if [[ "$COMMAND" == "fork-sync" ]]; then
+                    ARGS+=("$1" "$2")
+                elif [[ -z "$COMMAND" ]]; then
+                    pending_fork_args+=("$1" "$2")
+                else
+                    log_error "Unknown option: $1"
+                    show_help
+                    exit 4
+                fi
+                shift 2
+                ;;
+            --branches=*|--strategy=*|--rescue|--no-rescue|--force)
+                if [[ "$COMMAND" == "fork-sync" || "$COMMAND" == "fork-clean" ]]; then
+                    ARGS+=("$1")
+                elif [[ -z "$COMMAND" ]]; then
+                    pending_fork_args+=("$1")
                 else
                     log_error "Unknown option: $1"
                     show_help
@@ -8423,10 +8476,16 @@ parse_args() {
                 ;;
             --paths|--print|--set=*|--check|--archive|--delete|--private|--public|--from-cwd|--review|--auto-upstream|--no-auto-upstream|--forks-only)
                 # Subcommand-specific options - pass through to ARGS
-                ARGS+=("$1")
+                if [[ "$COMMAND" == "fork-status" || "$COMMAND" == "fork-sync" ]]; then
+                    ARGS+=("$1")
+                elif [[ -z "$COMMAND" ]]; then
+                    pending_fork_args+=("$1")
+                else
+                    ARGS+=("$1")
+                fi
                 shift
                 ;;
-            --plan|--apply|--push|--analytics|--basic|--status|--mode=*|--repos=*|--skip-days=*|--priority=*|--max-repos=*|--max-runtime=*|--max-questions=*|--invalidate-cache=*|--auto-answer=*)
+            --plan|--apply|--analytics|--basic|--status|--mode=*|--repos=*|--skip-days=*|--priority=*|--max-repos=*|--max-runtime=*|--max-questions=*|--invalidate-cache=*|--auto-answer=*)
                 if [[ "$COMMAND" == "review" || "$COMMAND" == "agent-sweep" ]]; then
                     ARGS+=("$1")
                     shift
@@ -8523,10 +8582,57 @@ parse_args() {
     # Apply any pending args that appeared before the command
     if [[ "$COMMAND" == "review" || "$COMMAND" == "agent-sweep" ]]; then
         [[ ${#pending_review_args[@]} -gt 0 ]] && ARGS+=("${pending_review_args[@]}")
+        if [[ ${#pending_fork_args[@]} -gt 0 ]]; then
+            local opt
+            for opt in "${pending_fork_args[@]}"; do
+                case "$opt" in
+                    --push) ;;
+                    *)
+                        log_error "Unknown option: $opt"
+                        show_help
+                        exit 4
+                        ;;
+                esac
+            done
+        fi
         [[ ${#pending_global_args[@]} -gt 0 ]] && ARGS+=("${pending_global_args[@]}")
+    elif [[ "$COMMAND" == "fork-status" || "$COMMAND" == "fork-sync" || "$COMMAND" == "fork-clean" ]]; then
+        [[ ${#pending_fork_args[@]} -gt 0 ]] && ARGS+=("${pending_fork_args[@]}")
+        if [[ ${#pending_review_args[@]} -gt 0 ]]; then
+            local opt
+            for opt in "${pending_review_args[@]}"; do
+                case "$opt" in
+                    --push) ARGS+=("$opt") ;;
+                    *)
+                        log_error "Unknown option: $opt"
+                        show_help
+                        exit 4
+                        ;;
+                esac
+            done
+        fi
+        if [[ ${#pending_global_args[@]} -gt 0 ]]; then
+            local opt
+            for opt in "${pending_global_args[@]}"; do
+                case "$opt" in
+                    --dry-run) DRY_RUN="true" ;;
+                    --resume)  RESUME="true" ;;
+                    --restart) RESTART="true" ;;
+                    --json)    ;; # Already set JSON_OUTPUT at first pass
+                    --timeout=*) GIT_TIMEOUT="${opt#--timeout=}" ;;
+                    --parallel=*) PARALLEL="${opt#--parallel=}" ;;
+                    -j*) PARALLEL="${opt#-j}" ;;
+                esac
+            done
+        fi
     else
         if [[ ${#pending_review_args[@]} -gt 0 ]]; then
             log_error "Unknown option: ${pending_review_args[0]}"
+            show_help
+            exit 4
+        fi
+        if [[ ${#pending_fork_args[@]} -gt 0 ]]; then
+            log_error "Unknown option: ${pending_fork_args[0]}"
             show_help
             exit 4
         fi
@@ -9815,6 +9921,7 @@ cmd_fork_sync() {
             ((current++))
             continue
         fi
+        ((current++))
 
         # Skip if not exists
         if [[ ! -d "$local_path" ]] || ! is_git_repo "$local_path"; then
@@ -9835,9 +9942,14 @@ cmd_fork_sync() {
         if has_uncommitted_changes "$local_path"; then
             if [[ "$AUTOSTASH" == "true" ]]; then
                 if [[ "$DRY_RUN" != "true" ]]; then
-                    git -C "$local_path" stash push -u -m "ru fork-sync autostash" >/dev/null 2>&1 || true
-                    stashed="true"
-                    log_verbose "  Auto-stashed uncommitted changes"
+                    if git -C "$local_path" stash push -u -m "ru fork-sync autostash" >/dev/null 2>&1; then
+                        stashed="true"
+                        log_verbose "  Auto-stashed uncommitted changes"
+                    else
+                        log_warn "  Failed to auto-stash changes, skipping: $repo_id"
+                        ((skipped++))
+                        continue
+                    fi
                 else
                     log_info "  [DRY RUN] Would auto-stash uncommitted changes"
                 fi
@@ -10177,9 +10289,14 @@ cmd_fork_clean() {
         if has_uncommitted_changes "$local_path"; then
             if [[ "$AUTOSTASH" == "true" ]]; then
                 if [[ "$DRY_RUN" != "true" ]]; then
-                    git -C "$local_path" stash push -u -m "ru fork-clean autostash" >/dev/null 2>&1 || true
-                    stashed="true"
-                    log_verbose "  Auto-stashed uncommitted changes"
+                    if git -C "$local_path" stash push -u -m "ru fork-clean autostash" >/dev/null 2>&1; then
+                        stashed="true"
+                        log_verbose "  Auto-stashed uncommitted changes"
+                    else
+                        log_warn "Skipping (failed to auto-stash): $repo_id"
+                        ((skipped++))
+                        continue
+                    fi
                 else
                     log_info "  [DRY RUN] Would auto-stash uncommitted changes"
                 fi

@@ -9751,8 +9751,6 @@ cmd_fork_sync() {
             continue
         fi
 
-        ((current++))
-
         # Skip if not exists
         if [[ ! -d "$local_path" ]] || ! is_git_repo "$local_path"; then
             log_verbose "Skipping (not found): $repo_id"

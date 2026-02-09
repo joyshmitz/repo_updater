@@ -5738,7 +5738,8 @@ FORK-STATUS OPTIONS:
     --json               Output in JSON format
 
 FORK-SYNC OPTIONS:
-    --branches LIST      Branches to sync (default: main)
+    --branches LIST      Branches to sync (exact, no fallback)
+                         Without --branches: main↔master auto-fallback
     --strategy STRAT     Sync strategy: reset, ff-only, rebase, merge
     --push               Push to origin after sync
     --no-push            Don't push (default)
@@ -9818,6 +9819,7 @@ cmd_fork_sync() {
     local do_rescue="$FORK_RESCUE_POLLUTED"
     local auto_upstream="$FORK_AUTO_UPSTREAM"
     local force_mode="false"
+    local branches_cli="false"
     local specific_repos=()
 
     # Parse command-specific arguments (supports both --opt=val and --opt val)
@@ -9825,7 +9827,7 @@ cmd_fork_sync() {
     while [[ $i -lt ${#ARGS[@]} ]]; do
         local arg="${ARGS[$i]}"
         case "$arg" in
-            --branches=*) sync_branches="${arg#--branches=}" ;;
+            --branches=*) sync_branches="${arg#--branches=}"; branches_cli="true" ;;
             --branches)
                 # Validate next argument exists and isn't another flag
                 if [[ $((i+1)) -ge ${#ARGS[@]} ]] || [[ "${ARGS[$((i+1))]}" == -* ]]; then
@@ -9834,6 +9836,7 @@ cmd_fork_sync() {
                 fi
                 ((i++))
                 sync_branches="${ARGS[$i]}"
+                branches_cli="true"
                 ;;
             --strategy=*) sync_strategy="${arg#--strategy=}" ;;
             --strategy)
@@ -9914,6 +9917,7 @@ cmd_fork_sync() {
     echo "" >&2
 
     local synced=0 failed=0 skipped=0
+    declare -a _upstream_mismatch_repos=()
 
     for repo_spec in "${repos[@]}"; do
         local url branch custom_name local_path repo_id
@@ -9999,19 +10003,49 @@ cmd_fork_sync() {
         # Sync each configured branch
         local branch_failed="false"
         local branches_synced=0
+        # Dedupe set — scoped per repo, reset on each repo iteration.
+        # Prevents syncing the same resolved branch twice within one repo
+        # (e.g., FORK_SYNC_BRANCHES=main,master + repo only has master).
+        declare -A _synced_branches=()
         for sync_branch in "${branches[@]}"; do
             log_verbose "  Syncing branch: $sync_branch"
 
+            # Branch name from config/list before fallback; used only for
+            # upstream-mismatch diagnostics (Change G)
+            local _original_branch="$sync_branch"
             # Check if branch exists locally
-            if ! git -C "$local_path" rev-parse --verify "$sync_branch" &>/dev/null; then
-                log_verbose "    Branch $sync_branch doesn't exist locally, skipping"
+            if ! git -C "$local_path" rev-parse --verify "refs/heads/$sync_branch" &>/dev/null; then
+                # Fallback: main↔master only, not for explicit --branches
+                local fallback=""
+                if [[ "$branches_cli" != "true" ]]; then
+                    if [[ "$sync_branch" == "main" ]]; then fallback="master"
+                    elif [[ "$sync_branch" == "master" ]]; then fallback="main"
+                    fi
+                fi
+                if [[ -n "$fallback" ]] && git -C "$local_path" rev-parse --verify "refs/heads/$fallback" &>/dev/null; then
+                    log_verbose "    Branch $sync_branch not found, falling back to $fallback"
+                    sync_branch="$fallback"
+                else
+                    log_verbose "    Branch $sync_branch doesn't exist locally, skipping"
+                    continue
+                fi
+            fi
+
+            # Dedupe: skip if this resolved branch was already synced
+            if [[ -n "${_synced_branches[$sync_branch]+x}" ]]; then
+                log_verbose "    Branch $sync_branch already synced, skipping"
                 continue
             fi
 
             # Check if upstream branch exists (skip check in dry-run without upstream)
             if [[ "$upstream_exists" == "true" ]]; then
                 if ! git -C "$local_path" rev-parse --verify "upstream/$sync_branch" &>/dev/null; then
-                    log_verbose "    Branch upstream/$sync_branch doesn't exist, skipping"
+                    if [[ "$sync_branch" != "$_original_branch" ]]; then
+                        log_verbose "    upstream/$sync_branch not found (fallback from $_original_branch)"
+                        _upstream_mismatch_repos+=("$repo_id")
+                    else
+                        log_verbose "    Branch upstream/$sync_branch doesn't exist, skipping"
+                    fi
                     continue
                 fi
             elif [[ "$DRY_RUN" == "true" ]]; then
@@ -10074,6 +10108,7 @@ cmd_fork_sync() {
 
             # Apply sync strategy
             local sync_cmd_output
+            local _prev_synced=$branches_synced
             case "$sync_strategy" in
                 reset)
                     if [[ "$DRY_RUN" != "true" ]]; then
@@ -10139,6 +10174,10 @@ cmd_fork_sync() {
                     ;;
             esac
 
+            if [[ "$branches_synced" -gt "$_prev_synced" ]]; then
+                _synced_branches[$sync_branch]=1
+            fi
+
             # Push to origin if requested
             if [[ "$do_push" == "true" && "$branch_failed" != "true" ]]; then
                 if [[ "$DRY_RUN" != "true" ]]; then
@@ -10177,6 +10216,21 @@ cmd_fork_sync() {
             ((skipped++))
         fi
     done
+
+    if [[ ${#_upstream_mismatch_repos[@]} -gt 0 ]]; then
+        local _n=${#_upstream_mismatch_repos[@]}
+        local _preview="" _i
+        for _i in "${_upstream_mismatch_repos[@]:0:3}"; do
+            [[ -n "$_preview" ]] && _preview+=", "
+            _preview+="\"${_i//\"/\\\"}\""
+        done
+        local _suffix=""
+        if [[ $_n -gt 3 ]]; then
+            _suffix=" and $((_n - 3)) more"
+        fi
+        log_warn "$_n repo(s) skipped: local/upstream branch name mismatch after fallback"
+        log_warn "  Affected: ${_preview}${_suffix}. Run: ru fork-status <repo>"
+    fi
 
     echo "" >&2
 

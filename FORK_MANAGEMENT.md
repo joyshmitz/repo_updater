@@ -20,6 +20,7 @@ This document describes ru's fork management capabilities — a set of commands 
   - [What is Pollution?](#what-is-pollution)
   - [Rescue Branches](#rescue-branches)
   - [Sync Strategies](#sync-strategies)
+  - [Branch Fallback (main ↔ master)](#branch-fallback-main--master)
 - [Common Workflows](#common-workflows)
 - [Troubleshooting](#troubleshooting)
 
@@ -382,7 +383,8 @@ your main:        A ── B ── C ── X ── Y    ◀── X, Y are "p
 
 ### Rescue Branches
 
-When `ru fork-clean` removes pollution, it first saves your commits to a **rescue branch**:
+When `ru fork-clean` or `ru fork-sync --strategy reset` encounters local commits,
+it first saves them to a **rescue branch**:
 
 ```
 Before cleanup:
@@ -392,6 +394,10 @@ After cleanup:
   main:           A ── B ── C ── D ── E    (matches upstream)
   rescue/2025-01-28-143052:  X ── Y        (your commits saved)
 ```
+
+Naming format differs by command:
+- `fork-clean`: `rescue/YYYY-MM-DD-HHMMSS` (e.g., `rescue/2025-01-28-143052`)
+- `fork-sync`:  `rescue/YYYY-MM-DD-HHMMSS-<branch>` (e.g., `rescue/2025-01-28-143052-main`)
 
 **Finding your rescued commits:**
 

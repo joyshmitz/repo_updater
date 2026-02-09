@@ -37,6 +37,13 @@ curl -fsSL "https://raw.githubusercontent.com/joyshmitz/repo_updater/main/instal
 
 </p>
 
+> [!IMPORTANT]
+> **Upstream decision (Issue #1): fork management will not be merged upstream (`won't fix`).**
+> This fork (`joyshmitz/repo_updater`) is the maintained distribution for `fork-status`, `fork-sync`, and `fork-clean`.
+>
+> - Upstream issue: https://github.com/Dicklesworthstone/repo_updater/issues/1
+> - Install this fork: `curl -fsSL "https://raw.githubusercontent.com/joyshmitz/repo_updater/main/install.sh?ru_cb=$(date +%s)" | bash`
+
 ---
 
 ## 🤖 Agent Quickstart (JSON/TOON)

@@ -546,10 +546,9 @@ test_status_json_revlist_failure() {
     fi
 
     # Check that ahead/behind are numeric (not "?")
-    # Note: ru status --json outputs an array directly, not {"repos": [...]}
     local ahead behind
-    ahead=$(printf '%s\n' "$json_output" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data[0]['ahead'])" 2>/dev/null || echo "ERROR")
-    behind=$(printf '%s\n' "$json_output" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data[0]['behind'])" 2>/dev/null || echo "ERROR")
+    ahead=$(printf '%s\n' "$json_output" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data['data']['repos'][0]['ahead'])" 2>/dev/null || echo "ERROR")
+    behind=$(printf '%s\n' "$json_output" | python3 -c "import sys, json; data=json.load(sys.stdin); print(data['data']['repos'][0]['behind'])" 2>/dev/null || echo "ERROR")
 
     # Check ahead is numeric
     if [[ "$ahead" =~ ^-?[0-9]+$ ]]; then

@@ -1211,7 +1211,29 @@ ru sync
 
 ### JSON Mode: `--json`
 
-Structured output on stdout for scripting:
+Structured output on stdout for scripting. All JSON commands share a normalized envelope:
+
+```json
+{
+  "generated_at": "2026-02-09T18:06:35Z",
+  "version": "1.2.1",
+  "output_format": "json",
+  "command": "<command-name>",
+  "data": { ... },
+  "_meta": { ... }
+}
+```
+
+| Envelope field | Type | Description |
+|---|---|---|
+| `generated_at` | string | ISO-8601 UTC timestamp |
+| `version` | string | ru version |
+| `output_format` | string | `"json"` or `"toon"` |
+| `command` | string | Subcommand name (`sync`, `status`, `list`) |
+| `data` | object | Command-specific payload (see below) |
+| `_meta` | object | Optional. Timing, exit code, diagnostics |
+
+**sync** — `data` contains `config`, `summary`, and `repos`; `_meta` includes `duration_seconds` and `exit_code`:
 
 ```bash
 ru sync --json 2>/dev/null
@@ -1219,41 +1241,106 @@ ru sync --json 2>/dev/null
 
 ```json
 {
-  "version": "1.2.0",
-  "timestamp": "2025-01-03T14:30:00Z",
-  "duration_seconds": 154,
-  "config": {
-    "projects_dir": "/data/projects",
-    "layout": "flat",
-    "update_strategy": "ff-only"
+  "generated_at": "2026-02-09T18:08:23Z",
+  "version": "1.2.1",
+  "output_format": "json",
+  "command": "sync",
+  "data": {
+    "config": {
+      "projects_dir": "/data/projects",
+      "layout": "flat",
+      "update_strategy": "ff-only"
+    },
+    "summary": {
+      "total": 47,
+      "cloned": 8,
+      "updated": 34,
+      "current": 3,
+      "conflicts": 2,
+      "failed": 0
+    },
+    "repos": [
+      {
+        "name": "mcp_agent_mail",
+        "path": "/data/projects/mcp_agent_mail",
+        "action": "pull",
+        "status": "updated",
+        "duration": 2
+      }
+    ]
   },
-  "summary": {
+  "_meta": {
+    "duration_seconds": 154,
+    "exit_code": 2
+  }
+}
+```
+
+**status** — `data` contains `total` and `repos`:
+
+```bash
+ru status --json 2>/dev/null
+```
+
+```json
+{
+  "generated_at": "2026-02-09T18:07:09Z",
+  "version": "1.2.1",
+  "output_format": "json",
+  "command": "status",
+  "data": {
     "total": 47,
-    "cloned": 8,
-    "updated": 34,
-    "current": 3,
-    "conflicts": 2,
-    "failed": 0
-  },
-  "repos": [
-    {
-      "name": "mcp_agent_mail",
-      "path": "/data/projects/mcp_agent_mail",
-      "action": "pull",
-      "status": "updated",
-      "duration": 2
-    }
-  ]
+    "repos": [
+      {
+        "repo": "owner/repo",
+        "path": "/data/projects/repo",
+        "status": "current",
+        "branch": "main",
+        "ahead": 0,
+        "behind": 0,
+        "dirty": false,
+        "mismatch": false
+      }
+    ]
+  }
+}
+```
+
+**list** — `data` contains `total` and `repos`:
+
+```bash
+ru list --json 2>/dev/null
+```
+
+```json
+{
+  "generated_at": "2026-02-09T18:06:35Z",
+  "version": "1.2.1",
+  "output_format": "json",
+  "command": "list",
+  "data": {
+    "total": 47,
+    "repos": [
+      {
+        "repo": "owner/repo",
+        "url": "owner/repo",
+        "path": "/data/projects/repo"
+      }
+    ]
+  }
 }
 ```
 
 **Parse with jq:**
 ```bash
 # Get paths of all cloned repos
-ru sync --json 2>/dev/null | jq -r '.repos[] | select(.action=="clone") | .path'
+ru sync --json 2>/dev/null | jq -r '.data.repos[] | select(.action=="clone") | .path'
 
 # Get count of failures
-ru sync --json 2>/dev/null | jq '.summary.failed'
+ru sync --json 2>/dev/null | jq '.data.summary.failed'
+
+# Get all dirty repos from status
+ru status --json 2>/dev/null | jq -r '.data.repos[] | select(.dirty) | .repo'
 ```
 
 ### Quiet Mode: `--quiet`
@@ -2059,7 +2146,7 @@ Before spawning an agent, each repository undergoes preflight validation:
 **Handling preflight failures:**
 ```bash
 # View why a repo was skipped (JSON output)
-ru agent-sweep --json 2>/dev/null | jq '.repos[] | select(.status == "skipped")'
+ru agent-sweep --json 2>/dev/null | jq '.data.repos[] | select(.status == "skipped")'
 
 # Fix common issues
 cd /data/projects/problematic-repo
@@ -2995,7 +3082,7 @@ echo "$repo_path"        # For scripts
 output_json "$data"      # For --json mode
 
 # This works correctly:
-ru sync --json | jq '.summary'
+ru sync --json | jq '.data.summary'
 # Progress shows in terminal, JSON pipes to jq
 ```
 

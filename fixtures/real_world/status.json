@@ -1,4 +1,9 @@
-[
+{
+  "generated_at": "2026-02-09T18:09:42Z",
+  "version": "1.2.1",
+  "output_format": "json",
+  "command": "status",
+  "data": {"total":115,"repos":[
 {"repo":"Dicklesworthstone/midas_edge","path":"/data/projects/midas_edge","status":"current","branch":"main","ahead":0,"behind":0,"dirty":false,"mismatch":false},
 {"repo":"Dicklesworthstone/historical_soldiers","path":"/data/projects/historical_soldiers","status":"current","branch":"main","ahead":0,"behind":0,"dirty":false,"mismatch":false},
 {"repo":"Dicklesworthstone/fix_my_documents_nextjs_frontend","path":"/data/projects/fix_my_documents_nextjs_frontend","status":"current","branch":"master","ahead":0,"behind":0,"dirty":false,"mismatch":false},
@@ -96,7 +101,7 @@
 {"repo":"Dicklesworthstone/smartedgar-frontend","path":"/data/projects/smartedgar-frontend","status":"current","branch":"main","ahead":0,"behind":0,"dirty":false,"mismatch":false},
 {"repo":"Dicklesworthstone/ultimate_mcp_client","path":"/data/projects/ultimate_mcp_client","status":"current","branch":"main","ahead":0,"behind":0,"dirty":false,"mismatch":false},
 {"repo":"Dicklesworthstone/ultimate_mcp_server","path":"/data/projects/ultimate_mcp_server","status":"current","branch":"main","ahead":0,"behind":0,"dirty":false,"mismatch":false},
-{"repo":"Dicklesworthstone/wezterm_automata","path":"/data/projects/wezterm_automata","status":"current","branch":"main","ahead":0,"behind":0,"dirty":false,"mismatch":false},
+{"repo":"Dicklesworthstone/wezterm_automata","path":"/data/projects/wezterm_automata","status":"behind","branch":"main","ahead":0,"behind":6,"dirty":false,"mismatch":false},
 {"repo":"Dicklesworthstone/rano","path":"/data/projects/rano","status":"current","branch":"main","ahead":0,"behind":0,"dirty":false,"mismatch":false},
 {"repo":"Dicklesworthstone/rust_stream_deck","path":"/data/projects/rust_stream_deck","status":"current","branch":"master","ahead":0,"behind":0,"dirty":false,"mismatch":false},
 {"repo":"Dicklesworthstone/sqlmodel_rust","path":"/data/projects/sqlmodel_rust","status":"current","branch":"master","ahead":0,"behind":0,"dirty":false,"mismatch":false},
@@ -113,4 +118,5 @@
 {"repo":"Dicklesworthstone/toon-go","path":"/data/projects/toon-go","status":"current","branch":"main","ahead":0,"behind":0,"dirty":false,"mismatch":false},
 {"repo":"Dicklesworthstone/frankentui","path":"/data/projects/frankentui","status":"current","branch":"main","ahead":0,"behind":0,"dirty":true,"mismatch":false},
 {"repo":"Dicklesworthstone/frankensqlite","path":"/data/projects/frankensqlite","status":"current","branch":"main","ahead":0,"behind":0,"dirty":true,"mismatch":false},
-{"repo":"Dicklesworthstone/frankentui-website","path":"/data/projects/frankentui-website","status":"current","branch":"main","ahead":0,"behind":0,"dirty":false,"mismatch":true}]
+{"repo":"Dicklesworthstone/frankentui-website","path":"/data/projects/frankentui-website","status":"current","branch":"main","ahead":0,"behind":0,"dirty":false,"mismatch":true}]}
+}

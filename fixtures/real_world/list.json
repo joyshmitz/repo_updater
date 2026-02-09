@@ -1,4 +1,9 @@
-[
+{
+  "generated_at": "2026-02-09T18:09:08Z",
+  "version": "1.2.1",
+  "output_format": "json",
+  "command": "list",
+  "data": {"total":115,"repos":[
 {"repo":"Dicklesworthstone/midas_edge","url":"Dicklesworthstone/midas_edge","path":"/data/projects/midas_edge"},
 {"repo":"Dicklesworthstone/historical_soldiers","url":"Dicklesworthstone/historical_soldiers","path":"/data/projects/historical_soldiers"},
 {"repo":"Dicklesworthstone/fix_my_documents_nextjs_frontend","url":"Dicklesworthstone/fix_my_documents_nextjs_frontend","path":"/data/projects/fix_my_documents_nextjs_frontend"},
@@ -113,4 +118,5 @@
 {"repo":"Dicklesworthstone/toon-go","url":"Dicklesworthstone/toon-go","path":"/data/projects/toon-go"},
 {"repo":"Dicklesworthstone/frankentui","url":"https://github.com/Dicklesworthstone/frankentui.git","path":"/data/projects/frankentui"},
 {"repo":"Dicklesworthstone/frankensqlite","url":"https://github.com/Dicklesworthstone/frankensqlite.git","path":"/data/projects/frankensqlite"},
-{"repo":"Dicklesworthstone/frankentui-website","url":"https://github.com/Dicklesworthstone/frankentui-website.git","path":"/data/projects/frankentui-website"}]
+{"repo":"Dicklesworthstone/frankentui-website","url":"https://github.com/Dicklesworthstone/frankentui-website.git","path":"/data/projects/frankentui-website"}]}
+}

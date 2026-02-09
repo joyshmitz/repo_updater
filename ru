@@ -4976,6 +4976,29 @@ emit_structured() {
     return 0
 }
 
+# Build a normalized JSON envelope around command output.
+# Args:
+#   $1: command name (e.g. "sync", "status", "list")
+#   $2: data JSON string (the command-specific payload)
+#   $3: (optional) _meta JSON object string, e.g. '{"duration_seconds":42,"exit_code":0}'
+# Outputs the wrapped JSON to stdout.
+build_json_envelope() {
+    local cmd_name="${1:-unknown}"
+    local data_json="${2:-null}"
+    local meta_json="${3:-}"
+
+    local timestamp
+    timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    local meta_field=""
+    if [[ -n "$meta_json" ]]; then
+        meta_field="$(printf ',\n  "_meta": %s' "$meta_json")"
+    fi
+
+    printf '{\n  "generated_at": "%s",\n  "version": "%s",\n  "output_format": "%s",\n  "command": "%s",\n  "data": %s%s\n}\n' \
+        "$timestamp" "$VERSION" "${OUTPUT_FORMAT:-json}" "$cmd_name" "$data_json" "$meta_field"
+}
+
 # Output JSON to stdout (only in --json mode)
 output_json() {
     if [[ "$JSON_OUTPUT" == "true" ]]; then
@@ -7928,8 +7951,8 @@ print_conflict_help() {
     done < "$RESULTS_FILE"
 }
 
-# Generate JSON report for --json mode
-# Outputs complete structured JSON to stdout
+# Generate JSON data payload for sync command.
+# Outputs the data portion only; caller wraps in envelope via build_json_envelope.
 generate_json_report() {
     local cloned="${1:-0}"
     local updated="${2:-0}"
@@ -7937,11 +7960,7 @@ generate_json_report() {
     local skipped="${4:-0}"
     local conflicts="${5:-0}"
     local failed="${6:-0}"
-    local duration="${7:-0}"
     local total=$((cloned + updated + current + skipped + conflicts + failed))
-
-    local timestamp
-    timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
     # Build repos array from results file
     local repos_json="[]"
@@ -7976,28 +7995,9 @@ generate_json_report() {
     local safe_projects_dir
     safe_projects_dir=$(json_escape "$PROJECTS_DIR")
 
-    # Output structured JSON
+    # Output data payload (envelope added by caller)
     cat << EOF
-{
-  "version": "$VERSION",
-  "timestamp": "$timestamp",
-  "duration_seconds": $duration,
-  "config": {
-    "projects_dir": "$safe_projects_dir",
-    "layout": "$LAYOUT",
-    "update_strategy": "$UPDATE_STRATEGY"
-  },
-  "summary": {
-    "total": $total,
-    "cloned": $cloned,
-    "updated": $updated,
-    "current": $current,
-    "skipped": $skipped,
-    "conflicts": $conflicts,
-    "failed": $failed
-  },
-  "repos": $repos_json
-}
+{"config":{"projects_dir":"$safe_projects_dir","layout":"$LAYOUT","update_strategy":"$UPDATE_STRATEGY"},"summary":{"total":$total,"cloned":$cloned,"updated":$updated,"current":$current,"skipped":$skipped,"conflicts":$conflicts,"failed":$failed},"repos":$repos_json}
 EOF
 }
 
@@ -8351,16 +8351,19 @@ cmd_sync() {
     # Print conflict resolution help if there are issues
     print_conflict_help
 
+    # Compute exit code (needed for both JSON _meta and process exit)
+    compute_exit_code "$FAILED" "$CONFLICTS" "$SYSTEM_ERRORS"
+    local rc=$?
+
     # Output JSON report if --json flag is set
     if [[ "$JSON_OUTPUT" == "true" ]]; then
-        local json_report
-        json_report="$(generate_json_report "$CLONED" "$UPDATED" "$CURRENT" "$SKIPPED" "$CONFLICTS" "$FAILED" "$duration")"
-        emit_structured "$json_report"
+        local data_json meta_json
+        data_json="$(generate_json_report "$CLONED" "$UPDATED" "$CURRENT" "$SKIPPED" "$CONFLICTS" "$FAILED")"
+        meta_json="$(printf '{"duration_seconds":%d,"exit_code":%d}' "$duration" "$rc")"
+        emit_structured "$(build_json_envelope "sync" "$data_json" "$meta_json")"
     fi
 
-    # Compute and use appropriate exit code
-    compute_exit_code "$FAILED" "$CONFLICTS" "$SYSTEM_ERRORS"
-    exit $?
+    exit $rc
 }
 
 cmd_status() {
@@ -8386,8 +8389,8 @@ cmd_status() {
     fi
 
     if [[ "$JSON_OUTPUT" == "true" ]]; then
-        local status_json
-        status_json="$(
+        local repos_array
+        repos_array="$(
             echo "["
             local first="true"
             for repo_spec in "${repos[@]}"; do
@@ -8423,7 +8426,9 @@ cmd_status() {
             echo "]"
         )"
 
-        emit_structured "$status_json"
+        local data_json
+        data_json="$(printf '{"total":%d,"repos":%s}' "$total" "$repos_array")"
+        emit_structured "$(build_json_envelope "status" "$data_json")"
     else
         # Human-readable output
         log_info "Repository Status ($total repos)"
@@ -9083,8 +9088,8 @@ cmd_list() {
     fi
 
     if [[ "$JSON_OUTPUT" == "true" ]]; then
-        local list_json
-        list_json="$(
+        local repos_array
+        repos_array="$(
             echo "["
             local first="true"
             for repo_spec in "${repos[@]}"; do
@@ -9104,7 +9109,9 @@ cmd_list() {
             echo "]"
         )"
 
-        emit_structured "$list_json"
+        local data_json
+        data_json="$(printf '{"total":%d,"repos":%s}' "${#repos[@]}" "$repos_array")"
+        emit_structured "$(build_json_envelope "list" "$data_json")"
         return 0
     fi
 

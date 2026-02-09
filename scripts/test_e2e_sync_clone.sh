@@ -360,10 +360,10 @@ test_sync_json_has_required_fields() {
     local json_output
     json_output=$("$RU_SCRIPT" sync --dry-run --json --non-interactive 2>/dev/null)
 
-    # Check for required top-level fields
+    # Check for required envelope fields
     assert_json_has_field "$json_output" "version" "JSON has 'version' field"
-    assert_json_has_field "$json_output" "timestamp" "JSON has 'timestamp' field"
-    assert_json_has_field "$json_output" "summary" "JSON has 'summary' field"
+    assert_json_has_field "$json_output" "generated_at" "JSON has 'generated_at' field"
+    assert_json_has_field "$json_output" "command" "JSON has 'command' field"
 
     cleanup_test_env
 }
@@ -382,11 +382,11 @@ test_sync_json_summary_counts() {
     # Check summary contains count fields (with fallbacks for different tools)
     local has_total="false"
     if command -v jq >/dev/null 2>&1; then
-        if printf '%s\n' "$json_output" | jq -e '.summary.total' >/dev/null 2>&1; then
+        if printf '%s\n' "$json_output" | jq -e '.data.summary.total' >/dev/null 2>&1; then
             has_total="true"
         fi
     elif command -v python3 >/dev/null 2>&1; then
-        if printf '%s\n' "$json_output" | python3 -c "import sys, json; d=json.load(sys.stdin); assert 'total' in d.get('summary', {})" 2>/dev/null; then
+        if printf '%s\n' "$json_output" | python3 -c "import sys, json; d=json.load(sys.stdin); assert 'total' in d.get('data', {}).get('summary', {})" 2>/dev/null; then
             has_total="true"
         fi
     else

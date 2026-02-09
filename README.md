@@ -31,14 +31,8 @@
 <p align="center">
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/repo_updater/main/install.sh?ru_cb=$(date +%s)" | bash
+curl -fsSL "https://raw.githubusercontent.com/joyshmitz/repo_updater/main/install.sh?ru_cb=$(date +%s)" | bash
 # You can omit the `?ru_cb=...` once installed; it's just a cache-buster for the installer fetch.
-```
-
-**Or via Homebrew (macOS/Linux):**
-
-```bash
-brew install dicklesworthstone/tap/ru
 ```
 
 </p>
@@ -335,33 +329,15 @@ Keep your projects directory clean:
 
 ### Installation
 
-#### Recommended: Homebrew (macOS/Linux)
+#### Recommended: Install Script
 
 ```bash
-brew install dicklesworthstone/tap/ru
-```
-
-This method provides:
-- Automatic updates via `brew upgrade`
-- Dependency management
-- Easy uninstall via `brew uninstall`
-
-#### Windows: Scoop
-
-```powershell
-scoop bucket add dicklesworthstone https://github.com/Dicklesworthstone/scoop-bucket
-scoop install dicklesworthstone/ru
-```
-
-#### Alternative: Install Script
-
-```bash
-curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/repo_updater/main/install.sh?ru_cb=$(date +%s)" | bash
+curl -fsSL "https://raw.githubusercontent.com/joyshmitz/repo_updater/main/install.sh?ru_cb=$(date +%s)" | bash
 ```
 
 **If you suspect CDN caching (stale installer):**
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/repo_updater/main/install.sh?ru_cb=$(date +%s).$$" | bash
+curl -fsSL "https://raw.githubusercontent.com/joyshmitz/repo_updater/main/install.sh?ru_cb=$(date +%s).$$" | bash
 ```
 
 **How cache-busting works:**
@@ -420,7 +396,7 @@ RU_INSTALLER_NO_SELF_REFRESH=1 bash install.sh
 
 ```bash
 # Download script
-curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/repo_updater/main/ru -o ~/.local/bin/ru
+curl -fsSL https://raw.githubusercontent.com/joyshmitz/repo_updater/main/ru -o ~/.local/bin/ru
 chmod +x ~/.local/bin/ru
 
 # Ensure ~/.local/bin is in PATH
@@ -3688,7 +3664,7 @@ MIT License. See [LICENSE](LICENSE) for details.
 
 <div align="center">
 
-**[Report Bug](https://github.com/Dicklesworthstone/repo_updater/issues) · [Request Feature](https://github.com/Dicklesworthstone/repo_updater/issues)**
+**[Report Bug](https://github.com/joyshmitz/repo_updater/issues) · [Request Feature](https://github.com/joyshmitz/repo_updater/issues)**
 
 ---
 

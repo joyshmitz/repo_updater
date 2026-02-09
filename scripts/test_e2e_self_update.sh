@@ -150,7 +150,7 @@ test_self_update_check_option() {
     local current_version
     current_version=$(grep -m1 'VERSION=' "$RU_SCRIPT" | cut -d'"' -f2)
 
-    create_mock_curl "https://github.com/Dicklesworthstone/repo_updater/releases/tag/v${current_version}"
+    create_mock_curl "https://github.com/joyshmitz/repo_updater/releases/tag/v${current_version}"
 
     local stderr_output exit_code
     stderr_output=$(PATH="$TEMP_DIR/mock_bin:$PATH" "$RU_SCRIPT" self-update --check 2>&1)
@@ -184,7 +184,7 @@ test_self_update_no_releases() {
     setup_test_env
 
     # Simulate /releases/latest NOT redirecting to /tag/... (no releases exist).
-    create_mock_curl "https://github.com/Dicklesworthstone/repo_updater/releases"
+    create_mock_curl "https://github.com/joyshmitz/repo_updater/releases"
 
     local stderr_output exit_code
     stderr_output=$(PATH="$TEMP_DIR/mock_bin:$PATH" "$RU_SCRIPT" self-update --check 2>&1)
@@ -201,7 +201,7 @@ test_self_update_detects_newer_version() {
     setup_test_env
 
     # Simulate /releases/latest redirecting to a newer tag.
-    create_mock_curl "https://github.com/Dicklesworthstone/repo_updater/releases/tag/v99.99.99"
+    create_mock_curl "https://github.com/joyshmitz/repo_updater/releases/tag/v99.99.99"
 
     local stderr_output exit_code
     stderr_output=$(PATH="$TEMP_DIR/mock_bin:$PATH" "$RU_SCRIPT" self-update --check 2>&1)
@@ -220,7 +220,7 @@ test_self_update_parse_error() {
     setup_test_env
 
     # Simulate a malformed redirect URL that contains /tag/ but no version.
-    create_mock_curl "https://github.com/Dicklesworthstone/repo_updater/releases/tag/v"
+    create_mock_curl "https://github.com/joyshmitz/repo_updater/releases/tag/v"
 
     local stderr_output exit_code
     stderr_output=$(PATH="$TEMP_DIR/mock_bin:$PATH" "$RU_SCRIPT" self-update --check 2>&1)
@@ -240,7 +240,7 @@ test_self_update_v_prefix_handling() {
     current_version=$(grep -m1 'VERSION=' "$RU_SCRIPT" | cut -d'"' -f2)
 
     # /releases/latest redirects include 'v' prefixes by convention.
-    create_mock_curl "https://github.com/Dicklesworthstone/repo_updater/releases/tag/v${current_version}"
+    create_mock_curl "https://github.com/joyshmitz/repo_updater/releases/tag/v${current_version}"
 
     local stderr_output exit_code
     stderr_output=$(PATH="$TEMP_DIR/mock_bin:$PATH" "$RU_SCRIPT" self-update --check 2>&1)
@@ -259,7 +259,7 @@ test_self_update_non_interactive_mode() {
     # Create mock curl that returns a newer version
     # In non-interactive mode with update available, it should still work
     # for --check (which doesn't require confirmation)
-    create_mock_curl "https://github.com/Dicklesworthstone/repo_updater/releases/tag/v99.99.99"
+    create_mock_curl "https://github.com/joyshmitz/repo_updater/releases/tag/v99.99.99"
 
     local stderr_output exit_code
     stderr_output=$(PATH="$TEMP_DIR/mock_bin:$PATH" "$RU_SCRIPT" --non-interactive self-update --check 2>&1)
@@ -278,7 +278,7 @@ test_self_update_step_output() {
     local current_version
     current_version=$(grep -m1 'VERSION=' "$RU_SCRIPT" | cut -d'"' -f2)
 
-    create_mock_curl "https://github.com/Dicklesworthstone/repo_updater/releases/tag/v${current_version}"
+    create_mock_curl "https://github.com/joyshmitz/repo_updater/releases/tag/v${current_version}"
 
     local stderr_output exit_code
     stderr_output=$(PATH="$TEMP_DIR/mock_bin:$PATH" "$RU_SCRIPT" self-update --check 2>&1)

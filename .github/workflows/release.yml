@@ -9,6 +9,11 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v1.3.0). Leave empty to use current ref.'
+        required: false
 
 # Only write permission needed for creating releases
 permissions:
@@ -32,7 +37,21 @@ jobs:
       - name: Extract version from tag
         id: version
         run: |
-          VERSION="${GITHUB_REF#refs/tags/v}"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG="${{ github.event.inputs.tag }}"
+            if [[ -z "$TAG" ]]; then
+              echo "::error::Tag input is required for manual dispatch"
+              exit 1
+            fi
+            # Verify the tag exists
+            if ! git rev-parse "refs/tags/$TAG" >/dev/null 2>&1; then
+              echo "::error::Tag $TAG does not exist"
+              exit 1
+            fi
+            VERSION="${TAG#v}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Releasing version: $VERSION"
 
@@ -64,11 +83,15 @@ jobs:
       - name: Verify tag is on main branch
         run: |
           git fetch origin main
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::Tag commit ($GITHUB_SHA) is not reachable from main"
+          TAG_SHA="$GITHUB_SHA"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            TAG_SHA=$(git rev-parse "refs/tags/v${{ steps.version.outputs.version }}")
+          fi
+          if ! git merge-base --is-ancestor "$TAG_SHA" origin/main; then
+            echo "::error::Tag commit ($TAG_SHA) is not reachable from main"
             exit 1
           fi
-          echo "Tag verified: commit $GITHUB_SHA is on main"
+          echo "Tag verified: commit $TAG_SHA is on main"
 
       - name: Compute SHA256 checksums
         run: |

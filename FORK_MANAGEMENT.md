@@ -459,8 +459,8 @@ ru fork-status --no-fetch
 # If behind upstream, sync
 ru fork-sync
 
-# If polluted, investigate
-git log upstream/main..main --oneline
+# If polluted, investigate (replace <repo> with actual path)
+git -C /data/projects/<repo> log upstream/main..main --oneline
 
 # Clean if needed
 ru fork-clean
@@ -497,16 +497,17 @@ git -C /data/projects/my-repo log rescue/2025-01-28-143052 --oneline
 ### Setting up a new fork
 
 ```bash
-# 1. Clone your fork
+# 1. Clone your fork and register with ru
 gh repo clone joyshmitz/awesome-project
+ru add joyshmitz/awesome-project
 
-# 2. ru will auto-detect it's a fork and can configure upstream
-ru fork-status joyshmitz/awesome-project
+# 2. Let ru sync and configure upstream automatically
+ru fork-sync --auto-upstream joyshmitz/awesome-project
 
-# 3. Or manually add upstream
-cd /data/projects/awesome-project
-git remote add upstream https://github.com/original/awesome-project.git
-git fetch upstream
+# Alternative: manually add upstream
+git -C /data/projects/awesome-project remote add upstream \
+    https://github.com/original/awesome-project.git
+ru fork-sync joyshmitz/awesome-project
 ```
 
 ### Keeping multiple branches in sync

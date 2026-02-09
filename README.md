@@ -43,6 +43,7 @@ curl -fsSL "https://raw.githubusercontent.com/joyshmitz/repo_updater/main/instal
 >
 > - Upstream issue: https://github.com/Dicklesworthstone/repo_updater/issues/1
 > - Install this fork: `curl -fsSL "https://raw.githubusercontent.com/joyshmitz/repo_updater/main/install.sh?ru_cb=$(date +%s)" | bash`
+> - Fork management docs: [FORK_MANAGEMENT.md](FORK_MANAGEMENT.md)
 
 ---
 
@@ -340,6 +341,11 @@ Keep your projects directory clean:
 
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/joyshmitz/repo_updater/main/install.sh?ru_cb=$(date +%s)" | bash
+```
+
+**If you get a 429 (rate limit) from raw.githubusercontent.com**, install from the release asset instead:
+```bash
+curl -fsSL https://github.com/joyshmitz/repo_updater/releases/latest/download/install.sh | bash
 ```
 
 **If you suspect CDN caching (stale installer):**

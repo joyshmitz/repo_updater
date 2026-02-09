@@ -64,12 +64,11 @@ jobs:
       - name: Verify tag is on main branch
         run: |
           git fetch origin main
-          main_sha=$(git rev-parse origin/main)
-          if [[ "$GITHUB_SHA" != "$main_sha" ]]; then
-            echo "::error::Tag must point to the tip of main. Tagged: $GITHUB_SHA, main: $main_sha"
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Tag commit ($GITHUB_SHA) is not reachable from main"
             exit 1
           fi
-          echo "Tag verified: commit is tip of main ($main_sha)"
+          echo "Tag verified: commit $GITHUB_SHA is on main"
 
       - name: Compute SHA256 checksums
         run: |
@@ -130,7 +129,8 @@ EOF
     name: Notify Homebrew Tap
     runs-on: ubuntu-latest
     needs: release
-    # Only run if the secret is configured
+    # Dormant: dispatches to upstream (Dicklesworthstone/homebrew-tap).
+    # Do NOT enable until repository target is updated to our own tap.
     if: ${{ vars.HOMEBREW_TAP_ENABLED == 'true' }}
     steps:
       - name: Check for dispatch token

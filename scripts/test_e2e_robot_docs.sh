@@ -73,7 +73,7 @@ test_valid_json_all_topics() {
     echo "--- Testing valid JSON for all topics ---"
     setup_test_env
 
-    local topics=("quickstart" "commands" "examples" "exit-codes" "formats" "all")
+    local topics=("quickstart" "commands" "examples" "exit-codes" "formats" "schemas" "all")
     for topic in "${topics[@]}"; do
         local output
         output=$("$RU_SCRIPT" robot-docs "$topic" 2>/dev/null)
@@ -148,7 +148,7 @@ test_all_topic_includes_sections() {
     local output
     output=$("$RU_SCRIPT" robot-docs all 2>/dev/null)
 
-    for section in quickstart commands examples exit_codes formats; do
+    for section in quickstart commands examples exit_codes formats schemas; do
         if echo "$output" | python3 -c "import sys,json; d=json.load(sys.stdin)['data']; assert '$section' in d" 2>/dev/null; then
             pass "'all' topic includes section: $section"
         else
@@ -238,6 +238,61 @@ test_default_topic_is_all() {
     cleanup_test_env
 }
 
+test_schemas_has_command_schemas() {
+    echo "--- Testing schemas topic has command schemas ---"
+    setup_test_env
+
+    local output
+    output=$("$RU_SCRIPT" robot-docs schemas 2>/dev/null)
+
+    for cmd in status list sync error; do
+        if echo "$output" | python3 -c "
+import sys,json
+cmds = json.load(sys.stdin)['data']['content']['commands']
+assert '$cmd' in cmds
+assert 'data_schema' in cmds['$cmd']
+" 2>/dev/null; then
+            pass "Schemas includes $cmd with data_schema"
+        else
+            fail "Schemas missing $cmd or data_schema"
+        fi
+    done
+
+    # Check envelope schema exists
+    if echo "$output" | python3 -c "
+import sys,json
+d = json.load(sys.stdin)['data']['content']
+assert 'envelope' in d
+assert '\$schema' in d['envelope']
+" 2>/dev/null; then
+        pass "Schemas has envelope with \$schema"
+    else
+        fail "Schemas missing envelope or \$schema"
+    fi
+
+    cleanup_test_env
+}
+
+test_schema_shortcut() {
+    echo "--- Testing --schema shortcut ---"
+    setup_test_env
+
+    local output
+    output=$("$RU_SCRIPT" --schema 2>/dev/null)
+    if echo "$output" | python3 -c "
+import sys,json
+d = json.load(sys.stdin)
+assert d['data']['topic'] == 'schemas'
+assert 'commands' in d['data']['content']
+" 2>/dev/null; then
+        pass "--schema shortcut returns schemas topic"
+    else
+        fail "--schema shortcut does not return schemas topic"
+    fi
+
+    cleanup_test_env
+}
+
 test_version_matches() {
     echo "--- Testing version in envelope matches ru version ---"
     setup_test_env
@@ -275,6 +330,8 @@ test_commands_topic_coverage
 test_exit_codes_coverage
 test_invalid_topic
 test_default_topic_is_all
+test_schemas_has_command_schemas
+test_schema_shortcut
 test_version_matches
 
 echo ""

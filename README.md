@@ -66,6 +66,8 @@ ru robot-docs quickstart        # Getting started guide
 ru robot-docs examples          # Usage examples
 ru robot-docs exit-codes        # Exit code reference
 ru robot-docs formats           # Output format details
+ru robot-docs schemas           # JSON schemas for command outputs
+ru --schema                     # Shortcut for ru robot-docs schemas
 ```
 
 ## 🤖 Ready-made Blurb for AI Agents

@@ -5497,6 +5497,7 @@ GLOBAL OPTIONS:
     -q, --quiet          Minimal output (errors only)
     --verbose            Detailed output
     --non-interactive    Never prompt (for CI/automation)
+    --schema             Output JSON schemas for command outputs (shortcut for robot-docs schemas)
 
 SYNC OPTIONS:
     --clone-only         Only clone missing repos, don't pull
@@ -5560,7 +5561,7 @@ REVIEW OPTIONS:
     --max-questions=N    Question budget before pausing
 
 ROBOT-DOCS OPTIONS:
-    <topic>              Topic: quickstart, commands, examples, exit-codes, formats, all
+    <topic>              Topic: quickstart, commands, examples, exit-codes, formats, schemas, all
 
 EXAMPLES:
     ru sync              Sync all configured repos
@@ -7373,6 +7374,13 @@ parse_args() {
             -v|--version)
                 show_version
                 exit 0
+                ;;
+            --schema)
+                # Shortcut: ru --schema is equivalent to ru robot-docs schemas
+                COMMAND="robot-docs"
+                ARGS=("schemas")
+                shift
+                continue
                 ;;
             --json)
                 JSON_OUTPUT="true"
@@ -20937,21 +20945,27 @@ cmd_robot_docs() {
             data_json="$(_robot_docs_formats)"
             emit_structured "$(build_json_envelope "robot-docs" "$(printf '{"schema_version":"%s","topic":"formats","content":%s}' "$schema_version" "$data_json")")"
             ;;
+        schemas)
+            local data_json
+            data_json="$(_robot_docs_schemas)"
+            emit_structured "$(build_json_envelope "robot-docs" "$(printf '{"schema_version":"%s","topic":"schemas","content":%s}' "$schema_version" "$data_json")")"
+            ;;
         all)
-            local qs cmds exs ec fmts
+            local qs cmds exs ec fmts schs
             qs="$(_robot_docs_quickstart)"
             cmds="$(_robot_docs_commands)"
             exs="$(_robot_docs_examples)"
             ec="$(_robot_docs_exit_codes)"
             fmts="$(_robot_docs_formats)"
+            schs="$(_robot_docs_schemas)"
             local data_json
-            data_json="$(printf '{"schema_version":"%s","topic":"all","quickstart":%s,"commands":%s,"examples":%s,"exit_codes":%s,"formats":%s}' \
-                "$schema_version" "$qs" "$cmds" "$exs" "$ec" "$fmts")"
+            data_json="$(printf '{"schema_version":"%s","topic":"all","quickstart":%s,"commands":%s,"examples":%s,"exit_codes":%s,"formats":%s,"schemas":%s}' \
+                "$schema_version" "$qs" "$cmds" "$exs" "$ec" "$fmts" "$schs")"
             emit_structured "$(build_json_envelope "robot-docs" "$data_json")"
             ;;
         *)
             log_error "Unknown robot-docs topic: $topic"
-            log_error "Valid topics: quickstart, commands, examples, exit-codes, formats, all"
+            log_error "Valid topics: quickstart, commands, examples, exit-codes, formats, schemas, all"
             exit 4
             ;;
     esac
@@ -21108,7 +21122,7 @@ _robot_docs_commands() {
       "description": "Machine-readable CLI documentation (JSON)",
       "args": ["[topic]"],
       "flags": [],
-      "topics": ["quickstart", "commands", "examples", "exit-codes", "formats", "all"]
+      "topics": ["quickstart", "commands", "examples", "exit-codes", "formats", "schemas", "all"]
     }
   ],
   "global_flags": [
@@ -21239,6 +21253,143 @@ _robot_docs_formats() {
   ]
 }
 FMJSON
+}
+
+_robot_docs_schemas() {
+    cat << 'SCJSON'
+{
+  "description": "JSON Schema definitions for ru command outputs. All JSON outputs share the same envelope wrapper.",
+  "envelope": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["generated_at", "version", "output_format", "command", "data"],
+    "properties": {
+      "generated_at": {"type": "string", "format": "date-time", "description": "ISO 8601 UTC timestamp"},
+      "version": {"type": "string", "description": "ru version (semver)"},
+      "output_format": {"type": "string", "enum": ["json", "toon"], "description": "Output format used"},
+      "command": {"type": "string", "description": "Command that produced the output"},
+      "data": {"type": "object", "description": "Command-specific payload (see per-command schemas)"},
+      "_meta": {
+        "type": "object",
+        "properties": {
+          "duration_seconds": {"type": "integer"},
+          "exit_code": {"type": "integer"}
+        }
+      }
+    }
+  },
+  "commands": {
+    "status": {
+      "description": "Output of ru status --json",
+      "data_schema": {
+        "type": "object",
+        "required": ["total", "repos"],
+        "properties": {
+          "total": {"type": "integer", "description": "Total number of configured repos"},
+          "repos": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["repo", "path", "status", "branch", "ahead", "behind", "dirty", "mismatch"],
+              "properties": {
+                "repo": {"type": "string", "description": "Repository identifier (owner/name)"},
+                "path": {"type": "string", "description": "Local filesystem path"},
+                "status": {"type": "string", "enum": ["current", "behind", "ahead", "diverged", "missing", "not_git", "no_upstream"], "description": "Sync status relative to remote"},
+                "branch": {"type": "string", "description": "Current branch name"},
+                "ahead": {"type": "integer", "description": "Commits ahead of remote"},
+                "behind": {"type": "integer", "description": "Commits behind remote"},
+                "dirty": {"type": "boolean", "description": "Has uncommitted local changes"},
+                "mismatch": {"type": "boolean", "description": "Remote URL differs from config"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "list": {
+      "description": "Output of ru list --json",
+      "data_schema": {
+        "type": "object",
+        "required": ["total", "repos"],
+        "properties": {
+          "total": {"type": "integer", "description": "Number of configured repos"},
+          "repos": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["repo", "url"],
+              "properties": {
+                "repo": {"type": "string", "description": "Repository identifier"},
+                "url": {"type": "string", "description": "Git clone URL"},
+                "branch": {"type": "string", "description": "Configured branch (if specified)"},
+                "custom_name": {"type": "string", "description": "Custom local directory name (if specified)"},
+                "path": {"type": "string", "description": "Local path (when using --paths)"},
+                "source": {"type": "string", "description": "Config file that defines this repo"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "sync": {
+      "description": "Output of ru sync --json",
+      "data_schema": {
+        "type": "object",
+        "required": ["config", "summary", "repos"],
+        "properties": {
+          "config": {
+            "type": "object",
+            "properties": {
+              "projects_dir": {"type": "string"},
+              "layout": {"type": "string"},
+              "parallel": {"type": "integer"},
+              "clone_only": {"type": "boolean"},
+              "pull_only": {"type": "boolean"},
+              "dry_run": {"type": "boolean"}
+            }
+          },
+          "summary": {
+            "type": "object",
+            "properties": {
+              "total": {"type": "integer", "description": "Total repos processed"},
+              "cloned": {"type": "integer", "description": "Repos freshly cloned"},
+              "pulled": {"type": "integer", "description": "Repos updated via pull"},
+              "skipped": {"type": "integer", "description": "Repos skipped (dirty, up-to-date, etc.)"},
+              "failed": {"type": "integer", "description": "Repos that failed"}
+            }
+          },
+          "repos": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["repo", "status"],
+              "properties": {
+                "repo": {"type": "string"},
+                "status": {"type": "string", "enum": ["cloned", "pulled", "up-to-date", "skipped", "failed", "dirty"]},
+                "detail": {"type": "string", "description": "Additional context for the status"},
+                "duration_ms": {"type": "integer"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "error": {
+      "description": "Error envelope returned on failures",
+      "data_schema": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": {"type": "string", "description": "Human-readable error message"},
+          "code": {"type": "integer", "description": "Exit code"},
+          "command": {"type": "string", "description": "Command that failed"},
+          "details": {"type": "string", "description": "Additional error context"}
+        }
+      }
+    }
+  }
+}
+SCJSON
 }
 
 #==============================================================================

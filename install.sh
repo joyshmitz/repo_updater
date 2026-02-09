@@ -6,7 +6,7 @@
 # DEFAULT: Downloads from GitHub Release with checksum verification
 #
 # Usage:
-#   curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/repo_updater/main/install.sh?ru_cb=$(date +%s)" | bash
+#   curl -fsSL "https://raw.githubusercontent.com/joyshmitz/repo_updater/main/install.sh?ru_cb=$(date +%s)" | bash
 #
 # Options (via environment variables):
 #   DEST=/path/to/dir      Install directory (default: ~/.local/bin)
@@ -19,7 +19,7 @@
 #
 # Examples:
 #   # Standard installation (recommended)
-#   curl -fsSL "https://raw.githubusercontent.com/Dicklesworthstone/repo_updater/main/install.sh?ru_cb=$(date +%s)" | bash
+#   curl -fsSL "https://raw.githubusercontent.com/joyshmitz/repo_updater/main/install.sh?ru_cb=$(date +%s)" | bash
 #
 #   # Install specific version
 #   RU_VERSION=1.0.0 curl -fsSL .../install.sh | bash
@@ -34,7 +34,7 @@
 #   - Default: Downloads from GitHub Release with SHA256 checksum verification
 #   - RU_UNSAFE_MAIN=1 required to install from main branch (for development only)
 #
-# Repository: https://github.com/Dicklesworthstone/repo_updater
+# Repository: https://github.com/joyshmitz/repo_updater
 # License: MIT
 #
 #==============================================================================
@@ -45,7 +45,7 @@ set -uo pipefail
 # CONSTANTS
 #==============================================================================
 
-REPO_OWNER="Dicklesworthstone"
+REPO_OWNER="joyshmitz"
 REPO_NAME="repo_updater"
 SCRIPT_NAME="ru"
 GITHUB_RAW="https://raw.githubusercontent.com"
@@ -837,15 +837,9 @@ main() {
             log_info "  ru init          Initialize configuration"
             log_info "  ru add owner/repo  Add a repository"
             log_info "  ru sync          Sync all repositories"
-            printf '\n' >&2
-            log_info "Tip: You can also install via Homebrew:"
-            log_info "  brew install dicklesworthstone/tap/ru"
         else
             log_info "Get started with:"
             log_info "  $installed_path --help"
-            printf '\n' >&2
-            log_info "Tip: You can also install via Homebrew:"
-            log_info "  brew install dicklesworthstone/tap/ru"
         fi
 
         printf '\n' >&2

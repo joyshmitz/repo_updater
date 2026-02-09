@@ -26,6 +26,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Extract version from tag
         id: version
@@ -59,6 +61,16 @@ jobs:
             fi
           fi
 
+      - name: Verify tag is on main branch
+        run: |
+          git fetch origin main
+          main_sha=$(git rev-parse origin/main)
+          if [[ "$GITHUB_SHA" != "$main_sha" ]]; then
+            echo "::error::Tag must point to the tip of main. Tagged: $GITHUB_SHA, main: $main_sha"
+            exit 1
+          fi
+          echo "Tag verified: commit is tip of main ($main_sha)"
+
       - name: Compute SHA256 checksums
         run: |
           echo "Computing checksums..."
@@ -76,7 +88,7 @@ jobs:
 ## Installation
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/repo_updater/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/joyshmitz/repo_updater/main/install.sh | bash
 ```
 
 ## Verify Installation (Optional)
@@ -85,7 +97,7 @@ After downloading, verify the checksum:
 
 ```bash
 # Verify ru script
-echo "$(curl -fsSL https://github.com/Dicklesworthstone/repo_updater/releases/download/v${{ steps.version.outputs.version }}/ru.sha256)  ru" | sha256sum -c -
+echo "$(curl -fsSL https://github.com/joyshmitz/repo_updater/releases/download/v${{ steps.version.outputs.version }}/ru.sha256)  ru" | sha256sum -c -
 ```
 
 ## Checksums
@@ -119,7 +131,7 @@ EOF
     runs-on: ubuntu-latest
     needs: release
     # Only run if the secret is configured
-    if: ${{ vars.HOMEBREW_TAP_ENABLED == 'true' || github.repository == 'Dicklesworthstone/repo_updater' }}
+    if: ${{ vars.HOMEBREW_TAP_ENABLED == 'true' }}
     steps:
       - name: Check for dispatch token
         id: check_token

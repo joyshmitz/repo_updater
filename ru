@@ -50,7 +50,7 @@
 #   5 - Interrupted sync detected (use --resume or --restart)
 #
 # REPOSITORY:
-#   https://github.com/Dicklesworthstone/repo_updater
+#   https://github.com/joyshmitz/repo_updater
 #
 # LICENSE:
 #   MIT License - Copyright (c) 2025 Jeffrey Emanuel
@@ -120,7 +120,7 @@ fi
 #==============================================================================
 
 # Version: read from VERSION file, fallback to embedded
-VERSION="1.2.1"
+VERSION="1.3.0"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [[ -f "$SCRIPT_DIR/VERSION" ]]; then
     VERSION="$(cat "$SCRIPT_DIR/VERSION")"
@@ -128,7 +128,7 @@ fi
 
 # GitHub repository constants (for self-update - used by cmd_self_update bd-1006)
 # shellcheck disable=SC2034
-RU_REPO_OWNER="Dicklesworthstone"
+RU_REPO_OWNER="joyshmitz"
 # shellcheck disable=SC2034
 RU_REPO_NAME="repo_updater"
 # shellcheck disable=SC2034
@@ -5797,7 +5797,7 @@ EXIT CODES:
     4  Invalid arguments
     5  Interrupted sync detected (use --resume or --restart)
 
-More info: https://github.com/Dicklesworthstone/repo_updater
+More info: https://github.com/joyshmitz/repo_updater
 EOF
 }
 
@@ -5884,7 +5884,7 @@ show_quick_menu() {
 
         # Footer
         gum style --faint "  Run 'ru --help' for full documentation" >&2
-        gum style --faint "  https://github.com/Dicklesworthstone/repo_updater" >&2
+        gum style --faint "  https://github.com/joyshmitz/repo_updater" >&2
         printf '\n' >&2
     else
         # ══════════════════════════════════════════════════════════════════════
@@ -5957,7 +5957,7 @@ show_quick_menu() {
 
         # Footer
         printf '%b\n' "  ${DIM}Run 'ru --help' for full documentation${RESET}" >&2
-        printf '%b\n' "  ${DIM}https://github.com/Dicklesworthstone/repo_updater${RESET}" >&2
+        printf '%b\n' "  ${DIM}https://github.com/joyshmitz/repo_updater${RESET}" >&2
         printf '\n' >&2
     fi
 }
@@ -6049,7 +6049,7 @@ set_config_value() {
     if [[ ! -f "$config_file" ]]; then
         cat > "$config_file" << 'EOF'
 # ru configuration file
-# See: https://github.com/Dicklesworthstone/repo_updater
+# See: https://github.com/joyshmitz/repo_updater
 #
 # Configuration priority: CLI args > environment variables > this file > defaults
 EOF
@@ -6101,7 +6101,7 @@ ensure_config_exists() {
     if [[ ! -f "$config_file" ]]; then
         cat > "$config_file" << EOF
 # ru configuration file
-# See: https://github.com/Dicklesworthstone/repo_updater
+# See: https://github.com/joyshmitz/repo_updater
 #
 # Configuration priority: CLI args > environment variables > this file > defaults
 

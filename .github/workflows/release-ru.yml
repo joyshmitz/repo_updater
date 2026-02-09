@@ -105,27 +105,29 @@ jobs:
           sha256sum install.sh | awk '{print $1}' > install.sh.sha256
 
       - name: Generate release notes
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
         run: |
-          cat > release_notes.md << 'EOF'
-## Installation
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/joyshmitz/repo_updater/main/install.sh | bash
-```
-
-## Verify Installation (Optional)
-
-After downloading, verify the checksum:
-
-```bash
-# Verify ru script
-echo "$(curl -fsSL https://github.com/joyshmitz/repo_updater/releases/download/v${{ steps.version.outputs.version }}/ru.sha256)  ru" | sha256sum -c -
-```
-
-## Checksums
-
-SHA256 checksums for this release are attached as `checksums.txt`.
-EOF
+          {
+            echo "## Installation"
+            echo ""
+            echo '```bash'
+            echo "curl -fsSL https://raw.githubusercontent.com/joyshmitz/repo_updater/main/install.sh | bash"
+            echo '```'
+            echo ""
+            echo "## Verify Installation (Optional)"
+            echo ""
+            echo "After downloading, verify the checksum:"
+            echo ""
+            echo '```bash'
+            echo "# Verify ru script"
+            echo "echo \"\$(curl -fsSL https://github.com/joyshmitz/repo_updater/releases/download/v${RELEASE_VERSION}/ru.sha256)  ru\" | sha256sum -c -"
+            echo '```'
+            echo ""
+            echo "## Checksums"
+            echo ""
+            echo "SHA256 checksums for this release are attached as \`checksums.txt\`."
+          } > release_notes.md
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

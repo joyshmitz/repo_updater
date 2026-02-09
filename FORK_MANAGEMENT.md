@@ -145,11 +145,11 @@ ru fork-status
 
 # Output:
 # Repository          Fork Status   Upstream Δ  Origin Δ   Polluted
-# joyshmitz/ntm       ahead         3/0         3/97       YES
-# joyshmitz/meta_skill behind       0/7         0/0        no
+# your-user/ntm       ahead         3/0         3/97       YES
+# your-user/meta_skill behind       0/7         0/0        no
 
 # Check specific repos
-ru fork-status joyshmitz/ntm joyshmitz/repo_updater
+ru fork-status your-user/ntm your-user/repo_updater
 
 # CI mode: fail if pollution detected
 ru fork-status --check || echo "ERROR: Pollution detected!"
@@ -162,7 +162,7 @@ ru fork-status --json | jq '.[] | select(.polluted == true) | .repo'
 
 ```json
 {
-  "repo": "joyshmitz/ntm",
+  "repo": "your-user/ntm",
   "path": "/data/projects/ntm",
   "is_fork": true,
   "fork_status": "ahead_upstream",
@@ -219,7 +219,7 @@ ru fork-sync --push
 ru fork-sync --strategy reset
 
 # Sync specific repo
-ru fork-sync joyshmitz/ntm
+ru fork-sync your-user/ntm
 
 # Aggressive sync: reset + push + no prompts
 ru fork-sync --strategy reset --push --force
@@ -264,7 +264,7 @@ ru fork-clean
 ru fork-clean --dry-run
 
 # Clean specific repo
-ru fork-clean joyshmitz/ntm
+ru fork-clean your-user/ntm
 
 # Clean and push (with confirmation)
 ru fork-clean --push
@@ -480,14 +480,14 @@ ru fork-clean
 
 ```bash
 # 1. See the damage
-ru fork-status joyshmitz/my-repo
+ru fork-status your-user/my-repo
 git -C /data/projects/my-repo log upstream/main..main --oneline
 
 # 2. Preview cleanup
-ru fork-clean --dry-run joyshmitz/my-repo
+ru fork-clean --dry-run your-user/my-repo
 
 # 3. Clean with rescue
-ru fork-clean joyshmitz/my-repo
+ru fork-clean your-user/my-repo
 
 # 4. If needed, recover commits
 git -C /data/projects/my-repo branch | grep rescue
@@ -498,16 +498,16 @@ git -C /data/projects/my-repo log rescue/2025-01-28-143052 --oneline
 
 ```bash
 # 1. Clone your fork and register with ru
-gh repo clone joyshmitz/awesome-project
-ru add joyshmitz/awesome-project
+gh repo clone your-user/awesome-project
+ru add your-user/awesome-project
 
 # 2. Let ru sync and configure upstream automatically
-ru fork-sync --auto-upstream joyshmitz/awesome-project
+ru fork-sync --auto-upstream your-user/awesome-project
 
 # Alternative: manually add upstream
 git -C /data/projects/awesome-project remote add upstream \
     https://github.com/original/awesome-project.git
-ru fork-sync joyshmitz/awesome-project
+ru fork-sync your-user/awesome-project
 ```
 
 ### Keeping multiple branches in sync

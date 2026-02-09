@@ -426,6 +426,20 @@ Do you have commits on main?
           └── Yes (intentional) → Use merge or rebase
 ```
 
+### Branch Fallback (main ↔ master)
+
+When `fork-sync` encounters a repo where the configured branch (default: `main`)
+does not exist locally, it will attempt to fall back to the counterpart:
+- `main` → `master`
+- `master` → `main`
+
+This fallback is disabled when using explicit `--branches` flag.
+It does NOT apply to other branch names (e.g., `develop`).
+
+**Known limitation:** If a repo has `main` locally but upstream only has `master`
+(or vice versa), the sync will skip — upstream fallback is not supported in this
+version. Use `fork-status` to identify such repos and resolve manually.
+
 ---
 
 ## Common Workflows

@@ -7475,7 +7475,11 @@ parse_args() {
                 shift
                 ;;
             --rebase)
-                UPDATE_STRATEGY="rebase"
+                if [[ "$COMMAND" == fork-status || "$COMMAND" == fork-sync || "$COMMAND" == fork-clean ]]; then
+                    ARGS+=("$1")
+                else
+                    UPDATE_STRATEGY="rebase"
+                fi
                 shift
                 ;;
             --dir)

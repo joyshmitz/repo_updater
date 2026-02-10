@@ -124,6 +124,16 @@ source_function "detect_text_question"
 source_function "extract_plan_json"
 source_function "get_tool_uses"
 source_function "detect_ask_user_question"
+source_function "json_escape"
+source_function "json_get_field"
+source_function "json_is_success"
+source_function "_is_safe_path_segment"
+source_function "parse_repo_url"
+source_function "parse_repo_spec"
+source_function "parse_branch_list"
+source_function "parse_gh_action_target"
+source_function "detect_os"
+source_function "sanitize_path_segment"
 
 #==============================================================================
 # Tests: parse_stream_json_event
@@ -640,6 +650,503 @@ test_extract_question_info_no_ask() {
 }
 
 #==============================================================================
+# Tests: json_escape
+#==============================================================================
+
+test_json_escape_quotes() {
+    local result
+    result=$(json_escape 'He said "hello"')
+    if [[ "$result" == 'He said \"hello\"' ]]; then
+        pass "json_escape: escapes double quotes"
+    else
+        fail "json_escape: wrong quote escaping" 'He said \"hello\"' "$result"
+    fi
+}
+
+test_json_escape_backslash() {
+    local result
+    result=$(json_escape 'path\to\file')
+    if [[ "$result" == 'path\\to\\file' ]]; then
+        pass "json_escape: escapes backslashes"
+    else
+        fail "json_escape: wrong backslash escaping" 'path\\to\\file' "$result"
+    fi
+}
+
+test_json_escape_newline() {
+    local result
+    result=$(json_escape $'line1\nline2')
+    if [[ "$result" == 'line1\nline2' ]]; then
+        pass "json_escape: escapes newlines"
+    else
+        fail "json_escape: wrong newline escaping" 'line1\nline2' "$result"
+    fi
+}
+
+test_json_escape_tab() {
+    local result
+    result=$(json_escape $'col1\tcol2')
+    if [[ "$result" == 'col1\tcol2' ]]; then
+        pass "json_escape: escapes tabs"
+    else
+        fail "json_escape: wrong tab escaping" 'col1\tcol2' "$result"
+    fi
+}
+
+test_json_escape_empty() {
+    local result
+    result=$(json_escape '')
+    if [[ -z "$result" ]]; then
+        pass "json_escape: handles empty string"
+    else
+        fail "json_escape: should return empty" "" "$result"
+    fi
+}
+
+test_json_escape_backslash_then_quote() {
+    # Order matters: backslash must be escaped before quotes
+    local result
+    result=$(json_escape '\"')
+    if [[ "$result" == '\\\"' ]]; then
+        pass "json_escape: correct order (backslash before quote)"
+    else
+        fail "json_escape: wrong escaping order" '\\\"' "$result"
+    fi
+}
+
+#==============================================================================
+# Tests: json_get_field
+#==============================================================================
+
+test_json_get_field_string() {
+    local result
+    result=$(json_get_field '{"name":"alice","age":30}' "name")
+    if [[ "$result" == "alice" ]]; then
+        pass "json_get_field: extracts string field"
+    else
+        fail "json_get_field: wrong value" "alice" "$result"
+    fi
+}
+
+test_json_get_field_number() {
+    local result
+    result=$(json_get_field '{"name":"alice","age":30}' "age")
+    if [[ "$result" == "30" ]]; then
+        pass "json_get_field: extracts number field"
+    else
+        fail "json_get_field: wrong value" "30" "$result"
+    fi
+}
+
+test_json_get_field_boolean() {
+    local result
+    result=$(json_get_field '{"active":true}' "active")
+    if [[ "$result" == "true" ]]; then
+        pass "json_get_field: extracts boolean true"
+    else
+        fail "json_get_field: wrong value" "true" "$result"
+    fi
+}
+
+test_json_get_field_missing() {
+    local result
+    result=$(json_get_field '{"name":"alice"}' "missing")
+    if [[ -z "$result" ]]; then
+        pass "json_get_field: returns empty for missing field"
+    else
+        fail "json_get_field: should be empty" "" "$result"
+    fi
+}
+
+test_json_get_field_empty_inputs() {
+    if ! json_get_field "" "field" 2>/dev/null; then
+        pass "json_get_field: fails for empty JSON"
+    else
+        fail "json_get_field: should fail for empty JSON"
+    fi
+}
+
+#==============================================================================
+# Tests: json_is_success
+#==============================================================================
+
+test_json_is_success_true() {
+    if json_is_success '{"success":true,"data":"ok"}'; then
+        pass "json_is_success: detects success:true"
+    else
+        fail "json_is_success: should detect true"
+    fi
+}
+
+test_json_is_success_false() {
+    if ! json_is_success '{"success":false,"error":"fail"}'; then
+        pass "json_is_success: rejects success:false"
+    else
+        fail "json_is_success: should reject false"
+    fi
+}
+
+test_json_is_success_missing() {
+    if ! json_is_success '{"data":"no success field"}'; then
+        pass "json_is_success: rejects when field missing"
+    else
+        fail "json_is_success: should reject missing field"
+    fi
+}
+
+#==============================================================================
+# Tests: parse_repo_url
+#==============================================================================
+
+test_parse_repo_url_https() {
+    local host="" owner="" repo=""
+    if parse_repo_url "https://github.com/alice/myrepo" host owner repo; then
+        if [[ "$host" == "github.com" && "$owner" == "alice" && "$repo" == "myrepo" ]]; then
+            pass "parse_repo_url: parses HTTPS URL"
+        else
+            fail "parse_repo_url: wrong HTTPS parse" "github.com/alice/myrepo" "$host/$owner/$repo"
+        fi
+    else
+        fail "parse_repo_url: should succeed for HTTPS"
+    fi
+}
+
+test_parse_repo_url_ssh_scp() {
+    local host="" owner="" repo=""
+    if parse_repo_url "git@github.com:bob/project" host owner repo; then
+        if [[ "$host" == "github.com" && "$owner" == "bob" && "$repo" == "project" ]]; then
+            pass "parse_repo_url: parses SSH scp-like URL"
+        else
+            fail "parse_repo_url: wrong SSH parse" "github.com/bob/project" "$host/$owner/$repo"
+        fi
+    else
+        fail "parse_repo_url: should succeed for SSH scp"
+    fi
+}
+
+test_parse_repo_url_shorthand() {
+    local host="" owner="" repo=""
+    if parse_repo_url "alice/myrepo" host owner repo; then
+        if [[ "$host" == "github.com" && "$owner" == "alice" && "$repo" == "myrepo" ]]; then
+            pass "parse_repo_url: parses shorthand owner/repo"
+        else
+            fail "parse_repo_url: wrong shorthand parse" "github.com/alice/myrepo" "$host/$owner/$repo"
+        fi
+    else
+        fail "parse_repo_url: should succeed for shorthand"
+    fi
+}
+
+test_parse_repo_url_strips_git_suffix() {
+    local host="" owner="" repo=""
+    if parse_repo_url "https://github.com/alice/myrepo.git" host owner repo; then
+        if [[ "$repo" == "myrepo" ]]; then
+            pass "parse_repo_url: strips .git suffix"
+        else
+            fail "parse_repo_url: should strip .git" "myrepo" "$repo"
+        fi
+    else
+        fail "parse_repo_url: should succeed with .git suffix"
+    fi
+}
+
+test_parse_repo_url_host_owner_repo() {
+    local host="" owner="" repo=""
+    if parse_repo_url "gitlab.com/team/project" host owner repo; then
+        if [[ "$host" == "gitlab.com" && "$owner" == "team" && "$repo" == "project" ]]; then
+            pass "parse_repo_url: parses host/owner/repo"
+        else
+            fail "parse_repo_url: wrong parse" "gitlab.com/team/project" "$host/$owner/$repo"
+        fi
+    else
+        fail "parse_repo_url: should succeed for host/owner/repo"
+    fi
+}
+
+test_parse_repo_url_invalid() {
+    local host="" owner="" repo=""
+    if ! parse_repo_url "not-a-url" host owner repo; then
+        pass "parse_repo_url: rejects invalid URL"
+    else
+        fail "parse_repo_url: should reject single word"
+    fi
+}
+
+test_parse_repo_url_ssh_protocol() {
+    local host="" owner="" repo=""
+    if parse_repo_url "ssh://git@github.com/alice/myrepo" host owner repo; then
+        if [[ "$host" == "github.com" && "$owner" == "alice" && "$repo" == "myrepo" ]]; then
+            pass "parse_repo_url: parses ssh:// URL"
+        else
+            fail "parse_repo_url: wrong ssh:// parse" "github.com/alice/myrepo" "$host/$owner/$repo"
+        fi
+    else
+        fail "parse_repo_url: should succeed for ssh://"
+    fi
+}
+
+#==============================================================================
+# Tests: parse_repo_spec
+#==============================================================================
+
+test_parse_repo_spec_simple() {
+    local url="" branch="" name=""
+    parse_repo_spec "alice/myrepo" url branch name
+    if [[ "$url" == "alice/myrepo" && -z "$branch" && -z "$name" ]]; then
+        pass "parse_repo_spec: parses simple owner/repo"
+    else
+        fail "parse_repo_spec: wrong simple parse" "alice/myrepo||" "$url|$branch|$name"
+    fi
+}
+
+test_parse_repo_spec_with_branch() {
+    local url="" branch="" name=""
+    parse_repo_spec "alice/myrepo@develop" url branch name
+    if [[ "$url" == "alice/myrepo" && "$branch" == "develop" ]]; then
+        pass "parse_repo_spec: parses @branch"
+    else
+        fail "parse_repo_spec: wrong branch parse" "alice/myrepo|develop" "$url|$branch"
+    fi
+}
+
+test_parse_repo_spec_with_name() {
+    local url="" branch="" name=""
+    parse_repo_spec "alice/myrepo as custom" url branch name
+    if [[ "$url" == "alice/myrepo" && "$name" == "custom" ]]; then
+        pass "parse_repo_spec: parses 'as name'"
+    else
+        fail "parse_repo_spec: wrong name parse" "alice/myrepo||custom" "$url|$branch|$name"
+    fi
+}
+
+test_parse_repo_spec_branch_and_name() {
+    local url="" branch="" name=""
+    parse_repo_spec "alice/myrepo@develop as custom" url branch name
+    if [[ "$url" == "alice/myrepo" && "$branch" == "develop" && "$name" == "custom" ]]; then
+        pass "parse_repo_spec: parses @branch as name"
+    else
+        fail "parse_repo_spec: wrong combined parse" "alice/myrepo|develop|custom" "$url|$branch|$name"
+    fi
+}
+
+test_parse_repo_spec_feature_branch() {
+    local url="" branch="" name=""
+    parse_repo_spec "alice/myrepo@feature/new-stuff" url branch name
+    if [[ "$url" == "alice/myrepo" && "$branch" == "feature/new-stuff" ]]; then
+        pass "parse_repo_spec: handles branch with slash"
+    else
+        fail "parse_repo_spec: wrong feature branch parse" "alice/myrepo|feature/new-stuff" "$url|$branch"
+    fi
+}
+
+#==============================================================================
+# Tests: parse_branch_list
+#==============================================================================
+
+test_parse_branch_list_simple() {
+    local result
+    result=$(parse_branch_list "main,develop,feature")
+    local count
+    count=$(echo "$result" | wc -l)
+    if [[ $count -eq 3 ]]; then
+        pass "parse_branch_list: splits 3 branches"
+    else
+        fail "parse_branch_list: wrong count" "3" "$count"
+    fi
+}
+
+test_parse_branch_list_trimming() {
+    local result
+    result=$(parse_branch_list "main , develop , feature")
+    if echo "$result" | grep -q "^main$" && echo "$result" | grep -q "^develop$"; then
+        pass "parse_branch_list: trims whitespace"
+    else
+        fail "parse_branch_list: should trim" "$result"
+    fi
+}
+
+test_parse_branch_list_single() {
+    local result
+    result=$(parse_branch_list "main")
+    if [[ "$result" == "main" ]]; then
+        pass "parse_branch_list: handles single branch"
+    else
+        fail "parse_branch_list: wrong single parse" "main" "$result"
+    fi
+}
+
+test_parse_branch_list_empty_items() {
+    local result
+    result=$(parse_branch_list "main,,develop,")
+    local count
+    count=$(echo "$result" | wc -l)
+    if [[ $count -eq 2 ]]; then
+        pass "parse_branch_list: skips empty items"
+    else
+        fail "parse_branch_list: should skip empty" "2" "$count"
+    fi
+}
+
+#==============================================================================
+# Tests: parse_gh_action_target
+#==============================================================================
+
+test_parse_gh_action_target_issue() {
+    local type="" number=""
+    if parse_gh_action_target "issue#42" type number; then
+        if [[ "$type" == "issue" && "$number" == "42" ]]; then
+            pass "parse_gh_action_target: parses issue#42"
+        else
+            fail "parse_gh_action_target: wrong parse" "issue|42" "$type|$number"
+        fi
+    else
+        fail "parse_gh_action_target: should succeed for issue#42"
+    fi
+}
+
+test_parse_gh_action_target_pr() {
+    local type="" number=""
+    if parse_gh_action_target "pr#123" type number; then
+        if [[ "$type" == "pr" && "$number" == "123" ]]; then
+            pass "parse_gh_action_target: parses pr#123"
+        else
+            fail "parse_gh_action_target: wrong parse" "pr|123" "$type|$number"
+        fi
+    else
+        fail "parse_gh_action_target: should succeed for pr#123"
+    fi
+}
+
+test_parse_gh_action_target_invalid() {
+    local type="" number=""
+    if ! parse_gh_action_target "random#text" type number; then
+        pass "parse_gh_action_target: rejects invalid type"
+    else
+        fail "parse_gh_action_target: should reject"
+    fi
+}
+
+test_parse_gh_action_target_no_number() {
+    local type="" number=""
+    if ! parse_gh_action_target "issue#" type number; then
+        pass "parse_gh_action_target: rejects missing number"
+    else
+        fail "parse_gh_action_target: should reject empty number"
+    fi
+}
+
+#==============================================================================
+# Tests: detect_os
+#==============================================================================
+
+test_detect_os_returns_value() {
+    local result
+    result=$(detect_os)
+    case "$result" in
+        linux|macos|windows|unknown)
+            pass "detect_os: returns valid OS type ($result)"
+            ;;
+        *)
+            fail "detect_os: unexpected value" "linux|macos|windows|unknown" "$result"
+            ;;
+    esac
+}
+
+#==============================================================================
+# Tests: _is_safe_path_segment
+#==============================================================================
+
+test_safe_path_normal() {
+    if _is_safe_path_segment "myrepo"; then
+        pass "_is_safe_path_segment: accepts normal name"
+    else
+        fail "_is_safe_path_segment: should accept normal name"
+    fi
+}
+
+test_safe_path_rejects_dotdot() {
+    if ! _is_safe_path_segment ".."; then
+        pass "_is_safe_path_segment: rejects .."
+    else
+        fail "_is_safe_path_segment: should reject .."
+    fi
+}
+
+test_safe_path_rejects_dot() {
+    if ! _is_safe_path_segment "."; then
+        pass "_is_safe_path_segment: rejects ."
+    else
+        fail "_is_safe_path_segment: should reject ."
+    fi
+}
+
+test_safe_path_rejects_slash() {
+    if ! _is_safe_path_segment "a/b"; then
+        pass "_is_safe_path_segment: rejects slash in name"
+    else
+        fail "_is_safe_path_segment: should reject slash"
+    fi
+}
+
+test_safe_path_rejects_empty() {
+    if ! _is_safe_path_segment ""; then
+        pass "_is_safe_path_segment: rejects empty"
+    else
+        fail "_is_safe_path_segment: should reject empty"
+    fi
+}
+
+test_safe_path_rejects_leading_dash() {
+    if ! _is_safe_path_segment "-flag"; then
+        pass "_is_safe_path_segment: rejects leading dash"
+    else
+        fail "_is_safe_path_segment: should reject -flag"
+    fi
+}
+
+#==============================================================================
+# Tests: sanitize_path_segment
+#==============================================================================
+
+test_sanitize_normal() {
+    local result
+    result=$(sanitize_path_segment "myrepo")
+    if [[ "$result" == "myrepo" ]]; then
+        pass "sanitize_path_segment: passes normal name through"
+    else
+        fail "sanitize_path_segment: should pass through" "myrepo" "$result"
+    fi
+}
+
+test_sanitize_replaces_slash() {
+    local result
+    result=$(sanitize_path_segment "a/b")
+    if [[ "$result" == "a_b" ]]; then
+        pass "sanitize_path_segment: replaces slash with underscore"
+    else
+        fail "sanitize_path_segment: wrong replacement" "a_b" "$result"
+    fi
+}
+
+test_sanitize_strips_leading_dots() {
+    local result
+    result=$(sanitize_path_segment "..hidden")
+    if [[ "$result" == "hidden" ]]; then
+        pass "sanitize_path_segment: strips leading dots"
+    else
+        fail "sanitize_path_segment: should strip dots" "hidden" "$result"
+    fi
+}
+
+test_sanitize_rejects_empty() {
+    if ! sanitize_path_segment "" >/dev/null 2>&1; then
+        pass "sanitize_path_segment: rejects empty input"
+    else
+        fail "sanitize_path_segment: should reject empty"
+    fi
+}
+
+#==============================================================================
 # Run All Tests
 #==============================================================================
 
@@ -720,6 +1227,91 @@ main() {
     echo "--- extract_question_info ---"
     test_extract_question_info_basic
     test_extract_question_info_no_ask
+
+    # json_escape tests
+    echo
+    echo "--- json_escape ---"
+    test_json_escape_quotes
+    test_json_escape_backslash
+    test_json_escape_newline
+    test_json_escape_tab
+    test_json_escape_empty
+    test_json_escape_backslash_then_quote
+
+    # json_get_field tests
+    echo
+    echo "--- json_get_field ---"
+    test_json_get_field_string
+    test_json_get_field_number
+    test_json_get_field_boolean
+    test_json_get_field_missing
+    test_json_get_field_empty_inputs
+
+    # json_is_success tests
+    echo
+    echo "--- json_is_success ---"
+    test_json_is_success_true
+    test_json_is_success_false
+    test_json_is_success_missing
+
+    # parse_repo_url tests
+    echo
+    echo "--- parse_repo_url ---"
+    test_parse_repo_url_https
+    test_parse_repo_url_ssh_scp
+    test_parse_repo_url_shorthand
+    test_parse_repo_url_strips_git_suffix
+    test_parse_repo_url_host_owner_repo
+    test_parse_repo_url_invalid
+    test_parse_repo_url_ssh_protocol
+
+    # parse_repo_spec tests
+    echo
+    echo "--- parse_repo_spec ---"
+    test_parse_repo_spec_simple
+    test_parse_repo_spec_with_branch
+    test_parse_repo_spec_with_name
+    test_parse_repo_spec_branch_and_name
+    test_parse_repo_spec_feature_branch
+
+    # parse_branch_list tests
+    echo
+    echo "--- parse_branch_list ---"
+    test_parse_branch_list_simple
+    test_parse_branch_list_trimming
+    test_parse_branch_list_single
+    test_parse_branch_list_empty_items
+
+    # parse_gh_action_target tests
+    echo
+    echo "--- parse_gh_action_target ---"
+    test_parse_gh_action_target_issue
+    test_parse_gh_action_target_pr
+    test_parse_gh_action_target_invalid
+    test_parse_gh_action_target_no_number
+
+    # detect_os tests
+    echo
+    echo "--- detect_os ---"
+    test_detect_os_returns_value
+
+    # _is_safe_path_segment tests
+    echo
+    echo "--- _is_safe_path_segment ---"
+    test_safe_path_normal
+    test_safe_path_rejects_dotdot
+    test_safe_path_rejects_dot
+    test_safe_path_rejects_slash
+    test_safe_path_rejects_empty
+    test_safe_path_rejects_leading_dash
+
+    # sanitize_path_segment tests
+    echo
+    echo "--- sanitize_path_segment ---"
+    test_sanitize_normal
+    test_sanitize_replaces_slash
+    test_sanitize_strips_leading_dots
+    test_sanitize_rejects_empty
 
     cleanup_test_env
 

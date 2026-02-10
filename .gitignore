@@ -38,6 +38,10 @@ node_modules/
 # Vim session
 Session.vim
 
+# MCP server config (contains auth tokens)
+.mcp.json
+storage.sqlite3*
+
 # bv (beads viewer) local config and caches
 .bv/
 

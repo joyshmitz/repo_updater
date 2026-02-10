@@ -10526,6 +10526,12 @@ cmd_fork_clean() {
                     if [[ "$stashed" == "true" ]]; then
                         git -C "$local_path" stash pop >/dev/null 2>&1 || true
                     fi
+                    local _safe_repo _safe_path _safe_detail
+                    _safe_repo=$(json_escape "$repo_id")
+                    _safe_path=$(json_escape "$local_path")
+                    _safe_detail=$(json_escape "User declined cleanup prompt")
+                    json_entries+=("$(printf '{"repo":"%s","status":"skipped","detail":"%s","path":"%s"}' \
+                        "$_safe_repo" "$_safe_detail" "$_safe_path")")
                     ((skipped++))
                     continue
                 fi

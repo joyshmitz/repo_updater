@@ -171,17 +171,16 @@ validate_contract() {
   done < <(jq -r --arg cmd "$command" '.commands[$cmd].repo_required_fields[]' "$FIXTURE_FILE")
   assert_equals "true" "$repo_ok" "$command repo required fields"
 
-  # Status enum membership
-  local status_field status_ok="false"
-  status_field=$(jq -r --arg cmd "$command" '.commands[$cmd].status_field' "$FIXTURE_FILE")
-  if [[ -n "$status_field" && "$status_field" != "null" ]]; then
-    local status_value
-    status_value=$(jq -r --arg sf "$status_field" '.data.repos[0][$sf] // empty' <<< "$output")
-    if [[ -n "$status_value" ]]; then
-      if jq -e --arg cmd "$command" --arg sv "$status_value" '.commands[$cmd].status_enum | index($sv) != null' "$FIXTURE_FILE" >/dev/null 2>&1; then
-        status_ok="true"
-      fi
-    fi
+  # Status enum membership (all repos)
+  local status_ok="false"
+  if jq -e --arg cmd "$command" --slurpfile fixture "$FIXTURE_FILE" '
+    . as $out
+    | $fixture[0].commands[$cmd] as $cfg
+    | if ($out.data.repos | length) == 0 then false
+      else ([ $out.data.repos[][$cfg.status_field] ] | all(. as $s | ($cfg.status_enum | index($s)) != null))
+      end
+  ' <<< "$output" >/dev/null 2>&1; then
+    status_ok="true"
   fi
   assert_equals "true" "$status_ok" "$command status enum membership"
 }

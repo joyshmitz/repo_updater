@@ -34,7 +34,7 @@
       "summary_required_fields": ["total", "synced", "failed", "skipped"],
       "repo_required_fields": ["repo", "status", "detail", "path"],
       "status_field": "status",
-      "status_enum": ["synced", "failed", "skipped", "current", "dry-run"]
+      "status_enum": ["synced", "failed", "skipped", "dry-run"]
     },
     "fork-clean": {
       "requires_meta": true,

@@ -22937,7 +22937,7 @@ _robot_docs_quickstart() {
     cat << 'QSJSON'
 {
   "description": "ru (repo_updater) synchronizes GitHub repositories to a local projects directory.",
-  "install": "curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/repo_updater/main/install.sh | bash",
+  "install": "curl -fsSL https://raw.githubusercontent.com/joyshmitz/repo_updater/main/install.sh | bash",
   "first_run": [
     {"step": 1, "command": "ru init", "description": "Initialize configuration directory and example repo list"},
     {"step": 2, "command": "ru add owner/repo", "description": "Add a repository to sync"},

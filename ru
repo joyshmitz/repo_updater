@@ -9491,7 +9491,7 @@ cmd_status() {
 #   ru fork-status --check || echo "Pollution detected!"
 #
 #   # JSON output for scripting
-#   ru fork-status --json | jq '.[] | select(.polluted == true)'
+#   ru fork-status --json | jq '.data.repos[] | select(.polluted == true)'
 #------------------------------------------------------------------------------
 cmd_fork_status() {
     local do_fetch="$FETCH_REMOTES"
@@ -9609,7 +9609,11 @@ cmd_fork_status() {
             json_output+="$entry"
         done
         json_output+="]"
-        emit_structured "$json_output"
+        local repo_total data_json
+        repo_total=${#json_entries[@]}
+        data_json=$(printf '{"total":%d,"pollution_count":%d,"repos":%s}' \
+            "$repo_total" "$pollution_count" "$json_output")
+        emit_structured "$(build_json_envelope "fork-status" "$data_json")"
     else
         # Human-readable output
         log_info "Fork Status ($total repos)"
@@ -23080,6 +23084,41 @@ _robot_docs_commands() {
       "description": "Automated multi-agent review sweep across repos"
     },
     {
+      "name": "fork-status",
+      "description": "Show fork synchronization status relative to upstream",
+      "flags": [
+        {"flag": "--check", "description": "Exit 2 if polluted forks are detected"},
+        {"flag": "--fetch", "description": "Fetch remotes before checking (default)"},
+        {"flag": "--no-fetch", "description": "Use cached refs without fetching"},
+        {"flag": "--forks-only", "description": "Skip repos that are not detected as forks"},
+        {"flag": "--auto-upstream", "description": "Auto-detect and configure upstream remotes"},
+        {"flag": "--no-auto-upstream", "description": "Disable auto upstream detection"}
+      ]
+    },
+    {
+      "name": "fork-sync",
+      "description": "Sync fork branches with upstream",
+      "flags": [
+        {"flag": "--branches LIST", "description": "Comma-separated branches to sync"},
+        {"flag": "--strategy STRAT", "description": "Sync strategy: reset|ff-only|rebase|merge"},
+        {"flag": "--push", "description": "Push synced branches to origin"},
+        {"flag": "--rescue", "description": "Create rescue branch before reset (default)"},
+        {"flag": "--no-rescue", "description": "Disable rescue branch creation"},
+        {"flag": "--auto-upstream", "description": "Auto-detect and configure upstream remotes"},
+        {"flag": "--no-auto-upstream", "description": "Disable auto upstream detection"}
+      ]
+    },
+    {
+      "name": "fork-clean",
+      "description": "Clean pollution from fork default branches",
+      "flags": [
+        {"flag": "--rescue", "description": "Create rescue branch before cleanup (default)"},
+        {"flag": "--no-rescue", "description": "Discard polluting commits without rescue"},
+        {"flag": "--push", "description": "Push cleaned branch to origin"},
+        {"flag": "--force", "description": "Skip interactive confirmation prompts"}
+      ]
+    },
+    {
       "name": "robot-docs",
       "description": "Machine-readable CLI documentation (JSON)",
       "args": ["[topic]"],
@@ -23330,6 +23369,98 @@ _robot_docs_schemas() {
                 "status": {"type": "string", "enum": ["cloned", "pulled", "up-to-date", "skipped", "failed", "dirty"]},
                 "detail": {"type": "string", "description": "Additional context for the status"},
                 "duration_ms": {"type": "integer"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "fork-status": {
+      "description": "Output of ru fork-status --json",
+      "data_schema": {
+        "type": "object",
+        "required": ["total", "pollution_count", "repos"],
+        "properties": {
+          "total": {"type": "integer", "description": "Number of fork repos included in output"},
+          "pollution_count": {"type": "integer", "description": "Repos with polluted default branch"},
+          "repos": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["repo", "path", "is_fork", "fork_status", "ahead_origin", "behind_origin", "ahead_upstream", "behind_upstream", "polluted", "upstream_url"],
+              "properties": {
+                "repo": {"type": "string", "description": "Repository identifier"},
+                "path": {"type": "string", "description": "Local filesystem path"},
+                "is_fork": {"type": "boolean", "description": "Whether repo is detected as fork"},
+                "fork_status": {"type": "string", "enum": ["current", "ahead_origin", "behind_origin", "ahead_upstream", "behind_upstream", "diverged", "no_upstream", "error"], "description": "Fork-specific status"},
+                "ahead_origin": {"type": "integer", "description": "Commits ahead of origin"},
+                "behind_origin": {"type": "integer", "description": "Commits behind origin"},
+                "ahead_upstream": {"type": "integer", "description": "Commits ahead of upstream"},
+                "behind_upstream": {"type": "integer", "description": "Commits behind upstream"},
+                "polluted": {"type": "boolean", "description": "True when default branch has commits not in upstream"},
+                "upstream_url": {"type": "string", "description": "Configured upstream remote URL (empty if missing)"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "fork-sync": {
+      "description": "Planned JSON output schema for ru fork-sync (implemented in parity step bd-rmjz.5)",
+      "data_schema": {
+        "type": "object",
+        "required": ["summary", "repos"],
+        "properties": {
+          "summary": {
+            "type": "object",
+            "properties": {
+              "total": {"type": "integer"},
+              "synced": {"type": "integer"},
+              "failed": {"type": "integer"},
+              "skipped": {"type": "integer"}
+            }
+          },
+          "repos": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["repo", "status"],
+              "properties": {
+                "repo": {"type": "string"},
+                "status": {"type": "string", "enum": ["synced", "failed", "skipped", "current", "dry-run"]},
+                "detail": {"type": "string"},
+                "path": {"type": "string"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "fork-clean": {
+      "description": "Planned JSON output schema for ru fork-clean (implemented in parity step bd-rmjz.5)",
+      "data_schema": {
+        "type": "object",
+        "required": ["summary", "repos"],
+        "properties": {
+          "summary": {
+            "type": "object",
+            "properties": {
+              "total": {"type": "integer"},
+              "cleaned": {"type": "integer"},
+              "failed": {"type": "integer"},
+              "skipped": {"type": "integer"}
+            }
+          },
+          "repos": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["repo", "status"],
+              "properties": {
+                "repo": {"type": "string"},
+                "status": {"type": "string", "enum": ["cleaned", "clean", "failed", "skipped", "dry-run"]},
+                "detail": {"type": "string"},
+                "path": {"type": "string"}
               }
             }
           }

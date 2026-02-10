@@ -561,6 +561,55 @@ WRAPPER
 }
 
 #==============================================================================
+# Test 10: fork-status JSON envelope shape
+#==============================================================================
+
+test_fork_status_json_envelope() {
+    echo "Test 10: fork-status --json returns envelope with data.repos"
+    setup_test_env
+    init_ru_config
+
+    local local_path
+    local_path=$(setup_fork_repo "testrepo10" "master")
+
+    local json_output
+    json_output=$("$RU_SCRIPT" fork-status "testowner/testrepo10" --json --no-fetch 2>/dev/null)
+    local exit_code=$?
+
+    if [[ "$exit_code" -ne 0 ]]; then
+        fail "fork-status --json exited non-zero ($exit_code)"
+        cleanup_test_env
+        return
+    fi
+
+    if echo "$json_output" | jq -e '.command == "fork-status"' >/dev/null 2>&1; then
+        pass "JSON envelope includes command=fork-status"
+    else
+        fail "JSON envelope missing command=fork-status"
+    fi
+
+    if echo "$json_output" | jq -e '.version and .generated_at and .output_format' >/dev/null 2>&1; then
+        pass "JSON envelope includes version/generated_at/output_format"
+    else
+        fail "JSON envelope missing standard metadata fields"
+    fi
+
+    if echo "$json_output" | jq -e '.data.total >= 1 and (.data.repos | type == "array")' >/dev/null 2>&1; then
+        pass "JSON data includes total and repos array"
+    else
+        fail "JSON data missing total or repos array"
+    fi
+
+    if echo "$json_output" | jq -e '.data.repos[] | select(.repo == "testowner/testrepo10")' >/dev/null 2>&1; then
+        pass "JSON data contains target repo entry"
+    else
+        fail "JSON data missing target repo entry"
+    fi
+
+    cleanup_test_env
+}
+
+#==============================================================================
 # Run all tests
 #==============================================================================
 
@@ -576,6 +625,7 @@ test_fallback_dry_run
 test_dedupe_main_master_list
 test_local_exists_upstream_missing
 test_fail_then_retry_no_dedupe
+test_fork_status_json_envelope
 
 echo ""
 echo "=== Results: $TESTS_PASSED passed, $TESTS_FAILED failed ==="

@@ -9875,6 +9875,7 @@ cmd_fork_sync() {
     echo "" >&2
 
     local synced=0 failed=0 skipped=0
+    local -a json_entries=()
     declare -a _upstream_mismatch_repos=()
 
     for repo_spec in "${repos[@]}"; do
@@ -9888,6 +9889,12 @@ cmd_fork_sync() {
         # Skip if not exists
         if [[ ! -d "$local_path" ]] || ! is_git_repo "$local_path"; then
             log_verbose "Skipping (not found): $repo_id"
+            local _safe_repo _safe_path _safe_detail
+            _safe_repo=$(json_escape "$repo_id")
+            _safe_path=$(json_escape "$local_path")
+            _safe_detail=$(json_escape "Repository not found or not a git repository")
+            json_entries+=("$(printf '{"repo":"%s","status":"skipped","detail":"%s","path":"%s"}' \
+                "$_safe_repo" "$_safe_detail" "$_safe_path")")
             ((skipped++))
             continue
         fi
@@ -9895,6 +9902,12 @@ cmd_fork_sync() {
         # Ensure upstream is configured
         if ! ensure_upstream "$local_path"; then
             log_warn "Skipping (not a fork or can't configure upstream): $repo_id"
+            local _safe_repo _safe_path _safe_detail
+            _safe_repo=$(json_escape "$repo_id")
+            _safe_path=$(json_escape "$local_path")
+            _safe_detail=$(json_escape "Upstream remote missing or repository is not a fork")
+            json_entries+=("$(printf '{"repo":"%s","status":"skipped","detail":"%s","path":"%s"}' \
+                "$_safe_repo" "$_safe_detail" "$_safe_path")")
             ((skipped++))
             continue
         fi
@@ -9909,6 +9922,12 @@ cmd_fork_sync() {
                         log_verbose "  Auto-stashed uncommitted changes"
                     else
                         log_warn "  Failed to auto-stash changes, skipping: $repo_id"
+                        local _safe_repo _safe_path _safe_detail
+                        _safe_repo=$(json_escape "$repo_id")
+                        _safe_path=$(json_escape "$local_path")
+                        _safe_detail=$(json_escape "Failed to auto-stash local changes")
+                        json_entries+=("$(printf '{"repo":"%s","status":"skipped","detail":"%s","path":"%s"}' \
+                            "$_safe_repo" "$_safe_detail" "$_safe_path")")
                         ((skipped++))
                         continue
                     fi
@@ -9917,6 +9936,12 @@ cmd_fork_sync() {
                 fi
             else
                 log_warn "Skipping (uncommitted changes, use AUTOSTASH=true or commit/stash first): $repo_id"
+                local _safe_repo _safe_path _safe_detail
+                _safe_repo=$(json_escape "$repo_id")
+                _safe_path=$(json_escape "$local_path")
+                _safe_detail=$(json_escape "Uncommitted changes present and AUTOSTASH is disabled")
+                json_entries+=("$(printf '{"repo":"%s","status":"skipped","detail":"%s","path":"%s"}' \
+                    "$_safe_repo" "$_safe_detail" "$_safe_path")")
                 ((skipped++))
                 continue
             fi
@@ -9942,6 +9967,12 @@ cmd_fork_sync() {
                     if [[ "$stashed" == "true" ]]; then
                         git -C "$local_path" stash pop >/dev/null 2>&1 || true
                     fi
+                    local _safe_repo _safe_path _safe_detail
+                    _safe_repo=$(json_escape "$repo_id")
+                    _safe_path=$(json_escape "$local_path")
+                    _safe_detail=$(json_escape "Failed to fetch upstream remote")
+                    json_entries+=("$(printf '{"repo":"%s","status":"failed","detail":"%s","path":"%s"}' \
+                        "$_safe_repo" "$_safe_detail" "$_safe_path")")
                     ((failed++))
                     continue
                 fi
@@ -9954,6 +9985,12 @@ cmd_fork_sync() {
             if [[ "$stashed" == "true" ]]; then
                 git -C "$local_path" stash pop >/dev/null 2>&1 || true
             fi
+            local _safe_repo _safe_path _safe_detail
+            _safe_repo=$(json_escape "$repo_id")
+            _safe_path=$(json_escape "$local_path")
+            _safe_detail=$(json_escape "Upstream remote not configured")
+            json_entries+=("$(printf '{"repo":"%s","status":"failed","detail":"%s","path":"%s"}' \
+                "$_safe_repo" "$_safe_detail" "$_safe_path")")
             ((failed++))
             continue
         fi
@@ -10166,11 +10203,35 @@ cmd_fork_sync() {
 
         # Determine repo status based on branch results
         if [[ "$branch_failed" == "true" ]]; then
+            local _safe_repo _safe_path _safe_detail
+            _safe_repo=$(json_escape "$repo_id")
+            _safe_path=$(json_escape "$local_path")
+            _safe_detail=$(json_escape "One or more branch sync operations failed")
+            json_entries+=("$(printf '{"repo":"%s","status":"failed","detail":"%s","path":"%s"}' \
+                "$_safe_repo" "$_safe_detail" "$_safe_path")")
             ((failed++))
         elif [[ "$branches_synced" -gt 0 ]]; then
+            local _safe_repo _safe_path _safe_detail _repo_status
+            _safe_repo=$(json_escape "$repo_id")
+            _safe_path=$(json_escape "$local_path")
+            if [[ "$DRY_RUN" == "true" ]]; then
+                _repo_status="dry-run"
+                _safe_detail=$(json_escape "Would sync $branches_synced branch(es)")
+            else
+                _repo_status="synced"
+                _safe_detail=$(json_escape "Synced $branches_synced branch(es)")
+            fi
+            json_entries+=("$(printf '{"repo":"%s","status":"%s","detail":"%s","path":"%s"}' \
+                "$_safe_repo" "$_repo_status" "$_safe_detail" "$_safe_path")")
             ((synced++))
         else
             # No branches were synced (all skipped due to missing branches)
+            local _safe_repo _safe_path _safe_detail
+            _safe_repo=$(json_escape "$repo_id")
+            _safe_path=$(json_escape "$local_path")
+            _safe_detail=$(json_escape "No matching branches to sync")
+            json_entries+=("$(printf '{"repo":"%s","status":"skipped","detail":"%s","path":"%s"}' \
+                "$_safe_repo" "$_safe_detail" "$_safe_path")")
             ((skipped++))
         fi
     done
@@ -10200,8 +10261,29 @@ cmd_fork_sync() {
     # Print summary using consistent format with sync command
     print_fork_op_summary "Sync" "Synced" "$synced" "$failed" "$skipped" "$duration"
 
-    [[ "$failed" -gt 0 ]] && exit 1
-    exit 0
+    local rc=0
+    [[ "$failed" -gt 0 ]] && rc=1
+
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        local repos_json data_json meta_json
+        if [[ ${#json_entries[@]} -gt 0 ]]; then
+            repos_json="["
+            local _idx
+            for _idx in "${!json_entries[@]}"; do
+                [[ $_idx -gt 0 ]] && repos_json+=","
+                repos_json+="${json_entries[$_idx]}"
+            done
+            repos_json+="]"
+        else
+            repos_json="[]"
+        fi
+        data_json=$(printf '{"summary":{"total":%d,"synced":%d,"failed":%d,"skipped":%d},"repos":%s}' \
+            "$total" "$synced" "$failed" "$skipped" "$repos_json")
+        meta_json=$(printf '{"duration_seconds":%d,"exit_code":%d}' "$duration" "$rc")
+        emit_structured "$(build_json_envelope "fork-sync" "$data_json" "$meta_json")"
+    fi
+
+    exit "$rc"
 }
 
 #------------------------------------------------------------------------------
@@ -10275,6 +10357,7 @@ cmd_fork_clean() {
     local total=${#repos[@]}
     local current=0
     local cleaned=0 skipped=0 failed=0
+    local -a json_entries=()
 
     for repo_spec in "${repos[@]}"; do
         ((current++))
@@ -10285,6 +10368,12 @@ cmd_fork_clean() {
 
         # Skip if not exists
         if [[ ! -d "$local_path" ]] || ! is_git_repo "$local_path"; then
+            local _safe_repo _safe_path _safe_detail
+            _safe_repo=$(json_escape "$repo_id")
+            _safe_path=$(json_escape "$local_path")
+            _safe_detail=$(json_escape "Repository not found or not a git repository")
+            json_entries+=("$(printf '{"repo":"%s","status":"skipped","detail":"%s","path":"%s"}' \
+                "$_safe_repo" "$_safe_detail" "$_safe_path")")
             ((skipped++))
             continue
         fi
@@ -10292,6 +10381,12 @@ cmd_fork_clean() {
         # Check if it's a fork with upstream
         if ! git -C "$local_path" remote get-url upstream &>/dev/null; then
             log_verbose "Skipping (no upstream): $repo_id"
+            local _safe_repo _safe_path _safe_detail
+            _safe_repo=$(json_escape "$repo_id")
+            _safe_path=$(json_escape "$local_path")
+            _safe_detail=$(json_escape "Upstream remote is not configured")
+            json_entries+=("$(printf '{"repo":"%s","status":"skipped","detail":"%s","path":"%s"}' \
+                "$_safe_repo" "$_safe_detail" "$_safe_path")")
             ((skipped++))
             continue
         fi
@@ -10306,6 +10401,12 @@ cmd_fork_clean() {
                         log_verbose "  Auto-stashed uncommitted changes"
                     else
                         log_warn "Skipping (failed to auto-stash): $repo_id"
+                        local _safe_repo _safe_path _safe_detail
+                        _safe_repo=$(json_escape "$repo_id")
+                        _safe_path=$(json_escape "$local_path")
+                        _safe_detail=$(json_escape "Failed to auto-stash local changes")
+                        json_entries+=("$(printf '{"repo":"%s","status":"skipped","detail":"%s","path":"%s"}' \
+                            "$_safe_repo" "$_safe_detail" "$_safe_path")")
                         ((skipped++))
                         continue
                     fi
@@ -10314,6 +10415,12 @@ cmd_fork_clean() {
                 fi
             else
                 log_warn "Skipping (uncommitted changes, use AUTOSTASH=true or commit/stash first): $repo_id"
+                local _safe_repo _safe_path _safe_detail
+                _safe_repo=$(json_escape "$repo_id")
+                _safe_path=$(json_escape "$local_path")
+                _safe_detail=$(json_escape "Uncommitted changes present and AUTOSTASH is disabled")
+                json_entries+=("$(printf '{"repo":"%s","status":"skipped","detail":"%s","path":"%s"}' \
+                    "$_safe_repo" "$_safe_detail" "$_safe_path")")
                 ((skipped++))
                 continue
             fi
@@ -10340,6 +10447,12 @@ cmd_fork_clean() {
             if [[ "$stashed" == "true" ]]; then
                 git -C "$local_path" stash pop >/dev/null 2>&1 || true
             fi
+            local _safe_repo _safe_path _safe_detail
+            _safe_repo=$(json_escape "$repo_id")
+            _safe_path=$(json_escape "$local_path")
+            _safe_detail=$(json_escape "No pollution detected on default branch")
+            json_entries+=("$(printf '{"repo":"%s","status":"clean","detail":"%s","path":"%s"}' \
+                "$_safe_repo" "$_safe_detail" "$_safe_path")")
             ((skipped++))
             continue
         fi
@@ -10392,6 +10505,12 @@ cmd_fork_clean() {
                         if [[ "$stashed" == "true" ]]; then
                             git -C "$local_path" stash pop >/dev/null 2>&1 || true
                         fi
+                        local _safe_repo _safe_path _safe_detail
+                        _safe_repo=$(json_escape "$repo_id")
+                        _safe_path=$(json_escape "$local_path")
+                        _safe_detail=$(json_escape "Failed to create rescue branch before cleanup")
+                        json_entries+=("$(printf '{"repo":"%s","status":"failed","detail":"%s","path":"%s"}' \
+                            "$_safe_repo" "$_safe_detail" "$_safe_path")")
                         ((failed++))
                         continue
                     fi
@@ -10411,6 +10530,12 @@ cmd_fork_clean() {
                 if [[ "$stashed" == "true" ]]; then
                     git -C "$local_path" stash pop >/dev/null 2>&1 || true
                 fi
+                local _safe_repo _safe_path _safe_detail
+                _safe_repo=$(json_escape "$repo_id")
+                _safe_path=$(json_escape "$local_path")
+                _safe_detail=$(json_escape "Failed to checkout default branch before cleanup")
+                json_entries+=("$(printf '{"repo":"%s","status":"failed","detail":"%s","path":"%s"}' \
+                    "$_safe_repo" "$_safe_detail" "$_safe_path")")
                 ((failed++))
                 continue
             fi
@@ -10424,6 +10549,12 @@ cmd_fork_clean() {
                 if [[ "$stashed" == "true" ]]; then
                     git -C "$local_path" stash pop >/dev/null 2>&1 || true
                 fi
+                local _safe_repo _safe_path _safe_detail
+                _safe_repo=$(json_escape "$repo_id")
+                _safe_path=$(json_escape "$local_path")
+                _safe_detail=$(json_escape "Failed to reset default branch to upstream")
+                json_entries+=("$(printf '{"repo":"%s","status":"failed","detail":"%s","path":"%s"}' \
+                    "$_safe_repo" "$_safe_detail" "$_safe_path")")
                 ((failed++))
                 continue
             fi
@@ -10451,9 +10582,21 @@ cmd_fork_clean() {
                 fi
             fi
 
+            local _safe_repo _safe_path _safe_detail
+            _safe_repo=$(json_escape "$repo_id")
+            _safe_path=$(json_escape "$local_path")
+            _safe_detail=$(json_escape "Cleaned pollution on $default_branch")
+            json_entries+=("$(printf '{"repo":"%s","status":"cleaned","detail":"%s","path":"%s"}' \
+                "$_safe_repo" "$_safe_detail" "$_safe_path")")
             ((cleaned++))
         else
             log_info "  [DRY RUN] Would reset $default_branch to upstream/$default_branch"
+            local _safe_repo _safe_path _safe_detail
+            _safe_repo=$(json_escape "$repo_id")
+            _safe_path=$(json_escape "$local_path")
+            _safe_detail=$(json_escape "Would clean pollution on $default_branch")
+            json_entries+=("$(printf '{"repo":"%s","status":"dry-run","detail":"%s","path":"%s"}' \
+                "$_safe_repo" "$_safe_detail" "$_safe_path")")
             ((cleaned++))
         fi
     done
@@ -10468,8 +10611,29 @@ cmd_fork_clean() {
     # Print summary using consistent format
     print_fork_op_summary "Clean" "Cleaned" "$cleaned" "$failed" "$skipped" "$duration"
 
-    [[ "$failed" -gt 0 ]] && exit 1
-    exit 0
+    local rc=0
+    [[ "$failed" -gt 0 ]] && rc=1
+
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        local repos_json data_json meta_json
+        if [[ ${#json_entries[@]} -gt 0 ]]; then
+            repos_json="["
+            local _idx
+            for _idx in "${!json_entries[@]}"; do
+                [[ $_idx -gt 0 ]] && repos_json+=","
+                repos_json+="${json_entries[$_idx]}"
+            done
+            repos_json+="]"
+        else
+            repos_json="[]"
+        fi
+        data_json=$(printf '{"summary":{"total":%d,"cleaned":%d,"failed":%d,"skipped":%d},"repos":%s}' \
+            "$total" "$cleaned" "$failed" "$skipped" "$repos_json")
+        meta_json=$(printf '{"duration_seconds":%d,"exit_code":%d}' "$duration" "$rc")
+        emit_structured "$(build_json_envelope "fork-clean" "$data_json" "$meta_json")"
+    fi
+
+    exit "$rc"
 }
 
 cmd_init() {
@@ -23406,7 +23570,7 @@ _robot_docs_schemas() {
       }
     },
     "fork-sync": {
-      "description": "Planned JSON output schema for ru fork-sync (implemented in parity step bd-rmjz.5)",
+      "description": "Output of ru fork-sync --json",
       "data_schema": {
         "type": "object",
         "required": ["summary", "repos"],
@@ -23437,7 +23601,7 @@ _robot_docs_schemas() {
       }
     },
     "fork-clean": {
-      "description": "Planned JSON output schema for ru fork-clean (implemented in parity step bd-rmjz.5)",
+      "description": "Output of ru fork-clean --json",
       "data_schema": {
         "type": "object",
         "required": ["summary", "repos"],

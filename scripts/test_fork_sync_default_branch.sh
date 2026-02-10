@@ -610,6 +610,92 @@ test_fork_status_json_envelope() {
 }
 
 #==============================================================================
+# Test 11: fork-sync JSON envelope shape
+#==============================================================================
+
+test_fork_sync_json_envelope() {
+    echo "Test 11: fork-sync --json returns envelope with summary and repos"
+    setup_test_env
+    init_ru_config
+
+    local local_path
+    local_path=$(setup_fork_repo "testrepo11" "master")
+
+    local json_output
+    json_output=$("$RU_SCRIPT" fork-sync "testowner/testrepo11" --json --dry-run --force 2>/dev/null)
+    local exit_code=$?
+
+    if [[ "$exit_code" -ne 0 ]]; then
+        fail "fork-sync --json exited non-zero ($exit_code)"
+        cleanup_test_env
+        return
+    fi
+
+    if echo "$json_output" | jq -e '.command == "fork-sync"' >/dev/null 2>&1; then
+        pass "JSON envelope includes command=fork-sync"
+    else
+        fail "JSON envelope missing command=fork-sync"
+    fi
+
+    if echo "$json_output" | jq -e '.data.summary.total >= 1 and (.data.repos | type == "array")' >/dev/null 2>&1; then
+        pass "JSON data includes summary and repos array"
+    else
+        fail "JSON data missing summary or repos"
+    fi
+
+    if echo "$json_output" | jq -e '.data.repos[] | select(.repo == "testowner/testrepo11") | .status' >/dev/null 2>&1; then
+        pass "JSON data contains target repo status"
+    else
+        fail "JSON data missing target repo status"
+    fi
+
+    cleanup_test_env
+}
+
+#==============================================================================
+# Test 12: fork-clean JSON envelope shape
+#==============================================================================
+
+test_fork_clean_json_envelope() {
+    echo "Test 12: fork-clean --json returns envelope with summary and repos"
+    setup_test_env
+    init_ru_config
+
+    local local_path
+    local_path=$(setup_fork_repo "testrepo12" "master")
+
+    local json_output
+    json_output=$("$RU_SCRIPT" fork-clean "testowner/testrepo12" --json --dry-run --force 2>/dev/null)
+    local exit_code=$?
+
+    if [[ "$exit_code" -ne 0 ]]; then
+        fail "fork-clean --json exited non-zero ($exit_code)"
+        cleanup_test_env
+        return
+    fi
+
+    if echo "$json_output" | jq -e '.command == "fork-clean"' >/dev/null 2>&1; then
+        pass "JSON envelope includes command=fork-clean"
+    else
+        fail "JSON envelope missing command=fork-clean"
+    fi
+
+    if echo "$json_output" | jq -e '.data.summary.total >= 1 and (.data.repos | type == "array")' >/dev/null 2>&1; then
+        pass "JSON data includes summary and repos array"
+    else
+        fail "JSON data missing summary or repos"
+    fi
+
+    if echo "$json_output" | jq -e '.data.repos[] | select(.repo == "testowner/testrepo12") | .status' >/dev/null 2>&1; then
+        pass "JSON data contains target repo status"
+    else
+        fail "JSON data missing target repo status"
+    fi
+
+    cleanup_test_env
+}
+
+#==============================================================================
 # Run all tests
 #==============================================================================
 
@@ -626,6 +712,8 @@ test_dedupe_main_master_list
 test_local_exists_upstream_missing
 test_fail_then_retry_no_dedupe
 test_fork_status_json_envelope
+test_fork_sync_json_envelope
+test_fork_clean_json_envelope
 
 echo ""
 echo "=== Results: $TESTS_PASSED passed, $TESTS_FAILED failed ==="

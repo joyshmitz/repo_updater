@@ -1,0 +1,48 @@
+{
+  "schema_version": "1.0.0",
+  "commands": {
+    "fork-status": {
+      "requires_meta": false,
+      "data_required_fields": ["total", "pollution_count", "repos"],
+      "repo_required_fields": [
+        "repo",
+        "path",
+        "is_fork",
+        "fork_status",
+        "ahead_origin",
+        "behind_origin",
+        "ahead_upstream",
+        "behind_upstream",
+        "polluted",
+        "upstream_url"
+      ],
+      "status_field": "fork_status",
+      "status_enum": [
+        "current",
+        "ahead_origin",
+        "behind_origin",
+        "ahead_upstream",
+        "behind_upstream",
+        "diverged",
+        "no_upstream",
+        "error"
+      ]
+    },
+    "fork-sync": {
+      "requires_meta": true,
+      "data_required_fields": ["summary", "repos"],
+      "summary_required_fields": ["total", "synced", "failed", "skipped"],
+      "repo_required_fields": ["repo", "status", "detail", "path"],
+      "status_field": "status",
+      "status_enum": ["synced", "failed", "skipped", "current", "dry-run"]
+    },
+    "fork-clean": {
+      "requires_meta": true,
+      "data_required_fields": ["summary", "repos"],
+      "summary_required_fields": ["total", "cleaned", "failed", "skipped"],
+      "repo_required_fields": ["repo", "status", "detail", "path"],
+      "status_field": "status",
+      "status_enum": ["cleaned", "clean", "failed", "skipped", "dry-run"]
+    }
+  }
+}

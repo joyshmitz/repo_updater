@@ -5128,6 +5128,29 @@ emit_structured() {
     return 0
 }
 
+# Build a normalized JSON envelope around command output.
+# Args:
+#   $1: command name (e.g. "sync", "status", "list")
+#   $2: data JSON string (the command-specific payload)
+#   $3: (optional) _meta JSON object string, e.g. '{"duration_seconds":42,"exit_code":0}'
+# Outputs the wrapped JSON to stdout.
+build_json_envelope() {
+    local cmd_name="${1:-unknown}"
+    local data_json="${2:-null}"
+    local meta_json="${3:-}"
+
+    local timestamp
+    timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    local meta_field=""
+    if [[ -n "$meta_json" ]]; then
+        meta_field="$(printf ',\n  "_meta": %s' "$meta_json")"
+    fi
+
+    printf '{\n  "generated_at": "%s",\n  "version": "%s",\n  "output_format": "%s",\n  "command": "%s",\n  "data": %s%s\n}\n' \
+        "$timestamp" "$VERSION" "${OUTPUT_FORMAT:-json}" "$cmd_name" "$data_json" "$meta_field"
+}
+
 # Output JSON to stdout (only in --json mode)
 output_json() {
     if [[ "$JSON_OUTPUT" == "true" ]]; then
@@ -5618,6 +5641,7 @@ COMMANDS:
     fork-status     Show fork synchronization status
     fork-sync       Sync fork branches with upstream
     fork-clean      Clean pollution from fork default branches
+    robot-docs      Machine-readable CLI documentation (JSON)
 
 GLOBAL OPTIONS:
     -h, --help           Show this help message
@@ -5628,6 +5652,7 @@ GLOBAL OPTIONS:
     -q, --quiet          Minimal output (errors only)
     --verbose            Detailed output
     --non-interactive    Never prompt (for CI/automation)
+    --schema             Output JSON schemas for command outputs (shortcut for robot-docs schemas)
 
 SYNC OPTIONS:
     --clone-only         Only clone missing repos, don't pull
@@ -5719,6 +5744,9 @@ FORK-CLEAN OPTIONS:
     --force              Skip confirmation prompts
     --dry-run            Show what would happen
 
+ROBOT-DOCS OPTIONS:
+    <topic>              Topic: quickstart, commands, examples, exit-codes, formats, schemas, all
+
 EXAMPLES:
     ru sync              Sync all configured repos
     ru sync --dry-run    Preview sync without changes
@@ -5740,6 +5768,8 @@ EXAMPLES:
     ru fork-sync         Sync all forks with upstream (ff-only)
     ru fork-sync --strategy reset  Force reset to upstream
     ru fork-clean        Clean polluted commits from fork defaults
+    ru robot-docs         Show all CLI docs as JSON (all topics)
+    ru robot-docs commands Show command/flag documentation as JSON
 
 CONFIGURATION:
     Config:  ~/.config/ru/config
@@ -8138,6 +8168,13 @@ parse_args() {
                 show_version
                 exit 0
                 ;;
+            --schema)
+                # Shortcut: ru --schema is equivalent to ru robot-docs schemas
+                COMMAND="robot-docs"
+                ARGS=("schemas")
+                shift
+                continue
+                ;;
             --json)
                 JSON_OUTPUT="true"
                 OUTPUT_FORMAT="json"
@@ -8403,7 +8440,7 @@ parse_args() {
                 INIT_EXAMPLE="true"
                 shift
                 ;;
-            sync|status|init|add|remove|list|doctor|self-update|config|prune|import|review|agent-sweep|ai-sync|dep-update|fork-status|fork-sync|fork-clean)
+            sync|status|init|add|remove|list|doctor|self-update|config|prune|import|review|agent-sweep|ai-sync|dep-update|fork-status|fork-sync|fork-clean|robot-docs)
                 COMMAND="$1"
                 shift
                 ;;
@@ -8873,8 +8910,8 @@ print_conflict_help() {
     done < "$RESULTS_FILE"
 }
 
-# Generate JSON report for --json mode
-# Outputs complete structured JSON to stdout
+# Generate JSON data payload for sync command.
+# Outputs the data portion only; caller wraps in envelope via build_json_envelope.
 generate_json_report() {
     local cloned="${1:-0}"
     local updated="${2:-0}"
@@ -8882,11 +8919,7 @@ generate_json_report() {
     local skipped="${4:-0}"
     local conflicts="${5:-0}"
     local failed="${6:-0}"
-    local duration="${7:-0}"
     local total=$((cloned + updated + current + skipped + conflicts + failed))
-
-    local timestamp
-    timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
     # Build repos array from results file
     local repos_json="[]"
@@ -8921,28 +8954,9 @@ generate_json_report() {
     local safe_projects_dir
     safe_projects_dir=$(json_escape "$PROJECTS_DIR")
 
-    # Output structured JSON
+    # Output data payload (envelope added by caller)
     cat << EOF
-{
-  "version": "$VERSION",
-  "timestamp": "$timestamp",
-  "duration_seconds": $duration,
-  "config": {
-    "projects_dir": "$safe_projects_dir",
-    "layout": "$LAYOUT",
-    "update_strategy": "$UPDATE_STRATEGY"
-  },
-  "summary": {
-    "total": $total,
-    "cloned": $cloned,
-    "updated": $updated,
-    "current": $current,
-    "skipped": $skipped,
-    "conflicts": $conflicts,
-    "failed": $failed
-  },
-  "repos": $repos_json
-}
+{"config":{"projects_dir":"$safe_projects_dir","layout":"$LAYOUT","update_strategy":"$UPDATE_STRATEGY"},"summary":{"total":$total,"cloned":$cloned,"updated":$updated,"current":$current,"skipped":$skipped,"conflicts":$conflicts,"failed":$failed},"repos":$repos_json}
 EOF
 }
 
@@ -9296,16 +9310,19 @@ cmd_sync() {
     # Print conflict resolution help if there are issues
     print_conflict_help
 
+    # Compute exit code (needed for both JSON _meta and process exit)
+    compute_exit_code "$FAILED" "$CONFLICTS" "$SYSTEM_ERRORS"
+    local rc=$?
+
     # Output JSON report if --json flag is set
     if [[ "$JSON_OUTPUT" == "true" ]]; then
-        local json_report
-        json_report="$(generate_json_report "$CLONED" "$UPDATED" "$CURRENT" "$SKIPPED" "$CONFLICTS" "$FAILED" "$duration")"
-        emit_structured "$json_report"
+        local data_json meta_json
+        data_json="$(generate_json_report "$CLONED" "$UPDATED" "$CURRENT" "$SKIPPED" "$CONFLICTS" "$FAILED")"
+        meta_json="$(printf '{"duration_seconds":%d,"exit_code":%d}' "$duration" "$rc")"
+        emit_structured "$(build_json_envelope "sync" "$data_json" "$meta_json")"
     fi
 
-    # Compute and use appropriate exit code
-    compute_exit_code "$FAILED" "$CONFLICTS" "$SYSTEM_ERRORS"
-    exit $?
+    exit $rc
 }
 
 cmd_status() {
@@ -9331,8 +9348,8 @@ cmd_status() {
     fi
 
     if [[ "$JSON_OUTPUT" == "true" ]]; then
-        local status_json
-        status_json="$(
+        local repos_array
+        repos_array="$(
             echo "["
             local first="true"
             for repo_spec in "${repos[@]}"; do
@@ -9368,7 +9385,9 @@ cmd_status() {
             echo "]"
         )"
 
-        emit_structured "$status_json"
+        local data_json
+        data_json="$(printf '{"total":%d,"repos":%s}' "$total" "$repos_array")"
+        emit_structured "$(build_json_envelope "status" "$data_json")"
     else
         # Human-readable output
         log_info "Repository Status ($total repos)"
@@ -11045,8 +11064,8 @@ cmd_list() {
     fi
 
     if [[ "$JSON_OUTPUT" == "true" ]]; then
-        local list_json
-        list_json="$(
+        local repos_array
+        repos_array="$(
             echo "["
             local first="true"
             for repo_spec in "${repos[@]}"; do
@@ -11066,7 +11085,9 @@ cmd_list() {
             echo "]"
         )"
 
-        emit_structured "$list_json"
+        local data_json
+        data_json="$(printf '{"total":%d,"repos":%s}' "${#repos[@]}" "$repos_array")"
+        emit_structured "$(build_json_envelope "list" "$data_json")"
         return 0
     fi
 
@@ -22832,6 +22853,508 @@ print_agent_sweep_summary() {
 }
 
 #==============================================================================
+# SECTION 13b: ROBOT-DOCS COMMAND
+#==============================================================================
+
+# Generate machine-readable documentation for the ru CLI.
+# Emits JSON (or TOON) to stdout covering topics: quickstart, commands, examples,
+# exit-codes, formats. Designed for consumption by AI coding agents and automation.
+#
+# Usage:
+#   ru robot-docs                 # All topics
+#   ru robot-docs commands        # Just commands/flags
+#   ru robot-docs quickstart      # Quick-start guide
+#   ru robot-docs examples        # Usage examples
+#   ru robot-docs exit-codes      # Exit code reference
+#   ru robot-docs formats         # Output format details
+cmd_robot_docs() {
+    local topic="all"
+    if [[ ${#ARGS[@]} -gt 0 ]]; then
+        topic="${ARGS[0]}"
+    fi
+
+    # Force JSON output for robot-docs (it's always machine-readable)
+    JSON_OUTPUT="true"
+    if [[ "$OUTPUT_FORMAT" == "text" ]]; then
+        OUTPUT_FORMAT="json"
+    fi
+
+    local schema_version="1.0.0"
+
+    case "$topic" in
+        quickstart)
+            local data_json
+            data_json="$(_robot_docs_quickstart)"
+            emit_structured "$(build_json_envelope "robot-docs" "$(printf '{"schema_version":"%s","topic":"quickstart","content":%s}' "$schema_version" "$data_json")")"
+            ;;
+        commands)
+            local data_json
+            data_json="$(_robot_docs_commands)"
+            emit_structured "$(build_json_envelope "robot-docs" "$(printf '{"schema_version":"%s","topic":"commands","content":%s}' "$schema_version" "$data_json")")"
+            ;;
+        examples)
+            local data_json
+            data_json="$(_robot_docs_examples)"
+            emit_structured "$(build_json_envelope "robot-docs" "$(printf '{"schema_version":"%s","topic":"examples","content":%s}' "$schema_version" "$data_json")")"
+            ;;
+        exit-codes)
+            local data_json
+            data_json="$(_robot_docs_exit_codes)"
+            emit_structured "$(build_json_envelope "robot-docs" "$(printf '{"schema_version":"%s","topic":"exit-codes","content":%s}' "$schema_version" "$data_json")")"
+            ;;
+        formats)
+            local data_json
+            data_json="$(_robot_docs_formats)"
+            emit_structured "$(build_json_envelope "robot-docs" "$(printf '{"schema_version":"%s","topic":"formats","content":%s}' "$schema_version" "$data_json")")"
+            ;;
+        schemas)
+            local data_json
+            data_json="$(_robot_docs_schemas)"
+            emit_structured "$(build_json_envelope "robot-docs" "$(printf '{"schema_version":"%s","topic":"schemas","content":%s}' "$schema_version" "$data_json")")"
+            ;;
+        all)
+            local qs cmds exs ec fmts schs
+            qs="$(_robot_docs_quickstart)"
+            cmds="$(_robot_docs_commands)"
+            exs="$(_robot_docs_examples)"
+            ec="$(_robot_docs_exit_codes)"
+            fmts="$(_robot_docs_formats)"
+            schs="$(_robot_docs_schemas)"
+            local data_json
+            data_json="$(printf '{"schema_version":"%s","topic":"all","quickstart":%s,"commands":%s,"examples":%s,"exit_codes":%s,"formats":%s,"schemas":%s}' \
+                "$schema_version" "$qs" "$cmds" "$exs" "$ec" "$fmts" "$schs")"
+            emit_structured "$(build_json_envelope "robot-docs" "$data_json")"
+            ;;
+        *)
+            log_error "Unknown robot-docs topic: $topic"
+            log_error "Valid topics: quickstart, commands, examples, exit-codes, formats, schemas, all"
+            exit 4
+            ;;
+    esac
+}
+
+_robot_docs_quickstart() {
+    cat << 'QSJSON'
+{
+  "description": "ru (repo_updater) synchronizes GitHub repositories to a local projects directory.",
+  "install": "curl -fsSL https://raw.githubusercontent.com/Dicklesworthstone/repo_updater/main/install.sh | bash",
+  "first_run": [
+    {"step": 1, "command": "ru init", "description": "Initialize configuration directory and example repo list"},
+    {"step": 2, "command": "ru add owner/repo", "description": "Add a repository to sync"},
+    {"step": 3, "command": "ru sync", "description": "Clone and pull all configured repositories"},
+    {"step": 4, "command": "ru status --json", "description": "Check status of all repos in JSON format"}
+  ],
+  "config_dir": "~/.config/ru/",
+  "repo_lists": "~/.config/ru/repos.d/*.txt",
+  "projects_dir": "/data/projects (default, override with RU_PROJECTS_DIR)",
+  "prerequisites": ["git", "gh (optional, for private repos)"],
+  "optional_deps": ["gum (beautiful TUI)", "tru (TOON output format)"]
+}
+QSJSON
+}
+
+_robot_docs_commands() {
+    cat << 'CMDJSON'
+{
+  "commands": [
+    {
+      "name": "sync",
+      "description": "Clone missing repos and pull updates (default command)",
+      "flags": [
+        {"flag": "--clone-only", "description": "Only clone missing repos, skip pulling existing"},
+        {"flag": "--pull-only", "description": "Only pull existing repos, skip cloning new"},
+        {"flag": "--autostash", "description": "Stash local changes before pull, pop after"},
+        {"flag": "--rebase", "description": "Use git pull --rebase instead of merge"},
+        {"flag": "--dry-run", "description": "Preview what would happen without changes"},
+        {"flag": "--dir PATH", "description": "Override projects directory"},
+        {"flag": "-j N, --parallel N", "description": "Concurrent repo operations (default: 4)"},
+        {"flag": "--resume", "description": "Resume interrupted sync from checkpoint"},
+        {"flag": "--restart", "description": "Discard interrupted state, start fresh"},
+        {"flag": "--timeout SECS", "description": "Network timeout (default: 30)"}
+      ]
+    },
+    {
+      "name": "status",
+      "description": "Show repository status without making changes",
+      "flags": [
+        {"flag": "--fetch", "description": "Fetch remotes first (default)"},
+        {"flag": "--no-fetch", "description": "Skip fetch, use cached state"}
+      ]
+    },
+    {
+      "name": "init",
+      "description": "Initialize configuration directory and files",
+      "flags": [
+        {"flag": "--example", "description": "Include example repositories in initial config"}
+      ]
+    },
+    {
+      "name": "add",
+      "description": "Add a repository to your sync list",
+      "args": ["<owner/repo>"],
+      "flags": [
+        {"flag": "--private", "description": "Add to private.txt instead of public.txt"},
+        {"flag": "--from-cwd", "description": "Detect repo from current working directory"}
+      ]
+    },
+    {
+      "name": "remove",
+      "description": "Remove a repository from your sync list",
+      "args": ["<owner/repo>"]
+    },
+    {
+      "name": "list",
+      "description": "Show configured repositories",
+      "flags": [
+        {"flag": "--paths", "description": "Show local paths instead of URLs"},
+        {"flag": "--public", "description": "Show only repos from public.txt"},
+        {"flag": "--private", "description": "Show only repos from private.txt"}
+      ]
+    },
+    {
+      "name": "doctor",
+      "description": "Run system diagnostics and health checks",
+      "flags": [
+        {"flag": "--review", "description": "Include review command prerequisites"}
+      ]
+    },
+    {
+      "name": "self-update",
+      "description": "Update ru to the latest version from GitHub"
+    },
+    {
+      "name": "config",
+      "description": "Show or set configuration values",
+      "flags": [
+        {"flag": "--print", "description": "Print current config"},
+        {"flag": "--set=KEY=VALUE", "description": "Set a config value"},
+        {"flag": "--check", "description": "Validate configuration"}
+      ]
+    },
+    {
+      "name": "prune",
+      "description": "Find and manage orphan repositories not in config",
+      "flags": [
+        {"flag": "--archive", "description": "Move orphans to archive directory"},
+        {"flag": "--delete", "description": "Delete orphans (requires confirmation)"}
+      ]
+    },
+    {
+      "name": "import",
+      "description": "Import repos from file with auto visibility detection",
+      "args": ["<file>"],
+      "flags": [
+        {"flag": "--public", "description": "Force all repos as public"},
+        {"flag": "--private", "description": "Force all repos as private"},
+        {"flag": "--dry-run", "description": "Preview import without modifying config"}
+      ]
+    },
+    {
+      "name": "review",
+      "description": "Review GitHub issues and PRs using Claude Code",
+      "flags": [
+        {"flag": "--plan", "description": "Generate review plans only (default)"},
+        {"flag": "--apply", "description": "Execute approved plans"},
+        {"flag": "--analytics", "description": "Show review metrics dashboard"},
+        {"flag": "--basic", "description": "Use basic question TUI"},
+        {"flag": "--mode=MODE", "description": "Driver: auto, ntm, or local"},
+        {"flag": "--repos=PATTERN", "description": "Filter repos by pattern"},
+        {"flag": "--priority=LEVEL", "description": "Min priority: all, critical, high, normal, low"},
+        {"flag": "--skip-days=N", "description": "Skip recently reviewed repos (default: 7)"},
+        {"flag": "--dry-run", "description": "Discovery only"},
+        {"flag": "--status", "description": "Show review lock/checkpoint status"},
+        {"flag": "--resume", "description": "Resume interrupted review"},
+        {"flag": "--push", "description": "Allow pushing changes (with --apply)"}
+      ]
+    },
+    {
+      "name": "ai-sync",
+      "description": "AI-assisted sync with intelligent conflict resolution"
+    },
+    {
+      "name": "dep-update",
+      "description": "Update dependencies across managed repositories"
+    },
+    {
+      "name": "agent-sweep",
+      "description": "Automated multi-agent review sweep across repos"
+    },
+    {
+      "name": "robot-docs",
+      "description": "Machine-readable CLI documentation (JSON)",
+      "args": ["[topic]"],
+      "flags": [],
+      "topics": ["quickstart", "commands", "examples", "exit-codes", "formats", "schemas", "all"]
+    }
+  ],
+  "global_flags": [
+    {"flag": "-h, --help", "description": "Show help message"},
+    {"flag": "-v, --version", "description": "Show version"},
+    {"flag": "--format FMT", "description": "Output format: text|json|toon"},
+    {"flag": "--json", "description": "Output JSON to stdout (alias for --format json)"},
+    {"flag": "--stats", "description": "Show JSON vs TOON token stats on stderr"},
+    {"flag": "-q, --quiet", "description": "Minimal output (errors only)"},
+    {"flag": "--verbose", "description": "Detailed output"},
+    {"flag": "--non-interactive", "description": "Never prompt (for CI/automation)"}
+  ]
+}
+CMDJSON
+}
+
+_robot_docs_examples() {
+    cat << 'EXJSON'
+{
+  "examples": [
+    {
+      "title": "Basic sync workflow",
+      "commands": [
+        {"command": "ru init --example", "description": "Set up config with example repos"},
+        {"command": "ru sync", "description": "Clone/pull all repos"},
+        {"command": "ru status", "description": "Check repo statuses"}
+      ]
+    },
+    {
+      "title": "JSON output for automation",
+      "commands": [
+        {"command": "ru status --json", "description": "Get repo status as JSON"},
+        {"command": "ru list --json", "description": "Get repo list as JSON"},
+        {"command": "ru sync --json", "description": "Get sync results as JSON"},
+        {"command": "ru status --json | jq '.data.repos[] | select(.dirty==true)'", "description": "Find dirty repos"}
+      ]
+    },
+    {
+      "title": "Parallel sync with dry-run",
+      "commands": [
+        {"command": "ru sync --dry-run", "description": "Preview what sync would do"},
+        {"command": "ru sync -j8", "description": "Sync with 8 parallel workers"},
+        {"command": "ru sync --clone-only", "description": "Only clone missing repos"}
+      ]
+    },
+    {
+      "title": "Managing repos",
+      "commands": [
+        {"command": "ru add owner/repo", "description": "Add a public repo"},
+        {"command": "ru add owner/repo --private", "description": "Add a private repo"},
+        {"command": "ru add --from-cwd", "description": "Add repo from current directory"},
+        {"command": "ru remove owner/repo", "description": "Remove a repo from config"},
+        {"command": "ru list --paths", "description": "Show local paths of all repos"}
+      ]
+    },
+    {
+      "title": "Maintenance",
+      "commands": [
+        {"command": "ru doctor", "description": "Run diagnostics"},
+        {"command": "ru self-update", "description": "Update ru to latest version"},
+        {"command": "ru prune", "description": "Find orphan repos not in config"},
+        {"command": "ru prune --archive", "description": "Archive orphans"}
+      ]
+    },
+    {
+      "title": "TOON format output",
+      "commands": [
+        {"command": "ru status --format toon", "description": "Get status in TOON format"},
+        {"command": "ru sync --format toon --stats", "description": "TOON output with token stats"}
+      ]
+    }
+  ]
+}
+EXJSON
+}
+
+_robot_docs_exit_codes() {
+    cat << 'ECJSON'
+{
+  "exit_codes": [
+    {"code": 0, "meaning": "Success", "description": "All operations completed without error"},
+    {"code": 1, "meaning": "Partial failure", "description": "Some repos failed during sync/status (others succeeded)"},
+    {"code": 2, "meaning": "Conflicts", "description": "Merge conflicts or situations requiring manual resolution"},
+    {"code": 3, "meaning": "System error", "description": "Missing dependency (gh not installed), auth failure, or system-level problem"},
+    {"code": 4, "meaning": "Invalid arguments", "description": "Bad command-line arguments, unknown command, or invalid options"},
+    {"code": 5, "meaning": "Interrupted", "description": "Previous sync was interrupted; use --resume to continue or --restart to begin fresh"}
+  ]
+}
+ECJSON
+}
+
+_robot_docs_formats() {
+    cat << 'FMJSON'
+{
+  "output_formats": [
+    {
+      "name": "text",
+      "description": "Human-readable colored output (default)",
+      "flag": "(default, no flag needed)",
+      "stream": "stderr for logs/progress, stdout empty unless piped"
+    },
+    {
+      "name": "json",
+      "description": "Structured JSON output",
+      "flag": "--json or --format json",
+      "stream": "stdout for data, stderr for diagnostics",
+      "envelope": {
+        "generated_at": "ISO 8601 timestamp",
+        "version": "ru version string",
+        "output_format": "json",
+        "command": "command name",
+        "data": "command-specific payload",
+        "_meta": "optional: duration_seconds, exit_code"
+      }
+    },
+    {
+      "name": "toon",
+      "description": "Token-Optimized Object Notation (binary, requires tru)",
+      "flag": "--format toon",
+      "stream": "stdout for encoded data, stderr for diagnostics",
+      "notes": "Falls back to JSON if tru binary not available. Use --stats to compare token counts."
+    }
+  ],
+  "environment_variables": [
+    {"var": "RU_OUTPUT_FORMAT", "description": "Default output format (text|json|toon)"},
+    {"var": "TOON_DEFAULT_FORMAT", "description": "Override default format with TOON preference"},
+    {"var": "TOON_STATS", "description": "Set to 1 to show token stats on stderr"}
+  ]
+}
+FMJSON
+}
+
+_robot_docs_schemas() {
+    cat << 'SCJSON'
+{
+  "description": "JSON Schema definitions for ru command outputs. All JSON outputs share the same envelope wrapper.",
+  "envelope": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "type": "object",
+    "required": ["generated_at", "version", "output_format", "command", "data"],
+    "properties": {
+      "generated_at": {"type": "string", "format": "date-time", "description": "ISO 8601 UTC timestamp"},
+      "version": {"type": "string", "description": "ru version (semver)"},
+      "output_format": {"type": "string", "enum": ["json", "toon"], "description": "Output format used"},
+      "command": {"type": "string", "description": "Command that produced the output"},
+      "data": {"type": "object", "description": "Command-specific payload (see per-command schemas)"},
+      "_meta": {
+        "type": "object",
+        "properties": {
+          "duration_seconds": {"type": "integer"},
+          "exit_code": {"type": "integer"}
+        }
+      }
+    }
+  },
+  "commands": {
+    "status": {
+      "description": "Output of ru status --json",
+      "data_schema": {
+        "type": "object",
+        "required": ["total", "repos"],
+        "properties": {
+          "total": {"type": "integer", "description": "Total number of configured repos"},
+          "repos": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["repo", "path", "status", "branch", "ahead", "behind", "dirty", "mismatch"],
+              "properties": {
+                "repo": {"type": "string", "description": "Repository identifier (owner/name)"},
+                "path": {"type": "string", "description": "Local filesystem path"},
+                "status": {"type": "string", "enum": ["current", "behind", "ahead", "diverged", "missing", "not_git", "no_upstream"], "description": "Sync status relative to remote"},
+                "branch": {"type": "string", "description": "Current branch name"},
+                "ahead": {"type": "integer", "description": "Commits ahead of remote"},
+                "behind": {"type": "integer", "description": "Commits behind remote"},
+                "dirty": {"type": "boolean", "description": "Has uncommitted local changes"},
+                "mismatch": {"type": "boolean", "description": "Remote URL differs from config"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "list": {
+      "description": "Output of ru list --json",
+      "data_schema": {
+        "type": "object",
+        "required": ["total", "repos"],
+        "properties": {
+          "total": {"type": "integer", "description": "Number of configured repos"},
+          "repos": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["repo", "url"],
+              "properties": {
+                "repo": {"type": "string", "description": "Repository identifier"},
+                "url": {"type": "string", "description": "Git clone URL"},
+                "branch": {"type": "string", "description": "Configured branch (if specified)"},
+                "custom_name": {"type": "string", "description": "Custom local directory name (if specified)"},
+                "path": {"type": "string", "description": "Local path (when using --paths)"},
+                "source": {"type": "string", "description": "Config file that defines this repo"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "sync": {
+      "description": "Output of ru sync --json",
+      "data_schema": {
+        "type": "object",
+        "required": ["config", "summary", "repos"],
+        "properties": {
+          "config": {
+            "type": "object",
+            "properties": {
+              "projects_dir": {"type": "string"},
+              "layout": {"type": "string"},
+              "parallel": {"type": "integer"},
+              "clone_only": {"type": "boolean"},
+              "pull_only": {"type": "boolean"},
+              "dry_run": {"type": "boolean"}
+            }
+          },
+          "summary": {
+            "type": "object",
+            "properties": {
+              "total": {"type": "integer", "description": "Total repos processed"},
+              "cloned": {"type": "integer", "description": "Repos freshly cloned"},
+              "pulled": {"type": "integer", "description": "Repos updated via pull"},
+              "skipped": {"type": "integer", "description": "Repos skipped (dirty, up-to-date, etc.)"},
+              "failed": {"type": "integer", "description": "Repos that failed"}
+            }
+          },
+          "repos": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["repo", "status"],
+              "properties": {
+                "repo": {"type": "string"},
+                "status": {"type": "string", "enum": ["cloned", "pulled", "up-to-date", "skipped", "failed", "dirty"]},
+                "detail": {"type": "string", "description": "Additional context for the status"},
+                "duration_ms": {"type": "integer"}
+              }
+            }
+          }
+        }
+      }
+    },
+    "error": {
+      "description": "Error envelope returned on failures",
+      "data_schema": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": {"type": "string", "description": "Human-readable error message"},
+          "code": {"type": "integer", "description": "Exit code"},
+          "command": {"type": "string", "description": "Command that failed"},
+          "details": {"type": "string", "description": "Additional error context"}
+        }
+      }
+    }
+  }
+}
+SCJSON
+}
+
+#==============================================================================
 # SECTION 14: MAIN DISPATCH
 #==============================================================================
 
@@ -22873,6 +23396,7 @@ main() {
         fork-status) cmd_fork_status ;;
         fork-sync)   cmd_fork_sync ;;
         fork-clean)  cmd_fork_clean ;;
+        robot-docs)  cmd_robot_docs ;;
         *)
             log_error "Unknown command: $COMMAND"
             show_help

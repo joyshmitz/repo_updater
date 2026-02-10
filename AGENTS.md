@@ -109,6 +109,7 @@ rm -rf "$TEMP_DIR"  # cleanup
 | `fork-status` | Show fork sync status vs upstream | `--check`, `--forks-only`, `--json` |
 | `fork-sync` | Sync fork branches with upstream | `--branches`, `--strategy`, `--push`, `--dry-run` |
 | `fork-clean` | Clean pollution from main branch | `--rescue`, `--push`, `--dry-run` |
+| `robot-docs` | Machine-readable CLI docs (JSON) | `<topic>`: quickstart, commands, examples, exit-codes, formats, schemas, all |
 
 See [FORK_MANAGEMENT.md](FORK_MANAGEMENT.md) for detailed fork workflow documentation.
 

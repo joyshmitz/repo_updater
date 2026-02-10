@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 # Contract and golden fixture validation for fork-* JSON outputs.
+#
+# Migrated to test_framework.sh for standardized logging/output.
+#
+# shellcheck disable=SC2317  # Test functions invoked indirectly via run_test
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -7,18 +11,19 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 RU_SCRIPT="$PROJECT_DIR/ru"
 FIXTURE_FILE="$SCRIPT_DIR/fixtures/real_world/fork_json_contracts.json"
 
-TESTS_PASSED=0
-TESTS_FAILED=0
+source "$SCRIPT_DIR/test_framework.sh"
+
+# Suppress log output from ru internals
+log_info() { :; }
+log_warn() { :; }
+log_error() { :; }
+log_verbose() { :; }
+
 TEMP_DIR=""
 
-if [[ -t 2 ]]; then
-  RED='\033[0;31m'; GREEN='\033[0;32m'; RESET='\033[0m'
-else
-  RED=''; GREEN=''; RESET=''
-fi
-
-pass() { echo -e "${GREEN}PASS${RESET}: $1"; ((TESTS_PASSED++)); }
-fail() { echo -e "${RED}FAIL${RESET}: $1"; ((TESTS_FAILED++)); }
+#==============================================================================
+# Git Helpers
+#==============================================================================
 
 setup_test_env() {
   TEMP_DIR=$(mktemp -d)
@@ -101,31 +106,41 @@ init_ru_config() {
   fi
 }
 
+#==============================================================================
+# Contract Validation
+#==============================================================================
+
 validate_contract() {
   local command="$1" output="$2"
 
-  if ! jq -e --arg cmd "$command" '.command == $cmd and .generated_at and .version and .output_format and .data' <<< "$output" >/dev/null 2>&1; then
-    fail "$command envelope required fields"
+  # Envelope required fields
+  if jq -e --arg cmd "$command" '.command == $cmd and .generated_at and .version and .output_format and .data' <<< "$output" >/dev/null 2>&1; then
+    assert_true "true" "$command envelope required fields"
+  else
+    assert_true "false" "$command envelope required fields"
     return
   fi
-  pass "$command envelope required fields"
 
-  if ! jq -e --arg cmd "$command" '.commands[$cmd]' "$FIXTURE_FILE" >/dev/null 2>&1; then
-    fail "$command exists in golden fixture"
+  # Exists in golden fixture
+  if jq -e --arg cmd "$command" '.commands[$cmd]' "$FIXTURE_FILE" >/dev/null 2>&1; then
+    assert_true "true" "$command exists in golden fixture"
+  else
+    assert_true "false" "$command exists in golden fixture"
     return
   fi
-  pass "$command exists in golden fixture"
 
+  # _meta contract (conditional)
   local requires_meta
   requires_meta=$(jq -r --arg cmd "$command" '.commands[$cmd].requires_meta' "$FIXTURE_FILE")
   if [[ "$requires_meta" == "true" ]]; then
     if jq -e '._meta and (._meta.duration_seconds | type == "number") and (._meta.exit_code | type == "number")' <<< "$output" >/dev/null 2>&1; then
-      pass "$command has _meta contract"
+      assert_true "true" "$command has _meta contract"
     else
-      fail "$command missing _meta contract"
+      assert_true "false" "$command missing _meta contract"
     fi
   fi
 
+  # Data required fields
   local data_ok="true"
   while IFS= read -r field; do
     if ! jq -e --arg f "$field" '.data | has($f)' <<< "$output" >/dev/null 2>&1; then
@@ -133,8 +148,9 @@ validate_contract() {
       break
     fi
   done < <(jq -r --arg cmd "$command" '.commands[$cmd].data_required_fields[]' "$FIXTURE_FILE")
-  [[ "$data_ok" == "true" ]] && pass "$command data required fields" || fail "$command data required fields"
+  assert_equals "true" "$data_ok" "$command data required fields"
 
+  # Summary required fields
   local summary_ok="true"
   while IFS= read -r field; do
     [[ -z "$field" ]] && continue
@@ -143,8 +159,9 @@ validate_contract() {
       break
     fi
   done < <(jq -r --arg cmd "$command" '.commands[$cmd].summary_required_fields[]? // empty' "$FIXTURE_FILE")
-  [[ "$summary_ok" == "true" ]] && pass "$command summary required fields" || fail "$command summary required fields"
+  assert_equals "true" "$summary_ok" "$command summary required fields"
 
+  # Repo required fields
   local repo_ok="true"
   while IFS= read -r field; do
     if ! jq -e --arg f "$field" '(.data.repos | length) > 0 and (.data.repos[0] | has($f))' <<< "$output" >/dev/null 2>&1; then
@@ -152,8 +169,9 @@ validate_contract() {
       break
     fi
   done < <(jq -r --arg cmd "$command" '.commands[$cmd].repo_required_fields[]' "$FIXTURE_FILE")
-  [[ "$repo_ok" == "true" ]] && pass "$command repo required fields" || fail "$command repo required fields"
+  assert_equals "true" "$repo_ok" "$command repo required fields"
 
+  # Status enum membership
   local status_field status_ok="false"
   status_field=$(jq -r --arg cmd "$command" '.commands[$cmd].status_field' "$FIXTURE_FILE")
   if [[ -n "$status_field" && "$status_field" != "null" ]]; then
@@ -165,32 +183,55 @@ validate_contract() {
       fi
     fi
   fi
-  [[ "$status_ok" == "true" ]] && pass "$command status enum membership" || fail "$command status enum membership"
+  assert_equals "true" "$status_ok" "$command status enum membership"
 }
 
-run_contract_suite() {
-  echo "=== fork-* JSON contract tests ==="
-  setup_test_env
-  init_ru_config
+#==============================================================================
+# Shared Setup (runs once, results used by all test functions)
+#==============================================================================
 
-  local local_path
-  local_path=$(setup_fork_repo "contractrepo" "master")
+setup_test_env
+init_ru_config
 
-  local status_json sync_json clean_json
-  status_json=$("$RU_SCRIPT" fork-status "testowner/contractrepo" --json --no-fetch 2>/dev/null)
-  sync_json=$("$RU_SCRIPT" fork-sync "testowner/contractrepo" --json --dry-run --force 2>/dev/null)
-  clean_json=$("$RU_SCRIPT" fork-clean "testowner/contractrepo" --json --dry-run --force 2>/dev/null)
+LOCAL_PATH=$(setup_fork_repo "contractrepo" "master")
+STATUS_JSON=$("$RU_SCRIPT" fork-status "testowner/contractrepo" --json --no-fetch 2>/dev/null)
+SYNC_JSON=$("$RU_SCRIPT" fork-sync "testowner/contractrepo" --json --dry-run --force 2>/dev/null)
+CLEAN_JSON=$("$RU_SCRIPT" fork-clean "testowner/contractrepo" --json --dry-run --force 2>/dev/null)
 
-  validate_contract "fork-status" "$status_json"
-  validate_contract "fork-sync" "$sync_json"
-  validate_contract "fork-clean" "$clean_json"
+#==============================================================================
+# Test Functions
+#==============================================================================
 
-  cleanup_test_env
+test_fork_status_contract() {
+  local test_name="fork-status: JSON contract matches golden fixture"
+  log_test_start "$test_name"
+  validate_contract "fork-status" "$STATUS_JSON"
+  log_test_pass "$test_name"
 }
 
-run_contract_suite
+test_fork_sync_contract() {
+  local test_name="fork-sync: JSON contract matches golden fixture"
+  log_test_start "$test_name"
+  validate_contract "fork-sync" "$SYNC_JSON"
+  log_test_pass "$test_name"
+}
 
-echo ""
-echo "=== Results: $TESTS_PASSED passed, $TESTS_FAILED failed ==="
-[[ "$TESTS_FAILED" -gt 0 ]] && exit 1
-exit 0
+test_fork_clean_contract() {
+  local test_name="fork-clean: JSON contract matches golden fixture"
+  log_test_start "$test_name"
+  validate_contract "fork-clean" "$CLEAN_JSON"
+  log_test_pass "$test_name"
+}
+
+#==============================================================================
+# Run Tests
+#==============================================================================
+
+run_test test_fork_status_contract
+run_test test_fork_sync_contract
+run_test test_fork_clean_contract
+
+cleanup_test_env
+
+print_results
+exit "$(get_exit_code)"

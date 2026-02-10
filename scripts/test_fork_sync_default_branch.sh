@@ -6,6 +6,8 @@
 # branch doesn't exist locally. Covers fallback, dedupe, dry-run, push,
 # CLI --branches exact mode, and upstream mismatch.
 #
+# Migrated to test_framework.sh for standardized logging/output.
+#
 # shellcheck disable=SC2034  # Variables used by sourced functions
 # shellcheck disable=SC1090  # Dynamic sourcing is intentional
 # shellcheck disable=SC2317  # Test functions invoked indirectly via run_test
@@ -15,23 +17,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 RU_SCRIPT="$PROJECT_DIR/ru"
 
-#==============================================================================
-# Test Framework
-#==============================================================================
+source "$SCRIPT_DIR/test_framework.sh"
 
-TESTS_PASSED=0
-TESTS_FAILED=0
+# Suppress log output from ru internals
+log_info() { :; }
+log_warn() { :; }
+log_error() { :; }
+log_verbose() { :; }
+
 TEMP_DIR=""
 
-# Colors (disabled if not a terminal)
-if [[ -t 2 ]]; then
-    RED='\033[0;31m'
-    GREEN='\033[0;32m'
-    YELLOW='\033[0;33m'
-    RESET='\033[0m'
-else
-    RED='' GREEN='' YELLOW='' RESET=''
-fi
+#==============================================================================
+# Git Helpers
+#==============================================================================
 
 setup_test_env() {
     TEMP_DIR=$(mktemp -d)
@@ -51,20 +49,6 @@ cleanup_test_env() {
         rm -rf "$TEMP_DIR"
     fi
 }
-
-pass() {
-    echo -e "${GREEN}PASS${RESET}: $1"
-    ((TESTS_PASSED++))
-}
-
-fail() {
-    echo -e "${RED}FAIL${RESET}: $1"
-    ((TESTS_FAILED++))
-}
-
-#==============================================================================
-# Git Helpers
-#==============================================================================
 
 # Create a bare repo with a given default branch and initial commit
 create_bare_with_branch() {
@@ -164,7 +148,8 @@ get_head_sha() {
 #==============================================================================
 
 test_fallback_master() {
-    echo "Test 1: Fallback from main to master (default config)"
+    local test_name="fallback: main to master (default config)"
+    log_test_start "$test_name"
     setup_test_env
     init_ru_config
 
@@ -176,18 +161,14 @@ test_fallback_master() {
 
     # Run fork-sync with default config (branches=main, should fallback to master)
     "$RU_SCRIPT" fork-sync "testowner/testrepo1" --force >/dev/null 2>&1
-    local exit_code=$?
 
     local after_sha
     after_sha=$(get_head_sha "$local_path" "master")
 
-    if [[ "$before_sha" != "$after_sha" ]]; then
-        pass "master was synced via fallback (SHA changed)"
-    else
-        fail "master was NOT synced (SHA unchanged: $before_sha)"
-    fi
+    assert_not_equals "$before_sha" "$after_sha" "master was synced via fallback (SHA changed)"
 
     cleanup_test_env
+    log_test_pass "$test_name"
 }
 
 #==============================================================================
@@ -195,7 +176,8 @@ test_fallback_master() {
 #==============================================================================
 
 test_cli_exact_no_fallback() {
-    echo "Test 2: --branches main disables fallback on master-only repo"
+    local test_name="--branches main disables fallback on master-only repo"
+    log_test_start "$test_name"
     setup_test_env
     init_ru_config
 
@@ -211,13 +193,10 @@ test_cli_exact_no_fallback() {
     local after_sha
     after_sha=$(get_head_sha "$local_path" "master")
 
-    if [[ "$before_sha" == "$after_sha" ]]; then
-        pass "master NOT synced with explicit --branches main (exact mode)"
-    else
-        fail "master was synced despite explicit --branches main"
-    fi
+    assert_equals "$before_sha" "$after_sha" "master NOT synced with explicit --branches main (exact mode)"
 
     cleanup_test_env
+    log_test_pass "$test_name"
 }
 
 #==============================================================================
@@ -225,7 +204,8 @@ test_cli_exact_no_fallback() {
 #==============================================================================
 
 test_no_fallback_when_exists() {
-    echo "Test 3: No fallback when main exists (repo has both main and master)"
+    local test_name="no fallback when main exists (repo has both main and master)"
+    log_test_start "$test_name"
     setup_test_env
     init_ru_config
 
@@ -263,19 +243,11 @@ test_no_fallback_when_exists() {
     local master_after
     master_after=$(get_head_sha "$local_path" "master")
 
-    if [[ "$main_before" != "$main_after" ]]; then
-        pass "main was synced (no fallback needed)"
-    else
-        fail "main was NOT synced"
-    fi
-
-    if [[ "$master_before" == "$master_after" ]]; then
-        pass "master was NOT synced (fallback didn't activate)"
-    else
-        fail "master was incorrectly synced"
-    fi
+    assert_not_equals "$main_before" "$main_after" "main was synced (no fallback needed)"
+    assert_equals "$master_before" "$master_after" "master was NOT synced (fallback didn't activate)"
 
     cleanup_test_env
+    log_test_pass "$test_name"
 }
 
 #==============================================================================
@@ -283,7 +255,8 @@ test_no_fallback_when_exists() {
 #==============================================================================
 
 test_no_fallback_develop() {
-    echo "Test 4: No fallback for develop (only main↔master)"
+    local test_name="no fallback for develop (only main/master)"
+    log_test_start "$test_name"
     setup_test_env
     init_ru_config
 
@@ -299,13 +272,10 @@ test_no_fallback_develop() {
     local after_sha
     after_sha=$(get_head_sha "$local_path" "develop")
 
-    if [[ "$before_sha" == "$after_sha" ]]; then
-        pass "develop NOT synced (no fallback for non main/master)"
-    else
-        fail "develop was incorrectly synced"
-    fi
+    assert_equals "$before_sha" "$after_sha" "develop NOT synced (no fallback for non main/master)"
 
     cleanup_test_env
+    log_test_pass "$test_name"
 }
 
 #==============================================================================
@@ -313,7 +283,8 @@ test_no_fallback_develop() {
 #==============================================================================
 
 test_fallback_with_push() {
-    echo "Test 5: Fallback to master with --push updates origin"
+    local test_name="fallback to master with --push updates origin"
+    log_test_start "$test_name"
     setup_test_env
     init_ru_config
 
@@ -335,19 +306,11 @@ test_fallback_with_push() {
     local local_sha
     local_sha=$(get_head_sha "$local_path" "master")
 
-    if [[ "$origin_sha_before" != "$origin_sha_after" ]]; then
-        pass "origin/master was updated after push"
-    else
-        fail "origin/master was NOT updated"
-    fi
-
-    if [[ "$local_sha" == "$origin_sha_after" ]]; then
-        pass "origin/master matches local master"
-    else
-        fail "origin/master doesn't match local master"
-    fi
+    assert_not_equals "$origin_sha_before" "$origin_sha_after" "origin/master was updated after push"
+    assert_equals "$local_sha" "$origin_sha_after" "origin/master matches local master"
 
     cleanup_test_env
+    log_test_pass "$test_name"
 }
 
 #==============================================================================
@@ -355,7 +318,8 @@ test_fallback_with_push() {
 #==============================================================================
 
 test_fallback_dry_run() {
-    echo "Test 6: Fallback with --dry-run doesn't change repo"
+    local test_name="fallback with --dry-run doesn't change repo"
+    log_test_start "$test_name"
     setup_test_env
     init_ru_config
 
@@ -370,13 +334,10 @@ test_fallback_dry_run() {
     local after_sha
     after_sha=$(get_head_sha "$local_path" "master")
 
-    if [[ "$before_sha" == "$after_sha" ]]; then
-        pass "dry-run did NOT change master (SHA unchanged)"
-    else
-        fail "dry-run changed master (before=$before_sha after=$after_sha)"
-    fi
+    assert_equals "$before_sha" "$after_sha" "dry-run did NOT change master (SHA unchanged)"
 
     cleanup_test_env
+    log_test_pass "$test_name"
 }
 
 #==============================================================================
@@ -384,7 +345,8 @@ test_fallback_dry_run() {
 #==============================================================================
 
 test_dedupe_main_master_list() {
-    echo "Test 7: Dedupe — branches=main,master, repo only has master"
+    local test_name="dedupe: branches=main,master, repo only has master"
+    log_test_start "$test_name"
     setup_test_env
     init_ru_config
 
@@ -400,28 +362,20 @@ test_dedupe_main_master_list() {
 
     local output
     output=$("$RU_SCRIPT" fork-sync "testowner/testrepo7" --force --verbose 2>&1)
-    local exit_code=$?
 
     local after_sha
     after_sha=$(get_head_sha "$local_path" "master")
 
-    if [[ "$before_sha" != "$after_sha" ]]; then
-        pass "master was synced"
-    else
-        fail "master was NOT synced"
-    fi
+    assert_not_equals "$before_sha" "$after_sha" "master was synced"
 
     # Count how many times "already synced, skipping" appears (dedupe)
     local dedupe_count
     dedupe_count=$(printf '%s\n' "$output" | grep -c "already synced" || true)
 
-    if [[ "$dedupe_count" -ge 1 ]]; then
-        pass "dedupe prevented second sync of master"
-    else
-        fail "dedupe message not found (expected 'already synced')"
-    fi
+    assert_true "[[ $dedupe_count -ge 1 ]]" "dedupe prevented second sync of master"
 
     cleanup_test_env
+    log_test_pass "$test_name"
 }
 
 #==============================================================================
@@ -429,7 +383,8 @@ test_dedupe_main_master_list() {
 #==============================================================================
 
 test_local_exists_upstream_missing() {
-    echo "Test 8: Local main exists, upstream only has master → skip"
+    local test_name="local main exists, upstream only has master: skip"
+    log_test_start "$test_name"
     setup_test_env
     init_ru_config
 
@@ -460,13 +415,10 @@ test_local_exists_upstream_missing() {
     local after_sha
     after_sha=$(get_head_sha "$local_path" "main")
 
-    if [[ "$before_sha" == "$after_sha" ]]; then
-        pass "main NOT synced (upstream/main doesn't exist, no upstream fallback)"
-    else
-        fail "main was incorrectly synced despite missing upstream/main"
-    fi
+    assert_equals "$before_sha" "$after_sha" "main NOT synced (upstream/main doesn't exist, no upstream fallback)"
 
     cleanup_test_env
+    log_test_pass "$test_name"
 }
 
 #==============================================================================
@@ -474,7 +426,8 @@ test_local_exists_upstream_missing() {
 #==============================================================================
 
 test_fail_then_retry_no_dedupe() {
-    echo "Test 9: Dedupe doesn't block retry after failure (ff-only diverged)"
+    local test_name="dedupe doesn't block retry after failure (ff-only diverged)"
+    log_test_start "$test_name"
     setup_test_env
     init_ru_config
 
@@ -532,11 +485,9 @@ WRAPPER
     export PATH="$_orig_path"
 
     # Sanity: git still works
-    if git -C "$local_path" rev-parse --verify HEAD >/dev/null 2>&1; then
-        pass "git wrapper doesn't break other commands"
-    else
-        fail "git wrapper broke HEAD resolution"
-    fi
+    local git_ok="false"
+    git -C "$local_path" rev-parse --verify HEAD >/dev/null 2>&1 && git_ok="true"
+    assert_equals "true" "$git_ok" "git wrapper doesn't break other commands"
 
     # Core: merge --ff-only was attempted at least twice (both iterations tried)
     local merge_count=0
@@ -544,20 +495,13 @@ WRAPPER
         merge_count=$(wc -l < "$TEMP_DIR/merge_attempts.log")
     fi
 
-    if [[ "$merge_count" -ge 2 ]]; then
-        pass "merge --ff-only attempted $merge_count times (dedupe didn't block retry)"
-    else
-        fail "merge --ff-only only attempted $merge_count times (expected >= 2)"
-    fi
+    assert_true "[[ $merge_count -ge 2 ]]" "merge --ff-only attempted $merge_count times (dedupe didn't block retry)"
 
     # Behavioral: repo should be Failed (ff-only can't handle divergence)
-    if [[ "$exit_code" -ne 0 ]]; then
-        pass "fork-sync exited non-zero (failed as expected)"
-    else
-        fail "fork-sync exited 0 despite diverged branches"
-    fi
+    assert_not_equals "0" "$exit_code" "fork-sync exited non-zero (failed as expected)"
 
     cleanup_test_env
+    log_test_pass "$test_name"
 }
 
 #==============================================================================
@@ -565,7 +509,8 @@ WRAPPER
 #==============================================================================
 
 test_fork_status_json_envelope() {
-    echo "Test 10: fork-status --json returns envelope with data.repos"
+    local test_name="fork-status --json returns envelope with data.repos"
+    log_test_start "$test_name"
     setup_test_env
     init_ru_config
 
@@ -576,37 +521,26 @@ test_fork_status_json_envelope() {
     json_output=$("$RU_SCRIPT" fork-status "testowner/testrepo10" --json --no-fetch 2>/dev/null)
     local exit_code=$?
 
-    if [[ "$exit_code" -ne 0 ]]; then
-        fail "fork-status --json exited non-zero ($exit_code)"
-        cleanup_test_env
-        return
-    fi
+    assert_equals "0" "$exit_code" "fork-status --json exits zero"
 
-    if echo "$json_output" | jq -e '.command == "fork-status"' >/dev/null 2>&1; then
-        pass "JSON envelope includes command=fork-status"
-    else
-        fail "JSON envelope missing command=fork-status"
-    fi
+    local has_command="false"
+    echo "$json_output" | jq -e '.command == "fork-status"' >/dev/null 2>&1 && has_command="true"
+    assert_equals "true" "$has_command" "JSON envelope includes command=fork-status"
 
-    if echo "$json_output" | jq -e '.version and .generated_at and .output_format' >/dev/null 2>&1; then
-        pass "JSON envelope includes version/generated_at/output_format"
-    else
-        fail "JSON envelope missing standard metadata fields"
-    fi
+    local has_meta="false"
+    echo "$json_output" | jq -e '.version and .generated_at and .output_format' >/dev/null 2>&1 && has_meta="true"
+    assert_equals "true" "$has_meta" "JSON envelope includes version/generated_at/output_format"
 
-    if echo "$json_output" | jq -e '.data.total >= 1 and (.data.repos | type == "array")' >/dev/null 2>&1; then
-        pass "JSON data includes total and repos array"
-    else
-        fail "JSON data missing total or repos array"
-    fi
+    local has_data="false"
+    echo "$json_output" | jq -e '.data.total >= 1 and (.data.repos | type == "array")' >/dev/null 2>&1 && has_data="true"
+    assert_equals "true" "$has_data" "JSON data includes total and repos array"
 
-    if echo "$json_output" | jq -e '.data.repos[] | select(.repo == "testowner/testrepo10")' >/dev/null 2>&1; then
-        pass "JSON data contains target repo entry"
-    else
-        fail "JSON data missing target repo entry"
-    fi
+    local has_repo="false"
+    echo "$json_output" | jq -e '.data.repos[] | select(.repo == "testowner/testrepo10")' >/dev/null 2>&1 && has_repo="true"
+    assert_equals "true" "$has_repo" "JSON data contains target repo entry"
 
     cleanup_test_env
+    log_test_pass "$test_name"
 }
 
 #==============================================================================
@@ -614,7 +548,8 @@ test_fork_status_json_envelope() {
 #==============================================================================
 
 test_fork_sync_json_envelope() {
-    echo "Test 11: fork-sync --json returns envelope with summary and repos"
+    local test_name="fork-sync --json returns envelope with summary and repos"
+    log_test_start "$test_name"
     setup_test_env
     init_ru_config
 
@@ -625,31 +560,22 @@ test_fork_sync_json_envelope() {
     json_output=$("$RU_SCRIPT" fork-sync "testowner/testrepo11" --json --dry-run --force 2>/dev/null)
     local exit_code=$?
 
-    if [[ "$exit_code" -ne 0 ]]; then
-        fail "fork-sync --json exited non-zero ($exit_code)"
-        cleanup_test_env
-        return
-    fi
+    assert_equals "0" "$exit_code" "fork-sync --json exits zero"
 
-    if echo "$json_output" | jq -e '.command == "fork-sync"' >/dev/null 2>&1; then
-        pass "JSON envelope includes command=fork-sync"
-    else
-        fail "JSON envelope missing command=fork-sync"
-    fi
+    local has_command="false"
+    echo "$json_output" | jq -e '.command == "fork-sync"' >/dev/null 2>&1 && has_command="true"
+    assert_equals "true" "$has_command" "JSON envelope includes command=fork-sync"
 
-    if echo "$json_output" | jq -e '.data.summary.total >= 1 and (.data.repos | type == "array")' >/dev/null 2>&1; then
-        pass "JSON data includes summary and repos array"
-    else
-        fail "JSON data missing summary or repos"
-    fi
+    local has_data="false"
+    echo "$json_output" | jq -e '.data.summary.total >= 1 and (.data.repos | type == "array")' >/dev/null 2>&1 && has_data="true"
+    assert_equals "true" "$has_data" "JSON data includes summary and repos array"
 
-    if echo "$json_output" | jq -e '.data.repos[] | select(.repo == "testowner/testrepo11") | .status' >/dev/null 2>&1; then
-        pass "JSON data contains target repo status"
-    else
-        fail "JSON data missing target repo status"
-    fi
+    local has_status="false"
+    echo "$json_output" | jq -e '.data.repos[] | select(.repo == "testowner/testrepo11") | .status' >/dev/null 2>&1 && has_status="true"
+    assert_equals "true" "$has_status" "JSON data contains target repo status"
 
     cleanup_test_env
+    log_test_pass "$test_name"
 }
 
 #==============================================================================
@@ -657,7 +583,8 @@ test_fork_sync_json_envelope() {
 #==============================================================================
 
 test_fork_clean_json_envelope() {
-    echo "Test 12: fork-clean --json returns envelope with summary and repos"
+    local test_name="fork-clean --json returns envelope with summary and repos"
+    log_test_start "$test_name"
     setup_test_env
     init_ru_config
 
@@ -668,57 +595,40 @@ test_fork_clean_json_envelope() {
     json_output=$("$RU_SCRIPT" fork-clean "testowner/testrepo12" --json --dry-run --force 2>/dev/null)
     local exit_code=$?
 
-    if [[ "$exit_code" -ne 0 ]]; then
-        fail "fork-clean --json exited non-zero ($exit_code)"
-        cleanup_test_env
-        return
-    fi
+    assert_equals "0" "$exit_code" "fork-clean --json exits zero"
 
-    if echo "$json_output" | jq -e '.command == "fork-clean"' >/dev/null 2>&1; then
-        pass "JSON envelope includes command=fork-clean"
-    else
-        fail "JSON envelope missing command=fork-clean"
-    fi
+    local has_command="false"
+    echo "$json_output" | jq -e '.command == "fork-clean"' >/dev/null 2>&1 && has_command="true"
+    assert_equals "true" "$has_command" "JSON envelope includes command=fork-clean"
 
-    if echo "$json_output" | jq -e '.data.summary.total >= 1 and (.data.repos | type == "array")' >/dev/null 2>&1; then
-        pass "JSON data includes summary and repos array"
-    else
-        fail "JSON data missing summary or repos"
-    fi
+    local has_data="false"
+    echo "$json_output" | jq -e '.data.summary.total >= 1 and (.data.repos | type == "array")' >/dev/null 2>&1 && has_data="true"
+    assert_equals "true" "$has_data" "JSON data includes summary and repos array"
 
-    if echo "$json_output" | jq -e '.data.repos[] | select(.repo == "testowner/testrepo12") | .status' >/dev/null 2>&1; then
-        pass "JSON data contains target repo status"
-    else
-        fail "JSON data missing target repo status"
-    fi
+    local has_status="false"
+    echo "$json_output" | jq -e '.data.repos[] | select(.repo == "testowner/testrepo12") | .status' >/dev/null 2>&1 && has_status="true"
+    assert_equals "true" "$has_status" "JSON data contains target repo status"
 
     cleanup_test_env
+    log_test_pass "$test_name"
 }
 
 #==============================================================================
 # Run all tests
 #==============================================================================
 
-echo "=== fork-sync default branch fallback tests ==="
-echo ""
+run_test test_fallback_master
+run_test test_cli_exact_no_fallback
+run_test test_no_fallback_when_exists
+run_test test_no_fallback_develop
+run_test test_fallback_with_push
+run_test test_fallback_dry_run
+run_test test_dedupe_main_master_list
+run_test test_local_exists_upstream_missing
+run_test test_fail_then_retry_no_dedupe
+run_test test_fork_status_json_envelope
+run_test test_fork_sync_json_envelope
+run_test test_fork_clean_json_envelope
 
-test_fallback_master
-test_cli_exact_no_fallback
-test_no_fallback_when_exists
-test_no_fallback_develop
-test_fallback_with_push
-test_fallback_dry_run
-test_dedupe_main_master_list
-test_local_exists_upstream_missing
-test_fail_then_retry_no_dedupe
-test_fork_status_json_envelope
-test_fork_sync_json_envelope
-test_fork_clean_json_envelope
-
-echo ""
-echo "=== Results: $TESTS_PASSED passed, $TESTS_FAILED failed ==="
-
-if [[ "$TESTS_FAILED" -gt 0 ]]; then
-    exit 1
-fi
-exit 0
+print_results
+exit "$(get_exit_code)"

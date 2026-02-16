@@ -219,6 +219,85 @@ E2E тести з mock git repos (~10 сценаріїв):
 9. `--respect-staging` → manually staged files preserved in separate group
 10. `--execute` rollback → якщо commit fails (simulate via bad hook), files unstaged per-group
 
+## Що НЕ ввійшло в MVP v0.1 (roadmap)
+
+### v0.2: Attribution та bv інтеграція
+
+| Фіча | Опис | Залежність |
+|-------|------|------------|
+| **bv correlation engine** | Автоматичне зв'язування файлів з beads через `bv --robot-history` — зміни в `lib/session.sh` автоматично асоціюються з `bd-4f2a` якщо в beads є відповідна task | `bv` з `pkg/correlation/` |
+| **agent-mail file reservations** | Запит `file_reservation_paths()` для визначення хто "володіє" файлами — attribution змін до конкретного агента | `mcp-agent-mail` |
+| **Multi-agent attribution** | Якщо кілька агентів змінили файли в одній репі, commit-sweep розділяє коміти per-agent на основі file reservations | agent-mail + bv |
+| **Co-Authored-By trailer** | Автоматичне додавання `Co-Authored-By: <agent-name>` до commit message на основі agent-mail identity | agent-mail |
+| **Sub-directory grouping** | Розділення source bucket на під-групи по top-level директоріях (наприклад, `lib/` окремо від `cmd/`) | — |
+
+### v0.3: LLM та розумне групування
+
+| Фіча | Опис | Залежність |
+|-------|------|------------|
+| **LLM commit messages** | Замість евристик використовувати LLM для генерації commit messages з контексту diff | API key config |
+| **Semantic grouping** | LLM аналізує diff та групує файли за семантичною зв'язаністю (не за bucket), наприклад: auth-related зміни в одному коміті навіть якщо це source + test + config | LLM |
+| **Confidence-based routing** | Групи з `confidence: low` автоматично направляються на LLM review перед commit | LLM |
+| **Interactive mode** | `--interactive` — показує план, дозволяє вручну перегрупувати/перейменувати перед execute | gum |
+
+### v0.4: Parallel та push
+
+| Фіча | Опис | Залежність |
+|-------|------|------------|
+| **Parallel sweep** | `--parallel=N` для обробки N реп одночасно (як agent-sweep) | — |
+| **Auto-push** | `--push` після commit виконує `git push` (з `--force-with-lease` для safety) | — |
+| **Resume/restart** | `--resume` та `--restart` після перерваного sweep (як agent-sweep) | state file |
+| **Pre-commit hooks** | `--no-verify` для пропуску git hooks (opt-in) | — |
+| **Conflict resolution** | Якщо staging конфліктує з іншими змінами, автоматично resolve або skip з логом | — |
+
+### v0.5: Ecosystem інтеграція
+
+| Фіча | Опис | Залежність |
+|-------|------|------------|
+| **GitHub PR creation** | `--pr` після push створює PR через `gh pr create` з commit messages як body | `gh` CLI |
+| **Beads auto-close** | Якщо commit закриває task (branch `feature/bd-XXXX`), автоматично `br close bd-XXXX` | `br` |
+| **Audit trail** | Повний лог sweep → agent-mail message: хто, коли, що закоммітив, з якими confidence scores | agent-mail |
+| **Webhook notify** | Після sweep відправити notification через agent-mail або webhook | agent-mail |
+| **Config file** | `~/.config/ru/commit-sweep.yaml` для персистентних налаштувань (default strategy, bucket rules, excluded patterns) | — |
+
+### Наскрізний принцип: Human-in-the-Loop
+
+**Рішення завжди приймає людина. LLM готує варіанти та аналіз розвитку подій.**
+
+Цей принцип діє з v0.1 і масштабується з кожною версією:
+
+| Версія | Що робить LLM | Що вирішує людина |
+|--------|---------------|-------------------|
+| **v0.1** | Групує файли, генерує commit messages, оцінює confidence | `--execute` — людина явно дозволяє створення комітів після перегляду dry-run плану |
+| **v0.2** | Визначає attribution (хто змінив які файли), пропонує Co-Authored-By | Людина підтверджує attribution перед commit; при конфлікті між агентами — людина арбітр |
+| **v0.3** | Генерує кілька варіантів commit message з різним scope/framing, пропонує альтернативні групування файлів | Людина обирає між варіантами або редагує в `--interactive` mode |
+| **v0.4** | При конфлікті staging пропонує N стратегій resolution з прогнозом наслідків кожної | Людина обирає стратегію; `--push` потребує окремого підтвердження |
+| **v0.5** | Генерує PR description, пропонує які beads закрити, формує audit summary | Людина підтверджує PR creation, beads closure; audit — автоматичний але read-only |
+
+**Конкретні механізми:**
+
+- **Dry-run як default** (v0.1+) — кожен sweep починається з плану, не з дії
+- **Confidence scores** (v0.1+) — `high/medium/low` сигналізують людині де потрібна увага
+- **Варіанти замість рішень** (v0.3+) — LLM пропонує 2-3 варіанти commit message, людина обирає
+- **Scenario analysis** (v0.4+) — при конфлікті LLM моделює "якщо обрати A, то...; якщо B, то..."
+- **Escalation policy** — будь-яка операція з `confidence: low` блокується до людського рішення
+- **Undo window** (v0.5) — після `--execute` показується `git reset` команда для відкату кожного коміту
+
+**Анти-паттерни (заборонено в будь-якій версії):**
+- LLM самостійно виконує `git push` без явного `--push` від людини
+- LLM закриває beads issues без підтвердження
+- LLM обирає між конфліктуючими стратегіями без показу варіантів
+- LLM ігнорує `confidence: low` і комітить автоматично
+- Будь-яка незворотна дія без explicit opt-in від людини
+
+### Свідомо відкладені архітектурні рішення
+
+1. **Без `git add .` або `git add -A`** — завжди конкретні файли. Це повільніше але безпечніше. Перегляд продуктивності — v0.4.
+2. **Без jq dependency** — JSON будується через printf. Якщо schema ускладниться в v0.2+, перехід на jq буде необхідний.
+3. **Без паралельності** — v0.1 sequential only. Для десятків реп це може бути повільно, але коректно. Паралельність потребує lock management.
+4. **Без push** — коміти тільки локальні. Push — окрема відповідальність (може бути `ru sync --push`).
+5. **Без rollback всього sweep** — якщо 3 з 5 комітів успішні і 4-й впав, перші 3 залишаються. Повний rollback — v0.5.
+
 ## Verification
 
 ```bash

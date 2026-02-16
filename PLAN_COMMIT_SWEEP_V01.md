@@ -268,27 +268,33 @@ E2E тести з mock git repos (~10 сценаріїв):
 
 | Версія | Що робить LLM | Що вирішує людина |
 |--------|---------------|-------------------|
-| **v0.1** | Групує файли, генерує commit messages, оцінює confidence | `--execute` — людина явно дозволяє створення комітів після перегляду dry-run плану |
-| **v0.2** | Визначає attribution (хто змінив які файли), пропонує Co-Authored-By | Людина підтверджує attribution перед commit; при конфлікті між агентами — людина арбітр |
-| **v0.3** | Генерує кілька варіантів commit message з різним scope/framing, пропонує альтернативні групування файлів | Людина обирає між варіантами або редагує в `--interactive` mode |
-| **v0.4** | При конфлікті staging пропонує N стратегій resolution з прогнозом наслідків кожної | Людина обирає стратегію; `--push` потребує окремого підтвердження |
-| **v0.5** | Генерує PR description, пропонує які beads закрити, формує audit summary | Людина підтверджує PR creation, beads closure; audit — автоматичний але read-only |
+| **v0.1** | Групує файли, генерує commit messages, оцінює confidence | Перший запуск — dry-run (план). `--execute` дозволяє автономне виконання |
+| **v0.2** | Визначає attribution, додає Co-Authored-By, закриває beads | Автономно. Агент сам вирішує attribution на основі file reservations |
+| **v0.3** | Генерує commit messages через LLM, семантичне групування | Автономно. `--interactive` — opt-in для ручного втручання |
+| **v0.4** | Parallel sweep, conflict resolution, push | Push потребує `--push`. Все інше автономно |
+| **v0.5** | PR creation, audit trail | PR creation потребує `--pr`. Audit — автоматичний |
 
-**Конкретні механізми:**
+**Межа автономності (за принципом DCG):**
 
-- **Dry-run як default** (v0.1+) — кожен sweep починається з плану, не з дії
-- **Confidence scores** (v0.1+) — `high/medium/low` сигналізують людині де потрібна увага
-- **Варіанти замість рішень** (v0.3+) — LLM пропонує 2-3 варіанти commit message, людина обирає
-- **Scenario analysis** (v0.4+) — при конфлікті LLM моделює "якщо обрати A, то...; якщо B, то..."
-- **Escalation policy** — будь-яка операція з `confidence: low` блокується до людського рішення
-- **Undo window** (v0.5) — після `--execute` показується `git reset` команда для відкату кожного коміту
+Агенти працюють повністю автономно. Блокуються тільки **деструктивні дії** —
+ті, що змінюють shared state або незворотні (аналог `destructive_command_guard`):
 
-**Анти-паттерни (заборонено в будь-якій версії):**
-- LLM самостійно виконує `git push` без явного `--push` від людини
-- LLM закриває beads issues без підтвердження
-- LLM обирає між конфліктуючими стратегіями без показу варіантів
-- LLM ігнорує `confidence: low` і комітить автоматично
-- Будь-яка незворотна дія без explicit opt-in від людини
+| Дія | Автономно? | Чому |
+|-----|-----------|------|
+| `git add` + `git commit` | Так | Локальна, зворотна (`git reset --soft`) |
+| Вибір commit message | Так | Локальна, перезаписується `--amend` |
+| Вибір стратегії grouping | Так | Не впливає на shared state |
+| `br close` (закриття beads) | Так | Зворотна (`br reopen`) |
+| Commit з `confidence: low` | Так | Локальна; confidence — інформативний, не блокуючий |
+| `git push` | **Ні — потребує `--push`** | Змінює remote (shared state) |
+| `git push --force` | **Ні — потребує `--force`** | Деструктивна: перезаписує remote history |
+| PR creation | **Ні — потребує `--pr`** | Видима дія на GitHub (shared state) |
+| `git reset --hard` | **Ні — DCG блокує** | Знищує uncommitted changes |
+
+**Принцип:** fail-safe default — дозволяти все що локальне та зворотне.
+Блокувати тільки те, що змінює shared state або незворотне. Confidence scores,
+варіанти messages, scenario analysis — це інформація для audit trail, а не
+блокери для агента.
 
 ### Свідомо відкладені архітектурні рішення
 

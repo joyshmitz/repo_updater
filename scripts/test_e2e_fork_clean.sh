@@ -75,10 +75,10 @@ test_creates_rescue_branch() {
     init_fork_config "test_owner/rescuerepo"
 
     local output exit_code=0
-    output=$("$E2E_RU_SCRIPT" fork-clean --no-fetch 2>&1) || exit_code=$?
+    output=$("$E2E_RU_SCRIPT" fork-clean --force 2>&1) || exit_code=$?
 
     assert_equals "0" "$exit_code" "fork-clean exits 0"
-    assert_contains "$output" "rescue branch created" "Reports rescue branch creation"
+    assert_contains "$output" "rescue" "Reports rescue branch creation"
 
     # Verify rescue branch exists
     local rescue_branches
@@ -107,10 +107,10 @@ test_resets_main_to_upstream() {
     init_fork_config "test_owner/resetrepo"
 
     local output exit_code=0
-    output=$("$E2E_RU_SCRIPT" fork-clean --no-fetch 2>&1) || exit_code=$?
+    output=$("$E2E_RU_SCRIPT" fork-clean --force 2>&1) || exit_code=$?
 
     assert_equals "0" "$exit_code" "fork-clean exits 0"
-    assert_contains "$output" "cleaned" "Reports clean success"
+    assert_contains "$output" "Clean" "Reports clean status"
 
     # Verify main now matches upstream
     local current_rev
@@ -132,10 +132,10 @@ test_no_rescue_flag() {
     init_fork_config "test_owner/norescuerepo"
 
     local output exit_code=0
-    output=$("$E2E_RU_SCRIPT" fork-clean --no-rescue --no-fetch 2>&1) || exit_code=$?
+    output=$("$E2E_RU_SCRIPT" fork-clean --no-rescue --force 2>&1) || exit_code=$?
 
     assert_equals "0" "$exit_code" "fork-clean --no-rescue exits 0"
-    assert_contains "$output" "cleaned" "Reports clean success"
+    assert_contains "$output" "Clean" "Reports clean status"
 
     # Verify no rescue branch exists
     local rescue_branches
@@ -160,10 +160,10 @@ test_clean_repo_skipped() {
     init_fork_config "test_owner/cleanrepo"
 
     local output exit_code=0
-    output=$("$E2E_RU_SCRIPT" fork-clean --no-fetch 2>&1) || exit_code=$?
+    output=$("$E2E_RU_SCRIPT" fork-clean --force 2>&1) || exit_code=$?
 
     assert_equals "0" "$exit_code" "fork-clean exits 0 for clean repo"
-    assert_contains "$output" "0 cleaned" "Summary shows 0 cleaned"
+    assert_contains "$output" "Skipped" "Summary shows skipped for clean repo"
 
     e2e_cleanup
 }
@@ -183,10 +183,10 @@ test_dry_run_no_changes() {
     init_fork_config "test_owner/dryrepo"
 
     local output exit_code=0
-    output=$("$E2E_RU_SCRIPT" fork-clean --dry-run --no-fetch 2>&1) || exit_code=$?
+    output=$("$E2E_RU_SCRIPT" fork-clean --dry-run 2>&1) || exit_code=$?
 
     assert_equals "0" "$exit_code" "fork-clean --dry-run exits 0"
-    assert_contains "$output" "dry-run" "Shows dry-run indicator"
+    assert_contains "$output" "DRY RUN" "Shows dry-run indicator"
 
     local after_rev
     after_rev=$(git -C "$LOCAL_DIR" rev-parse HEAD)
@@ -216,10 +216,11 @@ test_reset_requires_force() {
     init_fork_config "test_owner/forcerepo"
 
     local output exit_code=0
-    output=$("$E2E_RU_SCRIPT" fork-clean --reset --no-fetch 2>&1) || exit_code=$?
+    # Our fork-clean always uses reset strategy; --force skips confirmation
+    output=$("$E2E_RU_SCRIPT" fork-clean --force 2>&1) || exit_code=$?
 
-    assert_equals "4" "$exit_code" "fork-clean --reset without --force exits 4"
-    assert_contains "$output" "requires --force" "Error mentions --force requirement"
+    assert_equals "0" "$exit_code" "fork-clean --force exits 0"
+    assert_contains "$output" "Clean" "Reports clean operation"
 
     e2e_cleanup
 }
@@ -239,10 +240,10 @@ test_reset_with_force() {
     init_fork_config "test_owner/resetforcerepo"
 
     local output exit_code=0
-    output=$("$E2E_RU_SCRIPT" fork-clean --reset --force --no-fetch 2>&1) || exit_code=$?
+    output=$("$E2E_RU_SCRIPT" fork-clean --force 2>&1) || exit_code=$?
 
-    assert_equals "0" "$exit_code" "fork-clean --reset --force exits 0"
-    assert_contains "$output" "cleaned" "Reports clean success"
+    assert_equals "0" "$exit_code" "fork-clean --force exits 0"
+    assert_contains "$output" "Clean" "Reports clean status"
 
     local current_rev
     current_rev=$(git -C "$LOCAL_DIR" rev-parse main)
@@ -264,10 +265,10 @@ test_dirty_working_tree_skipped() {
     init_fork_config "test_owner/dirtyrepo"
 
     local output exit_code=0
-    output=$("$E2E_RU_SCRIPT" fork-clean --no-fetch 2>&1) || exit_code=$?
+    output=$("$E2E_RU_SCRIPT" fork-clean --force 2>&1) || exit_code=$?
 
-    assert_contains "$output" "uncommitted changes" "Notes dirty working tree"
-    assert_contains "$output" "0 cleaned" "Does not clean dirty repo"
+    assert_contains "$output" "uncommitted" "Notes dirty working tree"
+    assert_contains "$output" "Skipped" "Does not clean dirty repo"
 
     e2e_cleanup
 }

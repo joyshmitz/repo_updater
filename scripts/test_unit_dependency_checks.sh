@@ -41,7 +41,18 @@ source_dependency_functions() {
     eval "$(sed -n '/^log_error()/,/^}/p' "$RU_SCRIPT")"
     eval "$(sed -n '/^log_success()/,/^}/p' "$RU_SCRIPT")"
     eval "$(sed -n '/^can_prompt()/,/^}/p' "$RU_SCRIPT")"
+    eval "$(sed -n '/^is_interactive()/,/^}/p' "$RU_SCRIPT")"
+    eval "$(sed -n '/^gum_confirm()/,/^}/p' "$RU_SCRIPT")"
     eval "$(sed -n '/^ensure_dependencies()/,/^}/p' "$RU_SCRIPT")"
+
+    # Globals needed by log_*/can_prompt/gum_confirm (set -u safe)
+    QUIET="${QUIET:-false}"
+    BLUE="${BLUE:-}"
+    RESET="${RESET:-}"
+    GREEN="${GREEN:-}"
+    RED="${RED:-}"
+    NON_INTERACTIVE="${NON_INTERACTIVE:-false}"
+    GUM_AVAILABLE="${GUM_AVAILABLE:-false}"
 }
 
 source_dependency_functions

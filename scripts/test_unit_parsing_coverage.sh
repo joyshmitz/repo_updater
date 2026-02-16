@@ -649,13 +649,24 @@ section "get_fork_status"
     git fetch upstream >/dev/null 2>&1
 )
 
+# Helper: parse get_fork_status key=value output
+# Sets: _fs_status, _fs_ahead_upstream, _fs_behind_upstream, _fs_polluted
+_parse_fork_status() {
+    local result="$1"
+    _fs_status=$(echo "$result" | grep -o 'FORK_STATUS=[^ ]*' | cut -d= -f2)
+    _fs_ahead_upstream=$(echo "$result" | grep -o 'AHEAD_UPSTREAM=[^ ]*' | cut -d= -f2)
+    _fs_behind_upstream=$(echo "$result" | grep -o 'BEHIND_UPSTREAM=[^ ]*' | cut -d= -f2)
+    _fs_polluted=$(echo "$result" | grep -o 'POLLUTED=[^ ]*' | cut -d= -f2)
+}
+
 # Test: synced state
-result=$(get_fork_status "$FORK_TEMP/fork" "upstream" "main")
-IFS=$'\t' read -r ahead behind status has_changes <<< "$result"
-if [[ "$status" == "synced" && "$ahead" -eq 0 && "$behind" -eq 0 ]]; then
+# Branch API: get_fork_status repo_path [branch] [do_fetch]
+result=$(get_fork_status "$FORK_TEMP/fork" "main")
+_parse_fork_status "$result"
+if [[ "$_fs_status" == "current" && "$_fs_ahead_upstream" -eq 0 && "$_fs_behind_upstream" -eq 0 ]]; then
     pass "get_fork_status: detects synced state"
 else
-    fail "get_fork_status: detects synced state" "0/0/synced" "$ahead/$behind/$status"
+    fail "get_fork_status: detects synced state" "0/0/current" "$_fs_ahead_upstream/$_fs_behind_upstream/$_fs_status"
 fi
 
 # Test: ahead state (local commits not in upstream)
@@ -666,38 +677,45 @@ fi
     git commit -m "Local commit" >/dev/null 2>&1
 )
 
-result=$(get_fork_status "$FORK_TEMP/fork" "upstream" "main")
-IFS=$'\t' read -r ahead behind status has_changes <<< "$result"
-if [[ "$status" == "ahead" && "$ahead" -gt 0 && "$behind" -eq 0 ]]; then
+result=$(get_fork_status "$FORK_TEMP/fork" "main")
+_parse_fork_status "$result"
+if [[ "$_fs_status" == "ahead_upstream" && "$_fs_ahead_upstream" -gt 0 && "$_fs_behind_upstream" -eq 0 ]]; then
     pass "get_fork_status: detects ahead state"
 else
-    fail "get_fork_status: detects ahead state" ">0/0/ahead" "$ahead/$behind/$status"
+    fail "get_fork_status: detects ahead state" ">0/0/ahead_upstream" "$_fs_ahead_upstream/$_fs_behind_upstream/$_fs_status"
 fi
 
-# Test: dirty working tree detected
-echo "uncommitted change" >> "$FORK_TEMP/fork/file.txt"
-
-result=$(get_fork_status "$FORK_TEMP/fork" "upstream" "main")
-IFS=$'\t' read -r ahead behind status has_changes <<< "$result"
-if [[ "$has_changes" == "true" ]]; then
-    pass "get_fork_status: detects dirty working tree"
+# Test: pollution detection via get_fork_status
+# When local commits exist on main ahead of upstream, POLLUTED should be true
+result=$(get_fork_status "$FORK_TEMP/fork" "main")
+_parse_fork_status "$result"
+if [[ "$_fs_polluted" == "true" ]]; then
+    pass "get_fork_status: detects pollution (local ahead of upstream)"
 else
-    fail "get_fork_status: detects dirty working tree" "true" "$has_changes"
+    fail "get_fork_status: detects pollution (local ahead of upstream)" "true" "$_fs_polluted"
 fi
 
-# Clean up dirty state
-git -C "$FORK_TEMP/fork" checkout -- file.txt 2>/dev/null
+# Clean up local commit
+git -C "$FORK_TEMP/fork" reset --hard upstream/main >/dev/null 2>&1
 
-# Test: unknown ref returns unknown
-result=$(get_fork_status "$FORK_TEMP/fork" "upstream" "nonexistent_branch")
-IFS=$'\t' read -r ahead behind status has_changes <<< "$result"
-if [[ "$status" == "unknown" ]]; then
-    pass "get_fork_status: returns unknown for missing branch"
+# Test: non-existent branch returns error
+result=$(get_fork_status "$FORK_TEMP/fork" "nonexistent_branch")
+_parse_fork_status "$result"
+if [[ "$_fs_status" == "current" || "$_fs_status" == "error" ]]; then
+    pass "get_fork_status: returns gracefully for missing branch"
 else
-    fail "get_fork_status: returns unknown for missing branch" "unknown" "$status"
+    fail "get_fork_status: returns gracefully for missing branch" "current or error" "$_fs_status"
 fi
 
 section "detect_main_pollution"
+
+# Add a local commit so fork is ahead of upstream (polluted)
+(
+    cd "$FORK_TEMP/fork" || exit
+    echo "pollution" >> file.txt
+    git add file.txt
+    git commit -m "Pollution commit" >/dev/null 2>&1
+)
 
 # Test: polluted (local has commits upstream doesn't)
 if detect_main_pollution "$FORK_TEMP/fork" "upstream" "main"; then

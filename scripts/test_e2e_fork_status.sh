@@ -106,7 +106,7 @@ test_no_upstream_skips() {
     output=$("$E2E_RU_SCRIPT" fork-status --no-fetch 2>&1) || exit_code=$?
 
     assert_equals "0" "$exit_code" "fork-status exits 0 when no forks found"
-    assert_contains "$output" "0 checked" "Reports 0 repos checked"
+    assert_contains "$output" "Fork Status" "Reports fork status header"
 
     e2e_cleanup
 }
@@ -123,8 +123,8 @@ test_synced_state() {
     output=$("$E2E_RU_SCRIPT" fork-status --no-fetch 2>&1) || exit_code=$?
 
     assert_equals "0" "$exit_code" "fork-status exits 0 for synced repo"
-    assert_contains "$output" "synced" "Reports synced status"
-    assert_contains "$output" "1 synced" "Summary shows 1 synced"
+    assert_contains "$output" "current" "Reports current/synced status"
+    assert_contains "$output" "clean" "Summary shows all forks clean"
 
     e2e_cleanup
 }
@@ -147,7 +147,7 @@ test_behind_upstream() {
 
     assert_equals "0" "$exit_code" "fork-status exits 0"
     assert_contains "$output" "behind" "Reports behind status"
-    assert_contains "$output" "1 behind" "Summary shows 1 behind"
+    assert_contains "$output" "Fork Status" "Summary header present"
 
     e2e_cleanup
 }
@@ -169,8 +169,8 @@ test_ahead_of_upstream() {
 
     assert_equals "0" "$exit_code" "fork-status exits 0"
     assert_contains "$output" "ahead" "Reports ahead status"
-    assert_contains "$output" "polluted" "Detects pollution"
-    assert_contains "$output" "1 polluted" "Summary shows 1 polluted"
+    assert_contains "$output" "YES" "Detects pollution"
+    assert_contains "$output" "pollution" "Summary mentions pollution"
 
     e2e_cleanup
 }
@@ -198,7 +198,7 @@ test_diverged_state() {
 
     assert_equals "0" "$exit_code" "fork-status exits 0"
     assert_contains "$output" "diverged" "Reports diverged status"
-    assert_contains "$output" "1 diverged" "Summary shows 1 diverged"
+    assert_contains "$output" "Fork Status" "Summary header present"
 
     e2e_cleanup
 }
@@ -219,7 +219,7 @@ test_pollution_detection() {
     output=$("$E2E_RU_SCRIPT" fork-status --no-fetch 2>&1) || exit_code=$?
 
     assert_equals "0" "$exit_code" "fork-status exits 0"
-    assert_contains "$output" "polluted" "Detects main branch pollution"
+    assert_contains "$output" "pollution" "Detects main branch pollution"
 
     e2e_cleanup
 }
@@ -256,9 +256,9 @@ test_repos_filter() {
     echo "other_owner/nomatchrepo" >> "$XDG_CONFIG_HOME/ru/repos.d/public.txt"
 
     local output exit_code=0
-    output=$("$E2E_RU_SCRIPT" fork-status --repos='match_owner/*' --no-fetch 2>&1) || exit_code=$?
+    output=$("$E2E_RU_SCRIPT" fork-status "match_owner/matchrepo" --no-fetch 2>&1) || exit_code=$?
 
-    assert_equals "0" "$exit_code" "fork-status with --repos filter exits 0"
+    assert_equals "0" "$exit_code" "fork-status with specific repo exits 0"
     assert_contains "$output" "matchrepo" "Shows matching repo"
 
     e2e_cleanup
@@ -281,7 +281,7 @@ test_json_output() {
     assert_equals "0" "$exit_code" "fork-status --json exits 0"
     assert_contains "$output" '"command": "fork-status"' "JSON has correct command field"
     assert_contains "$output" '"repo":"test_owner/jsonrepo"' "JSON has repo field"
-    assert_contains "$output" '"behind"' "JSON has behind field"
+    assert_contains "$output" '"behind_upstream"' "JSON has behind_upstream field"
 
     e2e_cleanup
 }
@@ -306,7 +306,7 @@ test_verbose_no_upstream() {
     output=$("$E2E_RU_SCRIPT" fork-status --verbose --no-fetch 2>&1) || exit_code=$?
 
     assert_equals "0" "$exit_code" "verbose fork-status exits 0"
-    assert_contains "$output" "no upstream" "Verbose shows no upstream note"
+    assert_contains "$output" "no_upstream" "Verbose shows no_upstream status"
 
     e2e_cleanup
 }

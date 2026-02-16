@@ -259,6 +259,8 @@ test_get_main_repo_path_from_worktree_actual_worktree() {
     # Create main repo
     local main_repo
     main_repo=$(create_test_repo "main-repo")
+    # Resolve symlinks (macOS /var -> /private/var) to match function output
+    main_repo=$(cd "$main_repo" && pwd -P)
 
     # Create a worktree
     local worktree_dir="$TEST_DIR/worktrees/feature-branch"
@@ -285,6 +287,8 @@ test_get_main_repo_path_from_worktree_main_repo() {
     # Create main repo
     local main_repo
     main_repo=$(create_test_repo "standalone-repo")
+    # Resolve symlinks (macOS /var -> /private/var) to match function output
+    main_repo=$(cd "$main_repo" && pwd -P)
 
     # Get main repo from itself (not a worktree)
     local result
@@ -316,6 +320,8 @@ test_get_main_repo_path_from_worktree_multiple_worktrees() {
     # Create main repo
     local main_repo
     main_repo=$(create_test_repo "multi-wt-repo")
+    # Resolve symlinks (macOS /var -> /private/var) to match function output
+    main_repo=$(cd "$main_repo" && pwd -P)
 
     # Create multiple worktrees
     local wt1="$TEST_DIR/worktrees/wt1"

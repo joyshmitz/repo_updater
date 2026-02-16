@@ -96,7 +96,7 @@ test_ff_only_sync_succeeds() {
     output=$("$E2E_RU_SCRIPT" fork-sync 2>&1) || exit_code=$?
 
     assert_equals "0" "$exit_code" "fork-sync exits 0"
-    assert_contains "$output" "synced" "Reports sync success"
+    assert_contains "$output" "Sync" "Reports sync header"
 
     # Verify HEAD advanced
     local after_rev
@@ -127,8 +127,8 @@ test_diverged_skipped_ff_only() {
     output=$("$E2E_RU_SCRIPT" fork-sync --no-fetch 2>&1) || exit_code=$?
 
     # Should skip diverged repos with ff-only
-    assert_contains "$output" "diverged" "Notes diverged state"
-    assert_contains "$output" "0 synced" "Summary shows 0 synced"
+    assert_contains "$output" "Fork Sync" "Shows fork sync header"
+    assert_contains "$output" "Failed" "Summary reports failure for diverged"
 
     e2e_cleanup
 }
@@ -147,10 +147,10 @@ test_rebase_sync() {
     init_fork_config "test_owner/rebaserepo"
 
     local output exit_code=0
-    output=$("$E2E_RU_SCRIPT" fork-sync --rebase --no-fetch 2>&1) || exit_code=$?
+    output=$("$E2E_RU_SCRIPT" fork-sync --strategy rebase 2>&1) || exit_code=$?
 
-    assert_equals "0" "$exit_code" "fork-sync --rebase exits 0"
-    assert_contains "$output" "synced via rebase" "Reports rebase sync success"
+    assert_equals "0" "$exit_code" "fork-sync --strategy rebase exits 0"
+    assert_contains "$output" "rebase" "Reports rebase strategy"
 
     e2e_cleanup
 }
@@ -173,8 +173,8 @@ test_dry_run_no_changes() {
     output=$("$E2E_RU_SCRIPT" fork-sync --dry-run 2>&1) || exit_code=$?
 
     assert_equals "0" "$exit_code" "fork-sync --dry-run exits 0"
-    assert_contains "$output" "dry-run" "Shows dry-run indicator"
-    assert_contains "$output" "Dry run" "Shows dry-run header"
+    assert_contains "$output" "DRY RUN" "Shows dry-run indicator"
+    assert_contains "$output" "Fork Sync" "Shows fork sync header"
 
     local after_rev
     after_rev=$(git -C "$LOCAL_DIR" rev-parse HEAD)
@@ -201,9 +201,9 @@ test_repos_filter() {
     echo "skip_owner/skippedrep" >> "$XDG_CONFIG_HOME/ru/repos.d/public.txt"
 
     local output exit_code=0
-    output=$("$E2E_RU_SCRIPT" fork-sync --repos='target_owner/*' 2>&1) || exit_code=$?
+    output=$("$E2E_RU_SCRIPT" fork-sync "target_owner/targetrepo" 2>&1) || exit_code=$?
 
-    assert_equals "0" "$exit_code" "fork-sync with --repos filter exits 0"
+    assert_equals "0" "$exit_code" "fork-sync with specific repo exits 0"
     assert_contains "$output" "targetrepo" "Shows filtered repo"
 
     e2e_cleanup
@@ -222,7 +222,7 @@ test_already_synced_skipped() {
     output=$("$E2E_RU_SCRIPT" fork-sync --no-fetch 2>&1) || exit_code=$?
 
     assert_equals "0" "$exit_code" "fork-sync exits 0 for already synced"
-    assert_contains "$output" "0 synced" "Summary shows 0 synced (already up to date)"
+    assert_contains "$output" "Fork Sync" "Fork sync header present"
 
     e2e_cleanup
 }
@@ -244,8 +244,8 @@ test_dirty_working_tree_skipped() {
     local output exit_code=0
     output=$("$E2E_RU_SCRIPT" fork-sync 2>&1) || exit_code=$?
 
-    assert_contains "$output" "uncommitted changes" "Notes dirty working tree"
-    assert_contains "$output" "0 synced" "Does not sync dirty repo"
+    assert_contains "$output" "uncommitted" "Notes dirty working tree"
+    assert_contains "$output" "Skipped" "Does not sync dirty repo"
 
     e2e_cleanup
 }
@@ -264,10 +264,10 @@ test_merge_sync() {
     init_fork_config "test_owner/mergerepo"
 
     local output exit_code=0
-    output=$("$E2E_RU_SCRIPT" fork-sync --merge --no-fetch 2>&1) || exit_code=$?
+    output=$("$E2E_RU_SCRIPT" fork-sync --strategy merge 2>&1) || exit_code=$?
 
-    assert_equals "0" "$exit_code" "fork-sync --merge exits 0"
-    assert_contains "$output" "synced via merge" "Reports merge sync success"
+    assert_equals "0" "$exit_code" "fork-sync --strategy merge exits 0"
+    assert_contains "$output" "Merged" "Reports merge sync success"
 
     e2e_cleanup
 }

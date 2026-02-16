@@ -301,8 +301,9 @@ MIIEpAIBAAKCAQEAq8HzQmQ0N3E8Hn6EXAMPLE
 EOF
     git -C "$test_repo" add secret.txt
 
+    # Force regex fallback (external scanners may not flag test patterns)
     local result
-    result=$(run_secret_scan "$test_repo")
+    result=$(PATH="/usr/bin:/bin:$(dirname "$(command -v git)")" run_secret_scan "$test_repo")
 
     local ok
     ok=$(echo "$result" | jq -r '.ok' 2>/dev/null)
@@ -330,8 +331,9 @@ test_secret_scan_detects_aws_keys() {
     echo "AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE" > "$test_repo/config.sh"
     git -C "$test_repo" add config.sh
 
+    # Force regex fallback (external scanners may not flag test patterns)
     local result
-    result=$(run_secret_scan "$test_repo")
+    result=$(PATH="/usr/bin:/bin:$(dirname "$(command -v git)")" run_secret_scan "$test_repo")
 
     local ok
     ok=$(echo "$result" | jq -r '.ok' 2>/dev/null)
@@ -359,8 +361,9 @@ test_secret_scan_detects_github_tokens() {
     echo "GITHUB_TOKEN=ghp_1234567890abcdefghijklmnopqrstuvwxyz" > "$test_repo/config.sh"
     git -C "$test_repo" add config.sh
 
+    # Force regex fallback (external scanners may not flag test patterns)
     local result
-    result=$(run_secret_scan "$test_repo")
+    result=$(PATH="/usr/bin:/bin:$(dirname "$(command -v git)")" run_secret_scan "$test_repo")
 
     local ok
     ok=$(echo "$result" | jq -r '.ok' 2>/dev/null)
@@ -417,8 +420,9 @@ test_secret_scan_detects_password_assignments() {
     echo 'password=supersecret123' > "$test_repo/config.ini"
     git -C "$test_repo" add config.ini
 
+    # Force regex fallback (external scanners may not flag test patterns)
     local result
-    result=$(run_secret_scan "$test_repo")
+    result=$(PATH="/usr/bin:/bin:$(dirname "$(command -v git)")" run_secret_scan "$test_repo")
 
     local ok
     ok=$(echo "$result" | jq -r '.ok' 2>/dev/null)

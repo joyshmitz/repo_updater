@@ -12,10 +12,41 @@ AI-агенти кодери (працюють з br-задачами) зара�
 
 **Unix-філософія:** одна робота — перетворити брудне робоче дерево в чисті атомарні коміти. Все інше делегується існуючим інструментам:
 - `ru` — repo discovery (`get_all_repos`, `resolve_repo_spec`)
-- `br` — task metadata (`br show --json`)
-- `bv` — (v0.2+) attribution через correlation engine
+- `br` — task metadata (`br show <id> --format json` → `.[0].title`)
+- `bv` — (v0.2+) attribution через `--robot-history` + `pkg/correlation/extractor.go`
 - `git` — staging, committing
-- `agent-mail` — (v0.2+) file reservations для атрибуції
+- `agent-mail` — (v0.2+) `file_reservation_paths()` для атрибуції (хто володіє файлами)
+- `DCG` — класифікація safe/destructive (commit=safe, push=needs flag)
+- `SLB` — (v0.4+) two-person approval для `--force` операцій
+- `NTM` — (v0.4+) `ConflictDetector.CheckPathConflict()` для lock перевірки
+
+## Аудит екосистеми (60+ проєктів ~/projects/joyshmitz/)
+
+**Результат: дублювання немає.** Жоден проєкт не реалізує commit grouping,
+file classification для комітів, або conventional commit generation.
+
+### Що перевикористовуємо з екосистеми
+
+| Інструмент | Що дає | Версія | API/Команда |
+|------------|--------|--------|-------------|
+| **ru** | repo discovery, dirty detection, JSON envelope, logging, summary box | v0.1 | `repo_is_dirty()`, `build_json_envelope()`, `print_fork_op_summary()` |
+| **br** (beads_rust) | Task title за bead ID | v0.1 | `br show bd-XXXX --format json` → парсити `.[0].title` |
+| **DCG** | Принцип safe/destructive | v0.1 | commit=safe (Low), push=needs flag (High), force push=Critical |
+| **agent-mail** | File ownership: хто володіє файлами | v0.2 | `file_reservation_paths(project_key, agent, paths, ttl, exclusive)` |
+| **bv** (beads_viewer) | Commit-to-bead correlation | v0.2 | `bv --robot-history` → `BeadEvent{BeadID, CommitSHA, Author}` |
+| **SLB** | Approval для destructive ops | v0.4 | `Request{min_approvals, require_different_model}` → approve/reject/escalate |
+| **NTM** | Conflict detection між агентами | v0.4 | `CheckPathConflict(path, excludeAgent)` → `Conflict{holders}` |
+| **CASS** | Навчання з минулих сесій | v0.5 | `cm context "commit patterns" --json` → правила та анти-паттерни |
+
+### Що будуємо з нуля (не існує в екосистемі)
+
+- `cs_classify_file()` — 4-bucket класифікатор (test/doc/config/source)
+- `cs_detect_commit_type()` — git status codes → conventional commit type
+- `cs_detect_scope()` — top-level directory як scope
+- `cs_build_message()` — форматування conventional commit subject
+- `cs_assess_confidence()` — scoring high/medium/low
+- `cs_analyze_repo()` — оркестрація: git status → classify → group → JSON
+- `cs_execute_group()` — safe git add + commit з per-group rollback
 
 ## Scope v0.1
 
@@ -77,7 +108,7 @@ COMMIT-SWEEP OPTIONS:
 |---------|-------------|
 | `cmd_commit_sweep()` | Головна команда: parse args → load repos → iterate → plan/execute |
 | `cs_extract_task_id()` | Branch name → task ID (`feature/bd-4f2a` → `bd-4f2a`) |
-| `cs_get_task_title()` | Task ID → title через `br show --json` з timeout (graceful degradation) |
+| `cs_get_task_title()` | Task ID → title через `br show <id> --format json` з 3s timeout (graceful degradation). br повертає `[{title, status, priority, ...}]` — парсимо title через grep/sed (без jq) |
 | `cs_analyze_repo()` | Ядро: git status → classify files → build groups |
 | `cs_classify_file()` | Один файл → bucket (test/doc/config/source) |
 | `cs_detect_commit_type()` | Git status codes (A/M/D/R) + bucket → feat/fix/test/docs/chore |
@@ -223,13 +254,13 @@ E2E тести з mock git repos (~10 сценаріїв):
 
 ### v0.2: Attribution та bv інтеграція
 
-| Фіча | Опис | Залежність |
-|-------|------|------------|
-| **bv correlation engine** | Автоматичне зв'язування файлів з beads через `bv --robot-history` — зміни в `lib/session.sh` автоматично асоціюються з `bd-4f2a` якщо в beads є відповідна task | `bv` з `pkg/correlation/` |
-| **agent-mail file reservations** | Запит `file_reservation_paths()` для визначення хто "володіє" файлами — attribution змін до конкретного агента | `mcp-agent-mail` |
-| **Multi-agent attribution** | Якщо кілька агентів змінили файли в одній репі, commit-sweep розділяє коміти per-agent на основі file reservations | agent-mail + bv |
-| **Co-Authored-By trailer** | Автоматичне додавання `Co-Authored-By: <agent-name>` до commit message на основі agent-mail identity | agent-mail |
-| **Sub-directory grouping** | Розділення source bucket на під-групи по top-level директоріях (наприклад, `lib/` окремо від `cmd/`) | — |
+| Фіча | Опис | Конкретний API з екосистеми |
+|-------|------|---------------------------|
+| **bv correlation engine** | Зв'язування файлів з beads: зміни в `lib/session.sh` → `bd-4f2a` | `bv --robot-history` → `BeadEvent{BeadID, CommitSHA, Author, EventType}` через `pkg/correlation/extractor.go` |
+| **agent-mail file reservations** | Визначення хто "володіє" файлами для attribution | `file_reservation_paths(project_key, agent, paths, ttl, exclusive)` → `{granted, conflicts}`. Query: `_collect_file_reservation_statuses()` з `app.py:3485` |
+| **Multi-agent attribution** | Розділення комітів per-agent на основі file reservations | Glob matching через `fnmatchcase()` в `app.py:3712`. Конфлікт = `{path, holders: [agent_names]}` |
+| **Co-Authored-By trailer** | `Co-Authored-By: <agent-name>` на основі agent-mail identity | Agent profile з `register_agent()` → `{name, program, model}` |
+| **Sub-directory grouping** | Source bucket → під-групи по директоріях | — |
 
 ### v0.3: LLM та розумне групування
 
@@ -240,25 +271,26 @@ E2E тести з mock git repos (~10 сценаріїв):
 | **Confidence-based routing** | Групи з `confidence: low` автоматично направляються на LLM review перед commit | LLM |
 | **Interactive mode** | `--interactive` — показує план, дозволяє вручну перегрупувати/перейменувати перед execute | gum |
 
-### v0.4: Parallel та push
+### v0.4: Parallel, push та conflict detection
 
-| Фіча | Опис | Залежність |
-|-------|------|------------|
-| **Parallel sweep** | `--parallel=N` для обробки N реп одночасно (як agent-sweep) | — |
-| **Auto-push** | `--push` після commit виконує `git push` (з `--force-with-lease` для safety) | — |
-| **Resume/restart** | `--resume` та `--restart` після перерваного sweep (як agent-sweep) | state file |
+| Фіча | Опис | Конкретний API з екосистеми |
+|-------|------|---------------------------|
+| **Parallel sweep** | `--parallel=N` для обробки N реп одночасно | Паттерн з `run_parallel_agent_sweep()` в `ru` |
+| **Auto-push** | `--push` після commit виконує `git push` | DCG класифікація: push=High severity, потребує explicit flag |
+| **Force push approval** | `--force` для force-push потребує review | SLB: `Request{min_approvals:2, require_different_model:true}` → approve/reject/escalate |
+| **Conflict detection** | Перевірка lock-ів інших агентів перед commit | NTM: `CheckPathConflict(path, excludeAgent)` → `Conflict{holders, priority}`. Negotiation: вищий пріоритет запитує release |
+| **Resume/restart** | `--resume` та `--restart` після перерваного sweep | state file (як agent-sweep) |
 | **Pre-commit hooks** | `--no-verify` для пропуску git hooks (opt-in) | — |
-| **Conflict resolution** | Якщо staging конфліктує з іншими змінами, автоматично resolve або skip з логом | — |
 
 ### v0.5: Ecosystem інтеграція
 
-| Фіча | Опис | Залежність |
-|-------|------|------------|
-| **GitHub PR creation** | `--pr` після push створює PR через `gh pr create` з commit messages як body | `gh` CLI |
-| **Beads auto-close** | Якщо commit закриває task (branch `feature/bd-XXXX`), автоматично `br close bd-XXXX` | `br` |
-| **Audit trail** | Повний лог sweep → agent-mail message: хто, коли, що закоммітив, з якими confidence scores | agent-mail |
-| **Webhook notify** | Після sweep відправити notification через agent-mail або webhook | agent-mail |
-| **Config file** | `~/.config/ru/commit-sweep.yaml` для персистентних налаштувань (default strategy, bucket rules, excluded patterns) | — |
+| Фіча | Опис | Конкретний API з екосистеми |
+|-------|------|---------------------------|
+| **GitHub PR creation** | `--pr` після push створює PR з commit messages як body | `gh pr create` (DCG: PR creation=shared state, потребує `--pr` flag) |
+| **Beads auto-close** | Commit закриває task → `br close bd-XXXX` автоматично | `br close <id> --reason "Completed"` + `br sync --flush-only` |
+| **Audit trail** | Sweep log → agent-mail повідомлення з confidence scores | `send_message(project_key, sender, to, subject, body_md, thread_id)` |
+| **Learning from history** | Покращення commit messages на основі минулих сесій | CASS: `cm context "commit patterns" --json` → `{relevantBullets, antiPatterns}` |
+| **Config file** | `~/.config/ru/commit-sweep.yaml` для персистентних налаштувань | — |
 
 ### Наскрізний принцип: Human-in-the-Loop
 

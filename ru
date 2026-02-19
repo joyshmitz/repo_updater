@@ -5766,7 +5766,7 @@ COMMIT-SWEEP OPTIONS:
     --dry-run            Show commit plan without changes (default)
     --respect-staging    Keep manually staged files in a dedicated first group
     --allow-protected-branch
-                         Allow execute on protected branches (main, release/*)
+                         Allow execute on protected branches (main, master, release/*)
 
 EXAMPLES:
     ru sync              Sync all configured repos
@@ -8601,7 +8601,7 @@ parse_args() {
     fi
 
     # Apply any pending args that appeared before the command
-    if [[ "$COMMAND" == "review" || "$COMMAND" == "agent-sweep" ]]; then
+    if [[ "$COMMAND" == "review" || "$COMMAND" == "agent-sweep" || "$COMMAND" == "commit-sweep" ]]; then
         [[ ${#pending_review_args[@]} -gt 0 ]] && ARGS+=("${pending_review_args[@]}")
         if [[ ${#pending_fork_args[@]} -gt 0 ]]; then
             local opt
@@ -23394,7 +23394,7 @@ _robot_docs_commands() {
         {"flag": "--execute", "description": "Actually create commits (default: dry-run)"},
         {"flag": "--dry-run", "description": "Preview commit plan without changes (default)"},
         {"flag": "--respect-staging", "description": "Preserve pre-staged files as separate group"},
-        {"flag": "--allow-protected-branch", "description": "Allow commits on main/master/release branches"},
+        {"flag": "--allow-protected-branch", "description": "Allow commits on protected branches (main, master, release/*)"},
         {"flag": "--json", "description": "Output plan as JSON to stdout"},
         {"flag": "--verbose", "description": "Show detailed classification info"}
       ]
@@ -24219,8 +24219,13 @@ cs_analyze_repo() {
             local x_code="${xy:0:1}" y_code="${xy:1:1}"
 
             if [[ "$x_code" != " " && "$x_code" != "?" && "$xy" != "??" ]]; then
-                prestaged_files+=("$path")
-                prestaged_status["$path"]="$x_code"
+                # Filter pre-staged files through denylist
+                if ! is_file_denied "$path" 2>/dev/null; then
+                    prestaged_files+=("$path")
+                    prestaged_status["$path"]="$x_code"
+                else
+                    log_verbose "Blocked by denylist (pre-staged): $path"
+                fi
             fi
         done < <(git -C "$repo_path" status --porcelain=v1 -z 2>/dev/null)
     fi
@@ -24514,6 +24519,7 @@ cmd_commit_sweep() {
     fi
 
     local repos_scanned=0 repos_dirty=0 repos_clean=0 planned_commits=0
+    local commits_succeeded=0 commits_failed=0
     local repos_json="" first_repo=true
 
     for repo_path in "${repo_paths[@]}"; do
@@ -24631,20 +24637,37 @@ cmd_commit_sweep() {
                     group_files_str=$(printf '%s' "$group_block" | grep -o '"files":\[[^]]*\]' | head -1 | sed 's/"files":\[//;s/\]$//')
 
                     local -a exec_files=()
-                    local ef
-                    while IFS= read -r ef; do
-                        [[ -z "$ef" ]] && continue
-                        ef="${ef#\"}"
-                        ef="${ef%\"}"
-                        [[ -n "$ef" ]] && exec_files+=("$ef")
-                    done <<< "$(printf '%s' "$group_files_str" | tr ',' '\n' | sed 's/^ *//;s/ *$//')"
+                    local ef remainder="$group_files_str"
+                    # Parse JSON array elements safely (handles commas in filenames)
+                    while [[ -n "$remainder" ]]; do
+                        # Strip leading whitespace/comma
+                        remainder="${remainder#,}"
+                        remainder="${remainder#"${remainder%%[! ]*}"}"
+                        [[ -z "$remainder" ]] && break
+                        if [[ "$remainder" == \"* ]]; then
+                            # Extract quoted string (handle escaped quotes)
+                            remainder="${remainder#\"}"
+                            ef=""
+                            while [[ -n "$remainder" ]]; do
+                                case "$remainder" in
+                                    \\\"*) ef+="\""; remainder="${remainder#\\\"}" ;;
+                                    \\\\*) ef+="\\"; remainder="${remainder#\\\\}" ;;
+                                    \"*)   remainder="${remainder#\"}"; break ;;
+                                    *)     ef+="${remainder:0:1}"; remainder="${remainder:1}" ;;
+                                esac
+                            done
+                            [[ -n "$ef" ]] && exec_files+=("$ef")
+                        fi
+                    done
 
                     if [[ ${#exec_files[@]} -gt 0 && -n "$group_msg" ]]; then
                         log_step "Committing: $group_msg"
                         if printf '%s\n' "${exec_files[@]}" | cs_execute_group "$repo_path" "$group_msg"; then
                             log_success "  Created commit: $group_msg"
+                            ((commits_succeeded++))
                         else
                             log_error "  Failed: $group_msg"
+                            ((commits_failed++))
                         fi
                     fi
                 done
@@ -24660,11 +24683,16 @@ cmd_commit_sweep() {
     end_time=$(date +%s)
     duration=$(( end_time - start_time ))
 
+    local exit_code=0
+    if [[ "$execute" == "true" && commits_failed -gt 0 ]]; then
+        exit_code=1  # partial failure
+    fi
+
     if [[ "$json_output" == "true" ]]; then
         local data_json meta_json
-        data_json=$(printf '{"schema_version":"commit-sweep/v1","repos":[%s],"summary":{"repos_scanned":%d,"repos_dirty":%d,"repos_clean":%d,"planned_commits":%d}}' \
-            "$repos_json" "$repos_scanned" "$repos_dirty" "$repos_clean" "$planned_commits")
-        meta_json=$(printf '{"duration_seconds":%d,"exit_code":0,"run_id":"%s"}' "$duration" "$run_id")
+        data_json=$(printf '{"schema_version":"commit-sweep/v1","repos":[%s],"summary":{"repos_scanned":%d,"repos_dirty":%d,"repos_clean":%d,"planned_commits":%d,"commits_succeeded":%d,"commits_failed":%d}}' \
+            "$repos_json" "$repos_scanned" "$repos_dirty" "$repos_clean" "$planned_commits" "$commits_succeeded" "$commits_failed")
+        meta_json=$(printf '{"duration_seconds":%d,"exit_code":%d,"run_id":"%s"}' "$duration" "$exit_code" "$run_id")
         emit_structured "$(build_json_envelope "commit-sweep" "$data_json" "$meta_json")"
     else
         log_info ""
@@ -24673,11 +24701,15 @@ cmd_commit_sweep() {
         log_info "  Dirty:   $repos_dirty"
         log_info "  Clean:   $repos_clean"
         log_info "  Planned: $planned_commits commits"
+        if [[ "$execute" == "true" ]]; then
+            log_info "  Succeeded: $commits_succeeded"
+            [[ "$commits_failed" -gt 0 ]] && log_error "  Failed: $commits_failed"
+        fi
         log_info "  Mode:    $(if [[ "$execute" == "true" ]]; then echo "execute"; else echo "dry-run"; fi)"
         log_info "  Duration: ${duration}s"
     fi
 
-    return 0
+    return "$exit_code"
 }
 
 #==============================================================================

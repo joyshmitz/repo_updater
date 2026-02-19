@@ -313,6 +313,166 @@ test_commit_sweep_respects_staging() {
 }
 
 # ---------------------------------------------------------------------------
+# Test 9: exit code 1 on partial commit failure (Finding #1)
+# ---------------------------------------------------------------------------
+test_commit_sweep_exit_code_on_failure() {
+    local test_name="commit-sweep: exit code 1 on commit failure"
+    log_test_start "$test_name"
+
+    e2e_setup
+    e2e_init_ru
+
+    local repo_dir
+    repo_dir=$(create_dirty_repo "testrepo")
+    e2e_add_repo "example/testrepo"
+
+    git -C "$repo_dir" checkout -b feature/fail-test >/dev/null 2>&1
+
+    # Create a file and then delete it before commit to cause staging failure
+    echo "content" > "$repo_dir/normal.py"
+    # Install a pre-commit hook that fails for any commit containing "FAIL_THIS"
+    mkdir -p "$repo_dir/.git/hooks"
+    cat > "$repo_dir/.git/hooks/pre-commit" << 'HOOK'
+#!/bin/bash
+if git diff --cached --name-only | grep -q "fail_trigger"; then
+    echo "Hook: rejecting commit" >&2
+    exit 1
+fi
+exit 0
+HOOK
+    chmod +x "$repo_dir/.git/hooks/pre-commit"
+    echo "trigger" > "$repo_dir/fail_trigger.py"
+
+    local stdout_file="$E2E_LOG_DIR/cs_fail_stdout.txt"
+    local stderr_file="$E2E_LOG_DIR/cs_fail_stderr.txt"
+    local actual_code=0
+    "$E2E_RU_SCRIPT" commit-sweep --execute \
+        >"$stdout_file" 2>"$stderr_file" || actual_code=$?
+
+    assert_true "[[ $actual_code -eq 1 ]]" "exit code 1 on partial failure"
+
+    e2e_cleanup
+    log_test_pass "$test_name"
+}
+
+# ---------------------------------------------------------------------------
+# Test 10: comma in filename handled correctly (Finding #2)
+# ---------------------------------------------------------------------------
+test_commit_sweep_comma_in_filename() {
+    local test_name="commit-sweep: comma in filename"
+    log_test_start "$test_name"
+
+    e2e_setup
+    e2e_init_ru
+
+    local repo_dir
+    repo_dir=$(create_dirty_repo "testrepo")
+    e2e_add_repo "example/testrepo"
+
+    git -C "$repo_dir" checkout -b feature/comma-test >/dev/null 2>&1
+
+    # Create file with comma in name
+    echo "data" > "$repo_dir/comma,name.py"
+
+    local stdout_file="$E2E_LOG_DIR/cs_comma_stdout.txt"
+    local stderr_file="$E2E_LOG_DIR/cs_comma_stderr.txt"
+    local actual_code=0
+    "$E2E_RU_SCRIPT" commit-sweep --execute \
+        >"$stdout_file" 2>"$stderr_file" || actual_code=$?
+
+    assert_true "[[ $actual_code -eq 0 ]]" "comma filename: exits 0"
+
+    # Verify the file was actually committed (working dir clean)
+    local dirty_count
+    dirty_count=$(git -C "$repo_dir" status --porcelain 2>/dev/null | wc -l)
+    assert_true "[[ $dirty_count -eq 0 ]]" "comma filename: working dir clean after execute"
+
+    e2e_cleanup
+    log_test_pass "$test_name"
+}
+
+# ---------------------------------------------------------------------------
+# Test 11: --respect-staging filters denylist (Finding #3)
+# ---------------------------------------------------------------------------
+test_commit_sweep_prestaged_denylist() {
+    local test_name="commit-sweep: pre-staged denylist filtering"
+    log_test_start "$test_name"
+
+    e2e_setup
+    e2e_init_ru
+
+    local repo_dir
+    repo_dir=$(create_dirty_repo "testrepo")
+    e2e_add_repo "example/testrepo"
+
+    git -C "$repo_dir" checkout -b feature/denylist-test >/dev/null 2>&1
+
+    # Stage a .env file (should be blocked by denylist)
+    echo "SECRET=abc123" > "$repo_dir/.env"
+    git -C "$repo_dir" add .env >/dev/null 2>&1
+
+    # Also have a normal unstaged file
+    echo "normal content" > "$repo_dir/app.py"
+
+    # Run with --respect-staging --json
+    local stdout_file="$E2E_LOG_DIR/cs_denylist_stdout.json"
+    local stderr_file="$E2E_LOG_DIR/cs_denylist_stderr.txt"
+    local actual_code=0
+    "$E2E_RU_SCRIPT" commit-sweep --json --respect-staging \
+        >"$stdout_file" 2>"$stderr_file" || actual_code=$?
+
+    if command -v jq &>/dev/null; then
+        # .env should NOT appear in any group's files
+        local has_env
+        has_env=$(jq -r '[.data.repos[0].groups[].files[]] | any(. == ".env")' "$stdout_file" 2>/dev/null || echo "true")
+        assert_true "[[ \"$has_env\" == \"false\" ]]" ".env blocked by denylist in pre-staged group"
+    else
+        skip_test "jq not installed"
+    fi
+
+    e2e_cleanup
+    log_test_pass "$test_name"
+}
+
+# ---------------------------------------------------------------------------
+# Test 12: flags before command work (Finding #4)
+# ---------------------------------------------------------------------------
+test_commit_sweep_flags_before_command() {
+    local test_name="commit-sweep: flags before command name"
+    log_test_start "$test_name"
+
+    e2e_setup
+    e2e_init_ru
+
+    local repo_dir
+    repo_dir=$(create_dirty_repo "testrepo")
+    e2e_add_repo "example/testrepo"
+
+    git -C "$repo_dir" checkout -b feature/flags-test >/dev/null 2>&1
+    echo "changed" > "$repo_dir/main.py"
+
+    # Run with --execute BEFORE commit-sweep
+    local stdout_file="$E2E_LOG_DIR/cs_flags_stdout.txt"
+    local stderr_file="$E2E_LOG_DIR/cs_flags_stderr.txt"
+    local actual_code=0
+    "$E2E_RU_SCRIPT" --execute commit-sweep \
+        >"$stdout_file" 2>"$stderr_file" || actual_code=$?
+
+    assert_true "[[ $actual_code -eq 0 ]]" "flags-before-command: exits 0"
+
+    # Should actually execute (not dry-run) — check stderr for "execute" mode
+    assert_true "grep -q 'execute' \"$stderr_file\"" "flags-before-command: ran in execute mode"
+
+    # Working dir should be clean (commits were made)
+    local dirty_count
+    dirty_count=$(git -C "$repo_dir" status --porcelain 2>/dev/null | wc -l)
+    assert_true "[[ $dirty_count -eq 0 ]]" "flags-before-command: working dir clean"
+
+    e2e_cleanup
+    log_test_pass "$test_name"
+}
+
+# ---------------------------------------------------------------------------
 # Run all tests
 # ---------------------------------------------------------------------------
 setup_cleanup_trap
@@ -324,5 +484,9 @@ run_test test_commit_sweep_protected_branch_override
 run_test test_commit_sweep_clean_repo
 run_test test_commit_sweep_json_envelope
 run_test test_commit_sweep_respects_staging
+run_test test_commit_sweep_exit_code_on_failure
+run_test test_commit_sweep_comma_in_filename
+run_test test_commit_sweep_prestaged_denylist
+run_test test_commit_sweep_flags_before_command
 print_results
 exit "$(get_exit_code)"

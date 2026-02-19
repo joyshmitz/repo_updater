@@ -62,9 +62,9 @@ file classification для комітів, або conventional commit generation
 
 ## Зміни у файлах
 
-### 1. `/Users/sd/projects/joyshmitz/repo_updater/ru`
+### 1. `ru` (головний скрипт)
 
-**A. Dispatch — рядок ~23825, додати перед `*)`:**
+**A. Dispatch — рядок ~23826, додати перед `*)`:**
 ```bash
 commit-sweep) cmd_commit_sweep ;;
 ```
@@ -88,11 +88,14 @@ if [[ "$COMMAND" == "agent-sweep" || "$COMMAND" == "commit-sweep" ]]; then
 ```
 Це дозволить `commit-sweep` отримати `--json` через `ARGS`, як роблять інші команди.
 
-**E. Help text — після рядка 5643, додати команду:**
+**E. Help text — два місця:**
+
+E1. Команда в список — після рядка 5644 (robot-docs), додати:
 ```
     commit-sweep    Analyze dirty repos and create logical commits
 ```
-Та нову секцію опцій:
+
+E2. Секція опцій — після ROBOT-DOCS OPTIONS (рядок 5761), перед EXAMPLES (рядок 5763):
 ```
 COMMIT-SWEEP OPTIONS:
     --execute            Actually create commits (default: dry-run/plan only)
@@ -100,9 +103,26 @@ COMMIT-SWEEP OPTIONS:
     --respect-staging    Preserve manually staged files; only analyze unstaged/untracked
 ```
 
-**F. Нова секція перед SECTION 14 (~рядок 23783):**
+**F. `--execute` та `--respect-staging` routing — додати ПЕРЕД catch-all `-*)` (рядок 8565):**
+```bash
+            --execute|--respect-staging)
+                if [[ "$COMMAND" == "commit-sweep" ]]; then
+                    ARGS+=("$1")
+                elif [[ -z "$COMMAND" ]]; then
+                    pending_global_args+=("$1")
+                else
+                    log_error "Unknown option: $1"
+                    show_help
+                    exit 4
+                fi
+                shift
+                ;;
+```
+Паттерн аналогічний `--push` (рядок 8350) — валідує що прапорець належить конкретній команді.
 
-`SECTION 13.11: COMMIT SWEEP` — ~500 рядків з такими функціями:
+**G. Нова секція перед SECTION 14 (рядок 23783):**
+
+`SECTION 13.11: COMMIT SWEEP` (після SECTION 13b: ROBOT-DOCS на рядку 23144) — ~500 рядків з такими функціями:
 
 | Функція | Призначення |
 |---------|-------------|
@@ -219,16 +239,31 @@ COMMIT-SWEEP OPTIONS:
 - `get_all_repos()` (рядок 6742) — завантаження всіх реп
 - `repo_is_dirty()` (рядок 6857) — перевірка dirty worktree
 - `is_git_repo()` — перевірка git repo
-- `json_escape()` (рядок 4849) — екранування для JSON
+- `json_escape()` (рядок 4852) — екранування для JSON
 - `build_json_envelope()` (рядок 5137) — JSON envelope з `generated_at`, `version`, `_meta`
 - `emit_structured()` (рядок 5098) — вивід JSON/TOON з fallback
 - `print_fork_op_summary()` (рядок 8776) — summary box з gum/ANSI fallback
 - `log_info/success/error/warn/step/verbose` — logging
 - `GUM_AVAILABLE` + gum style — summary box
 
+**H. robot-docs integration — додати schema та command entry:**
+- `_robot_docs_commands()` (рядок 23244): додати command entry з description та options
+- `_robot_docs_examples()` (рядок 23427): додати приклади використання
+- `_robot_docs_schemas()` (рядок 23554): додати `commit-sweep` JSON schema
+
+Паттерн з upstream `10f504e` (robot-docs schemas) та `a7aa3d5` (fork command entries).
+
 ### 2. `scripts/test_unit_commit_sweep.sh` (новий файл)
 
-Unit тести для cs_* helpers (~30 тестів):
+Unit тести для cs_* helpers (~30 тестів).
+
+**Паттерн:** наслідувати `test_unit_parsing_coverage.sh` (upstream `ce5ac34`):
+- Використовувати `source_function()` для ізоляції кожної функції
+- Stub log функції: `log_warn() { :; }` тощо
+- Секційна організація через `section "function_name"`
+- Відновлювати HOME перед видаленням temp dir (upstream fix `6b82479`)
+
+Кейси:
 - `cs_extract_task_id`: 6 кейсів (bd-XXXX, br-XXXX, no match, empty, nested/bd-XXXX)
 - `cs_classify_file`: 8 кейсів (test/*, *_test.go, scripts/test_*, *.md, docs/*, .gitignore, *.yml, lib/foo.sh)
 - `cs_detect_commit_type`: 5 кейсів (A→feat, M→fix, D→chore, R→refactor, mixed)
@@ -238,7 +273,17 @@ Unit тести для cs_* helpers (~30 тестів):
 
 ### 3. `scripts/test_e2e_commit_sweep.sh` (новий файл)
 
-E2E тести з mock git repos (~10 сценаріїв):
+E2E тести з mock git repos (~10 сценаріїв).
+
+**Паттерн:** наслідувати `test_e2e_fork_*.sh` (upstream `1e0fa15`, `b90ad10`):
+- Обов'язково `source "$SCRIPT_DIR/test_e2e_framework.sh"`
+- Використовувати `e2e_setup` / `e2e_cleanup` (не inline framework)
+- Використовувати `$E2E_RU_SCRIPT` (не `$RU_SCRIPT`)
+- Використовувати `assert_equals`, `assert_contains` (не ручні if/else)
+- Local bare repo як remote для ізоляції від мережі
+- Helper функції: `setup_dirty_repo()`, `init_sweep_config()`
+
+Сценарії:
 1. Одна репа, один файл → 1 commit group
 2. Source + test файли → 2 groups
 3. Branch `feature/bd-XXXX` → task ID extraction
@@ -335,6 +380,9 @@ E2E тести з mock git repos (~10 сценаріїв):
 3. **Без паралельності** — v0.1 sequential only. Для десятків реп це може бути повільно, але коректно. Паралельність потребує lock management.
 4. **Без push** — коміти тільки локальні. Push — окрема відповідальність (може бути `ru sync --push`).
 5. **Без rollback всього sweep** — якщо 3 з 5 комітів успішні і 4-й впав, перші 3 залишаються. Повний rollback — v0.5.
+6. **`M→fix` евристика неточна** — `cs_detect_commit_type()` маппить `M→fix`, але modified файл може бути feat/refactor/chore. Без LLM (v0.3) це найслабша ланка. Прийнятно для v0.1: `cs_assess_confidence()` має знижувати score для груп де всі файли — `M` без task ID. Перегляд у v0.3 (LLM commit messages).
+7. **`--respect-staging` + `--execute` порядок груп** — якщо manually staged файли перетинаються з автоматичним bucket, "pre-staged" група має виконуватись **першою** (бо файли вже staged користувачем). Порядок: pre-staged → test → doc → config → source. Якщо виникне конфлікт staging, per-group rollback безпечно відкатить.
+8. **`print_fork_op_summary()` — fork-специфічна назва для reuse** — функція підходить для commit-sweep summary, але назва вводить в оману. Залишаємо як є в v0.1. Рефакторинг на `print_op_summary()` — v0.2 коли буде більше споживачів.
 
 ## Verification
 
@@ -355,3 +403,39 @@ ru commit-sweep owner/repo --execute --verbose
 # Full suite (має бути 97+ pass, +2 new suites)
 bash scripts/run_all_tests.sh
 ```
+
+## Upstream sync findings (2026-02-19)
+
+26 upstream комітів (25d24f1..1552bac) проаналізовано на відповідність цьому плану.
+
+### Критичні залежності
+
+| Upstream коміт | Вплив на commit-sweep |
+|---|---|
+| `40b40b1` Normalize JSON envelope | **CRITICAL** — вводить `build_json_envelope()` (рядок 5137). commit-sweep МУСИТЬ використовувати цю функцію замість побудови власного envelope. Сигнатура: `build_json_envelope "commit-sweep" "$data_json" "$meta_json"` |
+| `a7aa3d5` + `89f89f2` Fork arg parsing | Модифікують command recognition (рядок 8474) та додають routing паттерни для fork-специфічних прапорців. commit-sweep додається до того ж рядка |
+
+### Паттерни для наслідування
+
+| Upstream коміт | Паттерн |
+|---|---|
+| `a258cf9`+`fc4f0dc`+`b90c2b3` E2E migration | `test_e2e_commit_sweep.sh` МУСИТЬ source `test_e2e_framework.sh`, використовувати `e2e_setup`/`e2e_cleanup`/`assert_*`/`$E2E_RU_SCRIPT` |
+| `ce5ac34` Unit test coverage | `test_unit_commit_sweep.sh` має використовувати `source_function()` + inline mini-framework |
+| `1e0fa15`+`b90ad10` Fork E2E tests | Local bare repo як remote, helper функції `setup_*()` |
+| `6b82479` HOME restore fix | Відновлювати HOME перед `rm -rf $TEMP_DIR` в тестах |
+| `0ebe82d`+`10f504e` robot-docs | Додати commit-sweep schema/command/examples до robot-docs |
+
+### Конфліктні зони
+
+| Зона | Ризик | Примітка |
+|---|---|---|
+| Command recognition (рядок 8474) | Середній | Єдиний рядок куди всі команди додаються |
+| `--dry-run` routing (рядок 8241) | Низький | Не змінений upstream |
+| Dispatch table (рядок ~23826) | Низький | Чисте додавання перед `*)` |
+| Section insertion | Низький | Після SECTION 13b (robot-docs, рядок 23144) |
+
+### Висновок
+
+Конфліктів немає. Upstream зміни **підтримують** план: `build_json_envelope()` тепер існує,
+тест-фреймворки стандартизовані, robot-docs конвенція встановлена. Номери рядків перевірені
+та актуальні для `feature/commit-sweep`.

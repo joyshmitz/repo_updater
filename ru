@@ -5642,6 +5642,7 @@ COMMANDS:
     fork-sync       Sync fork branches with upstream
     fork-clean      Clean pollution from fork default branches
     robot-docs      Machine-readable CLI documentation (JSON)
+    commit-sweep    Analyze dirty repos and create logical commits
 
 GLOBAL OPTIONS:
     -h, --help           Show this help message
@@ -5759,6 +5760,13 @@ FORK-CLEAN OPTIONS:
 
 ROBOT-DOCS OPTIONS:
     <topic>              Topic: quickstart, commands, examples, exit-codes, formats, schemas, all
+
+COMMIT-SWEEP OPTIONS:
+    --execute            Actually create commits (default: dry-run/plan only)
+    --dry-run            Show commit plan without changes (default)
+    --respect-staging    Keep manually staged files in a dedicated first group
+    --allow-protected-branch
+                         Allow execute on protected branches (main, release/*)
 
 EXAMPLES:
     ru sync              Sync all configured repos
@@ -8206,7 +8214,7 @@ parse_args() {
                 JSON_OUTPUT="true"
                 OUTPUT_FORMAT="json"
                 # Also pass to subcommands that handle --json internally
-                if [[ "$COMMAND" == "agent-sweep" ]]; then
+                if [[ "$COMMAND" == "agent-sweep" || "$COMMAND" == "commit-sweep" ]]; then
                     ARGS+=("$1")
                 elif [[ -z "$COMMAND" ]]; then
                     pending_global_args+=("$1")
@@ -8238,7 +8246,7 @@ parse_args() {
                 shift
                 ;;
             --dry-run)
-                if [[ "$COMMAND" == "review" || "$COMMAND" == "agent-sweep" || "$COMMAND" == "ai-sync" || "$COMMAND" == "dep-update" ]]; then
+                if [[ "$COMMAND" == "review" || "$COMMAND" == "agent-sweep" || "$COMMAND" == "ai-sync" || "$COMMAND" == "dep-update" || "$COMMAND" == "commit-sweep" ]]; then
                     ARGS+=("$1")
                 elif [[ -z "$COMMAND" ]]; then
                     pending_global_args+=("$1")
@@ -8471,7 +8479,7 @@ parse_args() {
                 INIT_EXAMPLE="true"
                 shift
                 ;;
-            sync|status|init|add|remove|list|doctor|self-update|config|prune|import|review|agent-sweep|ai-sync|dep-update|robot-docs|fork-status|fork-sync|fork-clean)
+            sync|status|init|add|remove|list|doctor|self-update|config|prune|import|review|agent-sweep|ai-sync|dep-update|robot-docs|fork-status|fork-sync|fork-clean|commit-sweep)
                 COMMAND="$1"
                 shift
                 ;;
@@ -8561,6 +8569,18 @@ parse_args() {
                     show_help
                     exit 4
                 fi
+                ;;
+            --execute|--respect-staging|--allow-protected-branch)
+                if [[ "$COMMAND" == "commit-sweep" ]]; then
+                    ARGS+=("$1")
+                elif [[ -z "$COMMAND" ]]; then
+                    pending_global_args+=("$1")
+                else
+                    log_error "Unknown option: $1"
+                    show_help
+                    exit 4
+                fi
+                shift
                 ;;
             -*)
                 log_error "Unknown option: $1"
@@ -23368,6 +23388,18 @@ _robot_docs_commands() {
       "description": "Automated multi-agent review sweep across repos"
     },
     {
+      "name": "commit-sweep",
+      "description": "Analyze dirty repos and create logical conventional commits (heuristic, no LLM)",
+      "flags": [
+        {"flag": "--execute", "description": "Actually create commits (default: dry-run)"},
+        {"flag": "--dry-run", "description": "Preview commit plan without changes (default)"},
+        {"flag": "--respect-staging", "description": "Preserve pre-staged files as separate group"},
+        {"flag": "--allow-protected-branch", "description": "Allow commits on main/master/release branches"},
+        {"flag": "--json", "description": "Output plan as JSON to stdout"},
+        {"flag": "--verbose", "description": "Show detailed classification info"}
+      ]
+    },
+    {
       "name": "fork-status",
       "description": "Show fork synchronization status relative to upstream",
       "flags": [
@@ -23481,6 +23513,16 @@ _robot_docs_examples() {
         {"command": "ru fork-sync --rebase", "description": "Rebase local work onto upstream"},
         {"command": "ru fork-clean", "description": "Clean main branch pollution (creates rescue branch)"},
         {"command": "ru fork-clean --dry-run", "description": "Preview what fork-clean would do"}
+      ]
+    },
+    {
+      "title": "Commit sweep workflow",
+      "commands": [
+        {"command": "ru commit-sweep", "description": "Preview commit plan for all dirty repos (dry-run)"},
+        {"command": "ru commit-sweep --json", "description": "Get commit plan as JSON"},
+        {"command": "ru commit-sweep --execute", "description": "Execute planned commits"},
+        {"command": "ru commit-sweep --execute --respect-staging", "description": "Preserve pre-staged files, then commit remaining"},
+        {"command": "ru commit-sweep owner/repo", "description": "Sweep a single repo"}
       ]
     },
     {
@@ -23762,6 +23804,58 @@ _robot_docs_schemas() {
         }
       }
     },
+    "commit-sweep": {
+      "description": "Output of ru commit-sweep --json",
+      "data_schema": {
+        "type": "object",
+        "required": ["schema_version", "repos", "summary"],
+        "properties": {
+          "schema_version": {"type": "string", "const": "commit-sweep/v1"},
+          "repos": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["repo", "path", "branch", "groups"],
+              "properties": {
+                "repo": {"type": "string", "description": "Repository name"},
+                "path": {"type": "string", "description": "Local filesystem path"},
+                "branch": {"type": "string", "description": "Current branch name"},
+                "task_id": {"type": "string", "description": "Extracted bead task ID (bd-XXXX) or empty"},
+                "task_title": {"type": "string", "description": "Bead task title (from br show) or empty"},
+                "groups": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "required": ["id", "bucket", "type", "scope", "message", "files", "confidence"],
+                    "properties": {
+                      "id": {"type": "string", "description": "Stable group ID (repo:bucket:scope:seq)"},
+                      "bucket": {"type": "string", "enum": ["pre-staged", "source", "test", "doc", "config"]},
+                      "type": {"type": "string", "description": "Conventional commit type (feat, fix, test, docs, chore, refactor)"},
+                      "scope": {"type": "string", "description": "Detected scope (top-level directory or root)"},
+                      "message": {"type": "string", "description": "Generated commit message (max 72 chars)"},
+                      "files": {"type": "array", "items": {"type": "string"}, "description": "File paths in this group"},
+                      "file_statuses": {"type": "object", "description": "Map of file path to git status code"},
+                      "confidence": {"type": "string", "enum": ["high", "medium", "low"]},
+                      "reason_codes": {"type": "array", "items": {"type": "string"}, "description": "Heuristic reasons for classification"}
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "summary": {
+            "type": "object",
+            "required": ["repos_scanned", "repos_dirty", "repos_clean", "planned_commits"],
+            "properties": {
+              "repos_scanned": {"type": "integer"},
+              "repos_dirty": {"type": "integer"},
+              "repos_clean": {"type": "integer"},
+              "planned_commits": {"type": "integer"}
+            }
+          }
+        }
+      }
+    },
     "error": {
       "description": "Error envelope returned on failures",
       "data_schema": {
@@ -23778,6 +23872,812 @@ _robot_docs_schemas() {
   }
 }
 SCJSON
+}
+
+#==============================================================================
+# SECTION 13.11: COMMIT SWEEP
+#==============================================================================
+
+# Extract task ID from branch name
+# Args: $1 = branch name (e.g. "feature/bd-4f2a")
+# Output: task ID (e.g. "bd-4f2a") or empty string
+cs_extract_task_id() {
+    local branch="$1"
+    if [[ "$branch" =~ (bd-[a-z0-9]+) ]]; then
+        printf '%s' "${BASH_REMATCH[1]}"
+    fi
+}
+
+# Classify a file into a bucket: test, doc, config, source
+# Args: $1 = relative file path
+# Output: bucket name
+cs_classify_file() {
+    local file="$1"
+    local basename="${file##*/}"
+
+    # Test files
+    case "$file" in
+        test/*|tests/*|spec/*|*_test.go|*_test.py|*.test.js|*.test.ts|*.spec.js|*.spec.ts)
+            printf 'test'; return ;;
+    esac
+    case "$basename" in
+        test_*.*|*_test.*|*_spec.*)
+            printf 'test'; return ;;
+    esac
+    if [[ "$file" == scripts/test_* ]]; then
+        printf 'test'; return
+    fi
+
+    # Doc files
+    case "$basename" in
+        *.md|*.rst|*.txt|*.adoc)
+            printf 'doc'; return ;;
+    esac
+    case "$file" in
+        docs/*|doc/*)
+            printf 'doc'; return ;;
+    esac
+
+    # Config files
+    case "$basename" in
+        *.yml|*.yaml|*.toml|*.ini|*.cfg|*.conf|*.json|.gitignore|.gitattributes|.editorconfig|Makefile|Dockerfile|*.dockerfile|.dockerignore)
+            printf 'config'; return ;;
+    esac
+    case "$file" in
+        .github/*|.circleci/*|.gitlab-ci*)
+            printf 'config'; return ;;
+    esac
+
+    printf 'source'
+}
+
+# Determine conventional commit type using bucket-first policy
+# Args: $1 = bucket, $2 = dominant git status code
+# Output: conventional commit type
+cs_detect_commit_type() {
+    local bucket="$1"
+    local dominant_status="$2"
+
+    case "$bucket" in
+        test)   printf 'test' ;;
+        doc)    printf 'docs' ;;
+        config) printf 'chore' ;;
+        source)
+            case "$dominant_status" in
+                A)  printf 'feat' ;;
+                D)  printf 'chore' ;;
+                R)  printf 'refactor' ;;
+                *)  printf 'fix' ;;
+            esac
+            ;;
+        *)      printf 'chore' ;;
+    esac
+}
+
+# Detect scope from file list (most common top-level directory)
+# Args: file paths on stdin (one per line)
+# Output: scope string (directory name or "root")
+cs_detect_scope() {
+    local -A dir_counts
+    local file dir max_dir="" max_count=0
+
+    while IFS= read -r file || [[ -n "$file" ]]; do
+        [[ -z "$file" ]] && continue
+        if [[ "$file" == */* ]]; then
+            dir="${file%%/*}"
+        else
+            dir="root"
+        fi
+        dir_counts["$dir"]=$(( ${dir_counts["$dir"]:-0} + 1 ))
+    done
+
+    for dir in "${!dir_counts[@]}"; do
+        if (( dir_counts["$dir"] > max_count )); then
+            max_count="${dir_counts["$dir"]}"
+            max_dir="$dir"
+        fi
+    done
+
+    printf '%s' "${max_dir:-root}"
+}
+
+# Build conventional commit message
+# Args: $1 = type, $2 = scope, $3 = task_id (optional)
+# Output: formatted message (max 72 chars)
+cs_build_message() {
+    local type="$1" scope="$2" task_id="$3"
+    local msg
+
+    if [[ -n "$scope" && "$scope" != "root" ]]; then
+        msg="${type}(${scope})"
+    else
+        msg="${type}"
+    fi
+
+    # Add descriptive part based on type
+    case "$type" in
+        feat)     msg+=": add ${scope} changes" ;;
+        fix)      msg+=": fix ${scope} issues" ;;
+        test)     msg+=": update ${scope} tests" ;;
+        docs)     msg+=": update ${scope} documentation" ;;
+        chore)    msg+=": update ${scope} configuration" ;;
+        refactor) msg+=": refactor ${scope}" ;;
+        *)        msg+=": update ${scope}" ;;
+    esac
+
+    if [[ -n "$task_id" ]]; then
+        msg+=" (${task_id})"
+    fi
+
+    # Truncate to 72 chars
+    if (( ${#msg} > 72 )); then
+        msg="${msg:0:69}..."
+    fi
+
+    printf '%s' "$msg"
+}
+
+# Assess confidence level for a commit group
+# Args: $1 = task_id (empty if none), $2 = file_count, $3 = has_mixed_statuses (0/1)
+# Output: "high", "medium", or "low"
+cs_assess_confidence() {
+    local task_id="$1" file_count="$2" has_mixed="${3:-0}"
+
+    if [[ -n "$task_id" ]] && (( file_count <= 5 )) && (( has_mixed == 0 )); then
+        printf 'high'
+    elif (( file_count > 20 )) || (( has_mixed == 1 && file_count > 10 )); then
+        printf 'low'
+    else
+        printf 'medium'
+    fi
+}
+
+# Get task title via br CLI with timeout (graceful degradation)
+# Args: $1 = task_id
+# Output: title string or empty
+cs_get_task_title() {
+    local task_id="$1"
+    [[ -z "$task_id" ]] && return
+
+    if ! command -v br &>/dev/null; then
+        return
+    fi
+
+    local output
+    output=$(timeout 3 br show "$task_id" --format json 2>/dev/null) || return
+    # Parse title from JSON array: [{"title":"..."}]
+    # Using grep/sed instead of jq
+    printf '%s' "$output" | grep -o '"title":"[^"]*"' | head -1 | sed 's/"title":"//;s/"$//'
+}
+
+# Memoized version of cs_get_task_title
+# Uses _CS_TITLE_CACHE associative array
+cs_get_task_title_cached() {
+    local task_id="$1"
+    [[ -z "$task_id" ]] && return
+
+    if [[ -n "${_CS_TITLE_CACHE[$task_id]+x}" ]]; then
+        printf '%s' "${_CS_TITLE_CACHE[$task_id]}"
+        return
+    fi
+
+    local title
+    title=$(cs_get_task_title "$task_id")
+    _CS_TITLE_CACHE["$task_id"]="$title"
+    printf '%s' "$title"
+}
+
+# Convert a list of files to a JSON array string
+# Args: file paths on stdin (one per line)
+# Output: JSON array string
+cs_files_to_json_array() {
+    local first=true result="["
+    local file
+
+    while IFS= read -r file || [[ -n "$file" ]]; do
+        [[ -z "$file" ]] && continue
+        if [[ "$first" == "true" ]]; then
+            first=false
+        else
+            result+=","
+        fi
+        result+="\"$(json_escape "$file")\""
+    done
+
+    result+="]"
+    printf '%s' "$result"
+}
+
+# Build JSON object for a single commit group
+# Args: $1=id $2=bucket $3=type $4=scope $5=message $6=files_json $7=statuses_json $8=confidence $9=reason_codes_json
+# Output: JSON object
+cs_build_group_json() {
+    local id="$1" bucket="$2" type="$3" scope="$4" message="$5"
+    local files_json="$6" statuses_json="$7" confidence="$8" reason_codes_json="$9"
+
+    printf '{"id":"%s","bucket":"%s","type":"%s","scope":"%s","message":"%s","files":%s,"file_statuses":%s,"confidence":"%s","reason_codes":%s}' \
+        "$(json_escape "$id")" \
+        "$(json_escape "$bucket")" \
+        "$(json_escape "$type")" \
+        "$(json_escape "$scope")" \
+        "$(json_escape "$message")" \
+        "$files_json" \
+        "$statuses_json" \
+        "$(json_escape "$confidence")" \
+        "$reason_codes_json"
+}
+
+# Print human-readable plan for a repo
+# Args: $1=repo_name $2=branch $3=task_id $4=task_title, groups via stdin as JSON lines
+cs_print_repo_plan() {
+    local repo="$1" branch="$2" task_id="$3" task_title="$4"
+
+    log_info "Repository: $repo (branch: $branch)"
+    if [[ -n "$task_id" ]]; then
+        log_info "  Task: $task_id${task_title:+ — $task_title}"
+    fi
+
+    local line group_num=0
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" ]] && continue
+        ((group_num++))
+        local msg bucket confidence files_count
+        msg=$(printf '%s' "$line" | grep -o '"message":"[^"]*"' | head -1 | sed 's/"message":"//;s/"$//')
+        bucket=$(printf '%s' "$line" | grep -o '"bucket":"[^"]*"' | head -1 | sed 's/"bucket":"//;s/"$//')
+        confidence=$(printf '%s' "$line" | grep -o '"confidence":"[^"]*"' | head -1 | sed 's/"confidence":"//;s/"$//')
+        # Count files by counting commas in files array + 1
+        files_count=$(printf '%s' "$line" | grep -o '"files":\[[^]]*\]' | head -1 | tr ',' '\n' | wc -l)
+
+        log_step "  Group $group_num [$bucket] ($files_count files, confidence: $confidence)"
+        log_info "    → $msg"
+    done
+}
+
+# Analyze a single repo and produce groups
+# Args: $1 = repo_path, $2 = respect_staging (0/1)
+# Output: JSON object for the repo on stdout
+# Returns: 0 on success, 1 on skip
+cs_analyze_repo() {
+    local repo_path="$1"
+    local respect_staging="${2:-0}"
+    local repo_name branch task_id task_title
+
+    # Get repo info
+    repo_name=$(basename "$repo_path")
+    branch=$(git -C "$repo_path" symbolic-ref --short HEAD 2>/dev/null || printf 'detached')
+    task_id=$(cs_extract_task_id "$branch")
+    task_title=$(cs_get_task_title_cached "$task_id")
+
+    # Step 1: Collect changes via NUL-safe porcelain
+    local -a raw_files=()
+    local -A file_status=()
+    local has_unmerged=0
+    local xy rest path old_path
+
+    while IFS= read -r -d '' line; do
+        [[ -z "$line" ]] && continue
+        xy="${line:0:2}"
+        path="${line:3}"
+
+        # Check for unmerged
+        if [[ "$xy" == U* || "$xy" == *U* || "$xy" == "DD" || "$xy" == "AA" ]]; then
+            has_unmerged=1
+            continue
+        fi
+
+        # Handle renames/copies — next NUL-delimited field is the old path
+        if [[ "$xy" == R* || "$xy" == C* ]]; then
+            IFS= read -r -d '' old_path || true
+            # Use the new path (which is 'path'), old_path is the source
+        fi
+
+        # Skip if respect-staging and file is only staged (X is not space/?)
+        local x_code="${xy:0:1}" y_code="${xy:1:1}"
+
+        if [[ "$xy" == "??" ]]; then
+            # Untracked
+            raw_files+=("$path")
+            file_status["$path"]="A"
+        else
+            # Determine effective status
+            local effective_status
+            if [[ "$x_code" != " " && "$x_code" != "?" ]]; then
+                effective_status="$x_code"
+            elif [[ "$y_code" != " " && "$y_code" != "?" ]]; then
+                effective_status="$y_code"
+            else
+                continue
+            fi
+
+            if [[ "$respect_staging" == "1" && "$x_code" != " " && "$x_code" != "?" && "$y_code" == " " ]]; then
+                # Only staged, will go to pre-staged group
+                continue
+            fi
+
+            raw_files+=("$path")
+            file_status["$path"]="$effective_status"
+        fi
+    done < <(git -C "$repo_path" status --porcelain=v1 -z 2>/dev/null)
+
+    # Check for unmerged → skip
+    if (( has_unmerged )); then
+        printf '{"repo":"%s","path":"%s","branch":"%s","status":"skipped_conflict","groups":[]}' \
+            "$(json_escape "$repo_name")" \
+            "$(json_escape "$repo_path")" \
+            "$(json_escape "$branch")"
+        return 1
+    fi
+
+    # Step 2: Collect pre-staged files if --respect-staging
+    local -a prestaged_files=()
+    local -A prestaged_status=()
+    if [[ "$respect_staging" == "1" ]]; then
+        while IFS= read -r -d '' line; do
+            [[ -z "$line" ]] && continue
+            xy="${line:0:2}"
+            path="${line:3}"
+            local x_code="${xy:0:1}" y_code="${xy:1:1}"
+
+            if [[ "$x_code" != " " && "$x_code" != "?" && "$xy" != "??" ]]; then
+                prestaged_files+=("$path")
+                prestaged_status["$path"]="$x_code"
+            fi
+        done < <(git -C "$repo_path" status --porcelain=v1 -z 2>/dev/null)
+    fi
+
+    # Step 3: Filter through denylist
+    local -a allowed_files=()
+    local file
+    for file in "${raw_files[@]}"; do
+        if ! is_file_denied "$file" 2>/dev/null; then
+            allowed_files+=("$file")
+        else
+            log_verbose "Blocked by denylist: $file"
+        fi
+    done
+
+    # Step 4: Classify into buckets
+    local -A bucket_files=()  # bucket -> newline-separated file list
+    local -A bucket_statuses=()
+    for file in "${allowed_files[@]}"; do
+        local bucket
+        bucket=$(cs_classify_file "$file")
+        if [[ -n "${bucket_files[$bucket]:-}" ]]; then
+            bucket_files["$bucket"]+=$'\n'"$file"
+        else
+            bucket_files["$bucket"]="$file"
+        fi
+        bucket_statuses["${bucket}:${file}"]="${file_status[$file]:-M}"
+    done
+
+    # Step 5: Build groups
+    local groups_json="" group_seq=0 total_groups=0
+    local bucket_order="source test doc config"
+
+    # Pre-staged group first
+    if [[ "$respect_staging" == "1" && ${#prestaged_files[@]} -gt 0 ]]; then
+        ((group_seq++))
+        local ps_files_json ps_statuses_json ps_scope ps_reason_codes
+        ps_files_json=$(printf '%s\n' "${prestaged_files[@]}" | sort | cs_files_to_json_array)
+        ps_statuses_json="{"
+        local ps_first=true
+        for file in "${prestaged_files[@]}"; do
+            if [[ "$ps_first" == "true" ]]; then ps_first=false; else ps_statuses_json+=","; fi
+            ps_statuses_json+="\"$(json_escape "$file")\":\"${prestaged_status[$file]:-M}\""
+        done
+        ps_statuses_json+="}"
+        ps_scope=$(printf '%s\n' "${prestaged_files[@]}" | cs_detect_scope)
+        ps_reason_codes='["pre-staged","user-curated"]'
+        local ps_id="${repo_name}:pre-staged:${ps_scope}:$(printf '%03d' $group_seq)"
+        local ps_group
+        ps_group=$(cs_build_group_json "$ps_id" "pre-staged" "chore" "$ps_scope" \
+            "chore(${ps_scope}): pre-staged changes${task_id:+ ($task_id)}" \
+            "$ps_files_json" "$ps_statuses_json" "high" "$ps_reason_codes")
+        groups_json+="$ps_group"
+        ((total_groups++))
+    fi
+
+    for bucket in $bucket_order; do
+        [[ -z "${bucket_files[$bucket]:-}" ]] && continue
+        ((group_seq++))
+
+        # Determine dominant status
+        local -A status_counts=()
+        local f
+        while IFS= read -r f; do
+            [[ -z "$f" ]] && continue
+            local st="${bucket_statuses["${bucket}:${f}"]:-M}"
+            status_counts["$st"]=$(( ${status_counts["$st"]:-0} + 1 ))
+        done <<< "${bucket_files[$bucket]}"
+
+        local dominant_status="M" dominant_count=0
+        for st in "${!status_counts[@]}"; do
+            if (( status_counts["$st"] > dominant_count )); then
+                dominant_count="${status_counts["$st"]}"
+                dominant_status="$st"
+            fi
+        done
+
+        # Check for mixed statuses
+        local has_mixed=0
+        if (( ${#status_counts[@]} > 1 )); then
+            has_mixed=1
+        fi
+
+        local type scope message confidence
+        type=$(cs_detect_commit_type "$bucket" "$dominant_status")
+        scope=$(printf '%s\n' "${bucket_files[$bucket]}" | sort | head -20 | cs_detect_scope)
+
+        # File count
+        local file_count=0
+        while IFS= read -r f; do
+            [[ -z "$f" ]] && continue
+            ((file_count++))
+        done <<< "${bucket_files[$bucket]}"
+
+        confidence=$(cs_assess_confidence "$task_id" "$file_count" "$has_mixed")
+        message=$(cs_build_message "$type" "$scope" "$task_id")
+
+        # Build files JSON
+        local files_json statuses_json
+        files_json=$(printf '%s\n' "${bucket_files[$bucket]}" | sort | cs_files_to_json_array)
+
+        # Build file_statuses JSON
+        statuses_json="{"
+        local first=true
+        while IFS= read -r f; do
+            [[ -z "$f" ]] && continue
+            if [[ "$first" == "true" ]]; then first=false; else statuses_json+=","; fi
+            statuses_json+="\"$(json_escape "$f")\":\"${bucket_statuses["${bucket}:${f}"]:-M}\""
+        done <<< "${bucket_files[$bucket]}"
+        statuses_json+="}"
+
+        # Build reason_codes
+        local reason_codes
+        reason_codes="[\"bucket=${bucket}\",\"dominant_status=${dominant_status}\""
+        [[ -n "$task_id" ]] && reason_codes+=",\"task_id=${task_id}\""
+        reason_codes+="]"
+
+        local gid="${repo_name}:${bucket}:${scope}:$(printf '%03d' $group_seq)"
+        local group_json
+        group_json=$(cs_build_group_json "$gid" "$bucket" "$type" "$scope" "$message" \
+            "$files_json" "$statuses_json" "$confidence" "$reason_codes")
+
+        if [[ -n "$groups_json" ]]; then
+            groups_json+=","
+        fi
+        groups_json+="$group_json"
+        ((total_groups++))
+    done
+
+    # No changes found
+    if (( total_groups == 0 )); then
+        return 1
+    fi
+
+    # Build repo JSON
+    printf '{"repo":"%s","path":"%s","branch":"%s","task_id":"%s","task_title":"%s","groups":[%s]}' \
+        "$(json_escape "$repo_name")" \
+        "$(json_escape "$repo_path")" \
+        "$(json_escape "$branch")" \
+        "$(json_escape "$task_id")" \
+        "$(json_escape "$task_title")" \
+        "$groups_json"
+}
+
+# Execute a single commit group
+# Args: $1=repo_path $2=message, files on stdin (one per line)
+# Returns: 0 on success, 1 on failure (files are unstaged on failure)
+cs_execute_group() {
+    local repo_path="$1"
+    local message="$2"
+    local -a files=()
+    local file
+
+    while IFS= read -r file || [[ -n "$file" ]]; do
+        [[ -z "$file" ]] && continue
+        files+=("$file")
+    done
+
+    if [[ ${#files[@]} -eq 0 ]]; then
+        return 1
+    fi
+
+    # Stage files
+    if ! git -C "$repo_path" add -- "${files[@]}" 2>/dev/null; then
+        log_error "Failed to stage files"
+        return 1
+    fi
+
+    # Verify staging is not empty
+    if git -C "$repo_path" diff --cached --quiet 2>/dev/null; then
+        log_verbose "Nothing staged after git add, skipping"
+        return 1
+    fi
+
+    # Commit
+    if ! git -C "$repo_path" commit -m "$message" 2>/dev/null; then
+        log_error "Commit failed, rolling back staging for this group"
+        git -C "$repo_path" reset HEAD -- "${files[@]}" 2>/dev/null
+        return 1
+    fi
+
+    return 0
+}
+
+# Execute all groups for a repo
+# Args: $1=repo_path, group JSON lines on stdin
+# Returns: number of failed groups
+cs_execute_plan() {
+    local repo_path="$1"
+    local failures=0 successes=0
+    local line
+
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" ]] && continue
+
+        local message files_str
+        message=$(printf '%s' "$line" | grep -o '"message":"[^"]*"' | head -1 | sed 's/"message":"//;s/"$//')
+        # Extract files array content
+        files_str=$(printf '%s' "$line" | grep -o '"files":\[[^]]*\]' | head -1 | sed 's/"files":\[//;s/\]$//')
+
+        # Parse file list from JSON array
+        local -a file_list=()
+        local f
+        while IFS= read -r f; do
+            [[ -z "$f" ]] && continue
+            # Remove quotes
+            f="${f#\"}"
+            f="${f%\"}"
+            [[ -n "$f" ]] && file_list+=("$f")
+        done <<< "$(printf '%s' "$files_str" | tr ',' '\n' | sed 's/^ *//;s/ *$//')"
+
+        if [[ ${#file_list[@]} -eq 0 ]]; then
+            continue
+        fi
+
+        log_step "Committing: $message"
+        if printf '%s\n' "${file_list[@]}" | cs_execute_group "$repo_path" "$message"; then
+            log_success "  Created commit: $message"
+            ((successes++))
+        else
+            log_error "  Failed: $message"
+            ((failures++))
+        fi
+    done
+
+    return "$failures"
+}
+
+# Main commit-sweep command
+cmd_commit_sweep() {
+    local execute=false
+    local dry_run=true
+    local respect_staging=0
+    local allow_protected=false
+    local json_output=false
+    local repos_filter=""
+
+    # Parse commit-sweep specific arguments
+    local arg
+    for arg in "${ARGS[@]}"; do
+        case "$arg" in
+            --execute)       execute=true; dry_run=false ;;
+            --dry-run)       dry_run=true; execute=false ;;
+            --respect-staging) respect_staging=1 ;;
+            --allow-protected-branch) allow_protected=true ;;
+            --json)          json_output=true ;;
+            --verbose|-v)    VERBOSE=true ;;
+            *)               repos_filter="$arg" ;;
+        esac
+    done
+
+    declare -gA _CS_TITLE_CACHE=()
+
+    local start_time
+    start_time=$(date +%s)
+    local run_id="cs-$(date -u +%Y%m%d-%H%M%S)"
+
+    # Load repos — resolve specs to local paths
+    local -a repo_paths=()
+    if [[ -n "$repos_filter" ]]; then
+        local url branch custom_name local_path repo_id
+        if resolve_repo_spec "$repos_filter" "$PROJECTS_DIR" "$LAYOUT" url branch custom_name local_path repo_id 2>/dev/null; then
+            repo_paths+=("$local_path")
+        else
+            log_error "Cannot resolve repo: $repos_filter"
+            return 4
+        fi
+    else
+        local spec
+        while IFS= read -r spec; do
+            [[ -z "$spec" ]] && continue
+            local url branch custom_name local_path repo_id
+            if resolve_repo_spec "$spec" "$PROJECTS_DIR" "$LAYOUT" url branch custom_name local_path repo_id 2>/dev/null; then
+                repo_paths+=("$local_path")
+            fi
+        done <<< "$(get_all_repos 2>/dev/null)"
+    fi
+
+    if [[ ${#repo_paths[@]} -eq 0 ]]; then
+        log_info "No repositories found"
+        if [[ "$json_output" == "true" ]]; then
+            local empty_data='{"schema_version":"commit-sweep/v1","repos":[],"summary":{"repos_scanned":0,"repos_dirty":0,"repos_clean":0,"planned_commits":0}}'
+            local end_time duration
+            end_time=$(date +%s)
+            duration=$(( end_time - start_time ))
+            local meta
+            meta=$(printf '{"duration_seconds":%d,"exit_code":0,"run_id":"%s"}' "$duration" "$run_id")
+            emit_structured "$(build_json_envelope "commit-sweep" "$empty_data" "$meta")"
+        fi
+        return 0
+    fi
+
+    local repos_scanned=0 repos_dirty=0 repos_clean=0 planned_commits=0
+    local repos_json="" first_repo=true
+
+    for repo_path in "${repo_paths[@]}"; do
+        ((repos_scanned++))
+
+        # Check if it's a git repo
+        if ! is_git_repo "$repo_path" 2>/dev/null; then
+            log_verbose "Skipping non-git directory: $repo_path"
+            continue
+        fi
+
+        # Check dirty
+        if ! repo_is_dirty "$repo_path" 2>/dev/null; then
+            ((repos_clean++))
+            log_verbose "Clean: $repo_path"
+            continue
+        fi
+
+        ((repos_dirty++))
+
+        # Analyze
+        local repo_json
+        repo_json=$(cs_analyze_repo "$repo_path" "$respect_staging")
+        if [[ -z "$repo_json" ]]; then
+            log_verbose "No analyzable changes: $repo_path"
+            ((repos_clean++))
+            ((repos_dirty--))
+            continue
+        fi
+
+        # Count groups
+        local group_count
+        group_count=$(printf '%s' "$repo_json" | grep -o '"id":' | wc -l)
+        planned_commits=$(( planned_commits + group_count ))
+
+        if [[ "$first_repo" == "true" ]]; then
+            first_repo=false
+        else
+            repos_json+=","
+        fi
+        repos_json+="$repo_json"
+
+        # Human-readable output
+        if [[ "$json_output" != "true" ]]; then
+            local repo_name branch task_id task_title
+            repo_name=$(basename "$repo_path")
+            branch=$(git -C "$repo_path" symbolic-ref --short HEAD 2>/dev/null || printf 'detached')
+            task_id=$(cs_extract_task_id "$branch")
+            task_title=$(cs_get_task_title_cached "$task_id")
+
+            log_info ""
+            log_info "Repository: $repo_name (branch: $branch)"
+            [[ -n "$task_id" ]] && log_info "  Task: $task_id${task_title:+ — $task_title}"
+            log_info "  Groups: $group_count"
+
+            # Print each group summary
+            local g=0
+            # Parse groups from JSON
+            printf '%s' "$repo_json" | grep -o '"bucket":"[^"]*"' | while IFS= read -r b; do
+                ((g++))
+                b="${b#\"bucket\":\"}"
+                b="${b%\"}"
+                log_step "  [$g] bucket=$b"
+            done
+        fi
+
+        # Execute if requested
+        if [[ "$execute" == "true" ]]; then
+            # Preflight (commit-sweep is local-only, no push)
+            local _saved_push_strategy="${AGENT_SWEEP_PUSH_STRATEGY:-}"
+            AGENT_SWEEP_PUSH_STRATEGY="none"
+            if ! repo_preflight_check "$repo_path"; then
+                AGENT_SWEEP_PUSH_STRATEGY="$_saved_push_strategy"
+                log_error "Preflight failed for $repo_path: ${PREFLIGHT_SKIP_REASON:-unknown}"
+                continue
+            fi
+            AGENT_SWEEP_PUSH_STRATEGY="$_saved_push_strategy"
+
+            # Branch guard
+            local current_branch
+            current_branch=$(git -C "$repo_path" symbolic-ref --short HEAD 2>/dev/null || true)
+            if [[ "$allow_protected" != "true" ]]; then
+                case "$current_branch" in
+                    main|master|release/*)
+                        log_error "Refusing to commit on protected branch '$current_branch'. Use --allow-protected-branch to override."
+                        continue
+                        ;;
+                esac
+            fi
+
+            # Acquire lock
+            local lock_dir="$repo_path/.git/commit-sweep.lock.d"
+            if ! dir_lock_acquire "$lock_dir" 30; then
+                log_error "Cannot acquire lock for $repo_path (another commit-sweep running?)"
+                continue
+            fi
+
+            # Re-analyze fresh (state may have changed)
+            local fresh_json
+            fresh_json=$(cs_analyze_repo "$repo_path" "$respect_staging")
+
+            if [[ -n "$fresh_json" ]]; then
+                # Extract and execute each group
+                # Parse groups from the JSON and execute sequentially
+                local bucket_order="pre-staged source test doc config"
+                for bucket in $bucket_order; do
+                    # Find files for this bucket in the fresh analysis
+                    local group_msg group_files_str
+                    # Extract the group matching this bucket
+                    local group_block
+                    group_block=$(printf '%s' "$fresh_json" | grep -o "{[^}]*\"bucket\":\"${bucket}\"[^}]*}" | head -1)
+                    [[ -z "$group_block" ]] && continue
+
+                    group_msg=$(printf '%s' "$group_block" | grep -o '"message":"[^"]*"' | head -1 | sed 's/"message":"//;s/"$//')
+                    group_files_str=$(printf '%s' "$group_block" | grep -o '"files":\[[^]]*\]' | head -1 | sed 's/"files":\[//;s/\]$//')
+
+                    local -a exec_files=()
+                    local ef
+                    while IFS= read -r ef; do
+                        [[ -z "$ef" ]] && continue
+                        ef="${ef#\"}"
+                        ef="${ef%\"}"
+                        [[ -n "$ef" ]] && exec_files+=("$ef")
+                    done <<< "$(printf '%s' "$group_files_str" | tr ',' '\n' | sed 's/^ *//;s/ *$//')"
+
+                    if [[ ${#exec_files[@]} -gt 0 && -n "$group_msg" ]]; then
+                        log_step "Committing: $group_msg"
+                        if printf '%s\n' "${exec_files[@]}" | cs_execute_group "$repo_path" "$group_msg"; then
+                            log_success "  Created commit: $group_msg"
+                        else
+                            log_error "  Failed: $group_msg"
+                        fi
+                    fi
+                done
+            fi
+
+            # Always release lock
+            dir_lock_release "$lock_dir" 2>/dev/null
+        fi
+    done
+
+    # Build summary
+    local end_time duration
+    end_time=$(date +%s)
+    duration=$(( end_time - start_time ))
+
+    if [[ "$json_output" == "true" ]]; then
+        local data_json meta_json
+        data_json=$(printf '{"schema_version":"commit-sweep/v1","repos":[%s],"summary":{"repos_scanned":%d,"repos_dirty":%d,"repos_clean":%d,"planned_commits":%d}}' \
+            "$repos_json" "$repos_scanned" "$repos_dirty" "$repos_clean" "$planned_commits")
+        meta_json=$(printf '{"duration_seconds":%d,"exit_code":0,"run_id":"%s"}' "$duration" "$run_id")
+        emit_structured "$(build_json_envelope "commit-sweep" "$data_json" "$meta_json")"
+    else
+        log_info ""
+        log_info "── commit-sweep summary ──"
+        log_info "  Scanned: $repos_scanned"
+        log_info "  Dirty:   $repos_dirty"
+        log_info "  Clean:   $repos_clean"
+        log_info "  Planned: $planned_commits commits"
+        log_info "  Mode:    $(if [[ "$execute" == "true" ]]; then echo "execute"; else echo "dry-run"; fi)"
+        log_info "  Duration: ${duration}s"
+    fi
+
+    return 0
 }
 
 #==============================================================================
@@ -23823,6 +24723,7 @@ main() {
         fork-status) cmd_fork_status ;;
         fork-sync)   cmd_fork_sync ;;
         fork-clean)  cmd_fork_clean ;;
+        commit-sweep) cmd_commit_sweep ;;
         *)
             log_error "Unknown command: $COMMAND"
             show_help

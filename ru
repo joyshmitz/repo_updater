@@ -5766,7 +5766,7 @@ COMMIT-SWEEP OPTIONS:
     --dry-run            Show commit plan without changes (default)
     --respect-staging    Keep manually staged files in a dedicated first group
     --allow-protected-branch
-                         Allow execute on protected branches (main, master, release/*)
+                         Allow execute on protected branches (main, release/*)
 
 EXAMPLES:
     ru sync              Sync all configured repos
@@ -8511,7 +8511,7 @@ parse_args() {
                     exit 4
                 fi
                 ;;
-            --upstream=*|--no-rescue|--reset|--ff-only|--merge|--force)
+            --upstream=*|--reset|--ff-only|--merge)
                 # Fork command options
                 if [[ "$COMMAND" == fork-status || "$COMMAND" == fork-sync || "$COMMAND" == fork-clean ]]; then
                     ARGS+=("$1")
@@ -8601,7 +8601,7 @@ parse_args() {
     fi
 
     # Apply any pending args that appeared before the command
-    if [[ "$COMMAND" == "review" || "$COMMAND" == "agent-sweep" || "$COMMAND" == "commit-sweep" ]]; then
+    if [[ "$COMMAND" == "review" || "$COMMAND" == "agent-sweep" ]]; then
         [[ ${#pending_review_args[@]} -gt 0 ]] && ARGS+=("${pending_review_args[@]}")
         if [[ ${#pending_fork_args[@]} -gt 0 ]]; then
             local opt
@@ -8643,6 +8643,32 @@ parse_args() {
                     --timeout=*) GIT_TIMEOUT="${opt#--timeout=}" ;;
                     --parallel=*) PARALLEL="${opt#--parallel=}" ;;
                     -j*) PARALLEL="${opt#-j}" ;;
+                esac
+            done
+        fi
+    elif [[ "$COMMAND" == "commit-sweep" ]]; then
+        if [[ ${#pending_review_args[@]} -gt 0 ]]; then
+            log_error "Unknown option: ${pending_review_args[0]}"
+            show_help
+            exit 4
+        fi
+        if [[ ${#pending_fork_args[@]} -gt 0 ]]; then
+            log_error "Unknown option: ${pending_fork_args[0]}"
+            show_help
+            exit 4
+        fi
+        if [[ ${#pending_global_args[@]} -gt 0 ]]; then
+            local opt
+            for opt in "${pending_global_args[@]}"; do
+                case "$opt" in
+                    --json|--dry-run|--execute|--respect-staging|--allow-protected-branch)
+                        ARGS+=("$opt")
+                        ;;
+                    *)
+                        log_error "Unknown option: $opt"
+                        show_help
+                        exit 4
+                        ;;
                 esac
             done
         fi
@@ -23394,7 +23420,7 @@ _robot_docs_commands() {
         {"flag": "--execute", "description": "Actually create commits (default: dry-run)"},
         {"flag": "--dry-run", "description": "Preview commit plan without changes (default)"},
         {"flag": "--respect-staging", "description": "Preserve pre-staged files as separate group"},
-        {"flag": "--allow-protected-branch", "description": "Allow commits on protected branches (main, master, release/*)"},
+        {"flag": "--allow-protected-branch", "description": "Allow commits on protected branches (main, release/*)"},
         {"flag": "--json", "description": "Output plan as JSON to stdout"},
         {"flag": "--verbose", "description": "Show detailed classification info"}
       ]
@@ -23955,13 +23981,13 @@ cs_detect_commit_type() {
 }
 
 # Detect scope from file list (most common top-level directory)
-# Args: file paths on stdin (one per line)
+# Args: NUL-delimited file paths on stdin
 # Output: scope string (directory name or "root")
 cs_detect_scope() {
     local -A dir_counts
     local file dir max_dir="" max_count=0
 
-    while IFS= read -r file || [[ -n "$file" ]]; do
+    while IFS= read -r -d '' file; do
         [[ -z "$file" ]] && continue
         if [[ "$file" == */* ]]; then
             dir="${file%%/*}"
@@ -24068,13 +24094,13 @@ cs_get_task_title_cached() {
 }
 
 # Convert a list of files to a JSON array string
-# Args: file paths on stdin (one per line)
+# Args: NUL-delimited file paths on stdin
 # Output: JSON array string
 cs_files_to_json_array() {
     local first=true result="["
     local file
 
-    while IFS= read -r file || [[ -n "$file" ]]; do
+    while IFS= read -r -d '' file; do
         [[ -z "$file" ]] && continue
         if [[ "$first" == "true" ]]; then
             first=false
@@ -24086,6 +24112,107 @@ cs_files_to_json_array() {
 
     result+="]"
     printf '%s' "$result"
+}
+
+# Emit sorted file paths as NUL-delimited stream.
+# If sort -z is unavailable, preserves input order.
+# Args: file paths as positional arguments
+cs_sort_files_nul() {
+    if [[ $# -eq 0 ]]; then
+        return 0
+    fi
+
+    if printf 'a\0' | sort -z >/dev/null 2>&1; then
+        printf '%s\0' "$@" | sort -z
+    else
+        printf '%s\0' "$@"
+    fi
+}
+
+# Collect and classify repo changes into global arrays/maps.
+# Args: $1=repo_path $2=respect_staging (0/1)
+# Sets globals:
+#   _CS_HAS_UNMERGED
+#   _CS_PRESTAGED_FILES, _CS_SOURCE_FILES, _CS_TEST_FILES, _CS_DOC_FILES, _CS_CONFIG_FILES
+#   _CS_PRESTAGED_STATUS[path]=status
+#   _CS_BUCKET_STATUS["bucket<sep>path"]=status
+#   _CS_BUCKET_KEY_SEP (separator used for _CS_BUCKET_STATUS keys)
+cs_collect_repo_changes() {
+    local repo_path="$1"
+    local respect_staging="${2:-0}"
+    local key_sep=$'\037'
+
+    declare -g _CS_HAS_UNMERGED=0
+    declare -g _CS_BUCKET_KEY_SEP="$key_sep"
+    declare -ga _CS_PRESTAGED_FILES=()
+    declare -ga _CS_SOURCE_FILES=()
+    declare -ga _CS_TEST_FILES=()
+    declare -ga _CS_DOC_FILES=()
+    declare -ga _CS_CONFIG_FILES=()
+    declare -gA _CS_PRESTAGED_STATUS=()
+    declare -gA _CS_BUCKET_STATUS=()
+
+    local line xy path x_code y_code effective_status bucket
+    while IFS= read -r -d '' line; do
+        [[ -z "$line" ]] && continue
+
+        xy="${line:0:2}"
+        path="${line:3}"
+
+        # Unmerged/conflicted entries are not safe to commit automatically.
+        if [[ "$xy" == U* || "$xy" == *U* || "$xy" == "DD" || "$xy" == "AA" ]]; then
+            _CS_HAS_UNMERGED=1
+            continue
+        fi
+
+        # For rename/copy in porcelain -z: record includes NEW path, then OLD path.
+        if [[ "$xy" == R* || "$xy" == C* ]]; then
+            IFS= read -r -d '' _ || true
+        fi
+
+        x_code="${xy:0:1}"
+        y_code="${xy:1:1}"
+        effective_status=""
+
+        if [[ "$xy" == "??" ]]; then
+            effective_status="A"
+        else
+            if [[ "$x_code" != " " && "$x_code" != "?" ]]; then
+                effective_status="$x_code"
+            elif [[ "$y_code" != " " && "$y_code" != "?" ]]; then
+                effective_status="$y_code"
+            else
+                continue
+            fi
+        fi
+
+        # If requested, isolate purely staged entries into pre-staged bucket.
+        if [[ "$respect_staging" == "1" && "$xy" != "??" && "$x_code" != " " && "$x_code" != "?" && "$y_code" == " " ]]; then
+            if is_file_denied "$path" 2>/dev/null; then
+                log_verbose "Blocked by denylist (pre-staged): $path"
+                continue
+            fi
+            _CS_PRESTAGED_FILES+=("$path")
+            _CS_PRESTAGED_STATUS["$path"]="$x_code"
+            continue
+        fi
+
+        if is_file_denied "$path" 2>/dev/null; then
+            log_verbose "Blocked by denylist: $path"
+            continue
+        fi
+
+        bucket=$(cs_classify_file "$path")
+        case "$bucket" in
+            source) _CS_SOURCE_FILES+=("$path") ;;
+            test)   _CS_TEST_FILES+=("$path") ;;
+            doc)    _CS_DOC_FILES+=("$path") ;;
+            config) _CS_CONFIG_FILES+=("$path") ;;
+            *)      _CS_SOURCE_FILES+=("$path"); bucket="source" ;;
+        esac
+
+        _CS_BUCKET_STATUS["${bucket}${_CS_BUCKET_KEY_SEP}${path}"]="$effective_status"
+    done < <(git -C "$repo_path" status --porcelain=v1 -z 2>/dev/null)
 }
 
 # Build JSON object for a single commit group
@@ -24148,59 +24275,11 @@ cs_analyze_repo() {
     task_id=$(cs_extract_task_id "$branch")
     task_title=$(cs_get_task_title_cached "$task_id")
 
-    # Step 1: Collect changes via NUL-safe porcelain
-    local -a raw_files=()
-    local -A file_status=()
-    local has_unmerged=0
-    local xy rest path old_path
-
-    while IFS= read -r -d '' line; do
-        [[ -z "$line" ]] && continue
-        xy="${line:0:2}"
-        path="${line:3}"
-
-        # Check for unmerged
-        if [[ "$xy" == U* || "$xy" == *U* || "$xy" == "DD" || "$xy" == "AA" ]]; then
-            has_unmerged=1
-            continue
-        fi
-
-        # Handle renames/copies — next NUL-delimited field is the old path
-        if [[ "$xy" == R* || "$xy" == C* ]]; then
-            IFS= read -r -d '' old_path || true
-            # Use the new path (which is 'path'), old_path is the source
-        fi
-
-        # Skip if respect-staging and file is only staged (X is not space/?)
-        local x_code="${xy:0:1}" y_code="${xy:1:1}"
-
-        if [[ "$xy" == "??" ]]; then
-            # Untracked
-            raw_files+=("$path")
-            file_status["$path"]="A"
-        else
-            # Determine effective status
-            local effective_status
-            if [[ "$x_code" != " " && "$x_code" != "?" ]]; then
-                effective_status="$x_code"
-            elif [[ "$y_code" != " " && "$y_code" != "?" ]]; then
-                effective_status="$y_code"
-            else
-                continue
-            fi
-
-            if [[ "$respect_staging" == "1" && "$x_code" != " " && "$x_code" != "?" && "$y_code" == " " ]]; then
-                # Only staged, will go to pre-staged group
-                continue
-            fi
-
-            raw_files+=("$path")
-            file_status["$path"]="$effective_status"
-        fi
-    done < <(git -C "$repo_path" status --porcelain=v1 -z 2>/dev/null)
+    # Step 1: Collect + classify changes
+    cs_collect_repo_changes "$repo_path" "$respect_staging"
 
     # Check for unmerged → skip
-    if (( has_unmerged )); then
+    if (( _CS_HAS_UNMERGED )); then
         printf '{"repo":"%s","path":"%s","branch":"%s","status":"skipped_conflict","groups":[]}' \
             "$(json_escape "$repo_name")" \
             "$(json_escape "$repo_path")" \
@@ -24208,72 +24287,32 @@ cs_analyze_repo() {
         return 1
     fi
 
-    # Step 2: Collect pre-staged files if --respect-staging
-    local -a prestaged_files=()
-    local -A prestaged_status=()
-    if [[ "$respect_staging" == "1" ]]; then
-        while IFS= read -r -d '' line; do
-            [[ -z "$line" ]] && continue
-            xy="${line:0:2}"
-            path="${line:3}"
-            local x_code="${xy:0:1}" y_code="${xy:1:1}"
-
-            if [[ "$x_code" != " " && "$x_code" != "?" && "$xy" != "??" ]]; then
-                # Filter pre-staged files through denylist
-                if ! is_file_denied "$path" 2>/dev/null; then
-                    prestaged_files+=("$path")
-                    prestaged_status["$path"]="$x_code"
-                else
-                    log_verbose "Blocked by denylist (pre-staged): $path"
-                fi
-            fi
-        done < <(git -C "$repo_path" status --porcelain=v1 -z 2>/dev/null)
-    fi
-
-    # Step 3: Filter through denylist
-    local -a allowed_files=()
-    local file
-    for file in "${raw_files[@]}"; do
-        if ! is_file_denied "$file" 2>/dev/null; then
-            allowed_files+=("$file")
-        else
-            log_verbose "Blocked by denylist: $file"
-        fi
-    done
-
-    # Step 4: Classify into buckets
-    local -A bucket_files=()  # bucket -> newline-separated file list
-    local -A bucket_statuses=()
-    for file in "${allowed_files[@]}"; do
-        local bucket
-        bucket=$(cs_classify_file "$file")
-        if [[ -n "${bucket_files[$bucket]:-}" ]]; then
-            bucket_files["$bucket"]+=$'\n'"$file"
-        else
-            bucket_files["$bucket"]="$file"
-        fi
-        bucket_statuses["${bucket}:${file}"]="${file_status[$file]:-M}"
-    done
-
-    # Step 5: Build groups
+    # Step 2: Build groups
     local groups_json="" group_seq=0 total_groups=0
     local bucket_order="source test doc config"
+    local file key st
 
     # Pre-staged group first
-    if [[ "$respect_staging" == "1" && ${#prestaged_files[@]} -gt 0 ]]; then
+    if [[ "$respect_staging" == "1" && ${#_CS_PRESTAGED_FILES[@]} -gt 0 ]]; then
         ((group_seq++))
-        local ps_files_json ps_statuses_json ps_scope ps_reason_codes
-        ps_files_json=$(printf '%s\n' "${prestaged_files[@]}" | sort | cs_files_to_json_array)
+        local ps_files_json ps_statuses_json ps_scope ps_reason_codes ps_first
+        local -a sorted_ps_files=()
+        while IFS= read -r -d '' file; do
+            sorted_ps_files+=("$file")
+        done < <(cs_sort_files_nul "${_CS_PRESTAGED_FILES[@]}")
+
+        ps_files_json=$(printf '%s\0' "${sorted_ps_files[@]}" | cs_files_to_json_array)
         ps_statuses_json="{"
-        local ps_first=true
-        for file in "${prestaged_files[@]}"; do
+        ps_first=true
+        for file in "${sorted_ps_files[@]}"; do
             if [[ "$ps_first" == "true" ]]; then ps_first=false; else ps_statuses_json+=","; fi
-            ps_statuses_json+="\"$(json_escape "$file")\":\"${prestaged_status[$file]:-M}\""
+            ps_statuses_json+="\"$(json_escape "$file")\":\"${_CS_PRESTAGED_STATUS[$file]:-M}\""
         done
         ps_statuses_json+="}"
-        ps_scope=$(printf '%s\n' "${prestaged_files[@]}" | cs_detect_scope)
+        ps_scope=$(printf '%s\0' "${sorted_ps_files[@]}" | cs_detect_scope)
         ps_reason_codes='["pre-staged","user-curated"]'
-        local ps_id="${repo_name}:pre-staged:${ps_scope}:$(printf '%03d' $group_seq)"
+        local ps_id
+        ps_id="${repo_name}:pre-staged:${ps_scope}:$(printf '%03d' "$group_seq")"
         local ps_group
         ps_group=$(cs_build_group_json "$ps_id" "pre-staged" "chore" "$ps_scope" \
             "chore(${ps_scope}): pre-staged changes${task_id:+ ($task_id)}" \
@@ -24283,17 +24322,25 @@ cs_analyze_repo() {
     fi
 
     for bucket in $bucket_order; do
-        [[ -z "${bucket_files[$bucket]:-}" ]] && continue
+        local -a bucket_files=()
+        case "$bucket" in
+            source) bucket_files=("${_CS_SOURCE_FILES[@]}") ;;
+            test)   bucket_files=("${_CS_TEST_FILES[@]}") ;;
+            doc)    bucket_files=("${_CS_DOC_FILES[@]}") ;;
+            config) bucket_files=("${_CS_CONFIG_FILES[@]}") ;;
+        esac
+        [[ ${#bucket_files[@]} -eq 0 ]] && continue
+
         ((group_seq++))
 
         # Determine dominant status
         local -A status_counts=()
         local f
-        while IFS= read -r f; do
-            [[ -z "$f" ]] && continue
-            local st="${bucket_statuses["${bucket}:${f}"]:-M}"
+        for f in "${bucket_files[@]}"; do
+            key="${bucket}${_CS_BUCKET_KEY_SEP}${f}"
+            st="${_CS_BUCKET_STATUS[$key]:-M}"
             status_counts["$st"]=$(( ${status_counts["$st"]:-0} + 1 ))
-        done <<< "${bucket_files[$bucket]}"
+        done
 
         local dominant_status="M" dominant_count=0
         for st in "${!status_counts[@]}"; do
@@ -24311,30 +24358,36 @@ cs_analyze_repo() {
 
         local type scope message confidence
         type=$(cs_detect_commit_type "$bucket" "$dominant_status")
-        scope=$(printf '%s\n' "${bucket_files[$bucket]}" | sort | head -20 | cs_detect_scope)
+        local -a sorted_files=()
+        while IFS= read -r -d '' file; do
+            sorted_files+=("$file")
+        done < <(cs_sort_files_nul "${bucket_files[@]}")
+
+        local -a scope_files=()
+        local i
+        for ((i=0; i<${#sorted_files[@]} && i<20; i++)); do
+            scope_files+=("${sorted_files[$i]}")
+        done
+        scope=$(printf '%s\0' "${scope_files[@]}" | cs_detect_scope)
 
         # File count
-        local file_count=0
-        while IFS= read -r f; do
-            [[ -z "$f" ]] && continue
-            ((file_count++))
-        done <<< "${bucket_files[$bucket]}"
+        local file_count="${#bucket_files[@]}"
 
         confidence=$(cs_assess_confidence "$task_id" "$file_count" "$has_mixed")
         message=$(cs_build_message "$type" "$scope" "$task_id")
 
         # Build files JSON
         local files_json statuses_json
-        files_json=$(printf '%s\n' "${bucket_files[$bucket]}" | sort | cs_files_to_json_array)
+        files_json=$(printf '%s\0' "${sorted_files[@]}" | cs_files_to_json_array)
 
         # Build file_statuses JSON
         statuses_json="{"
         local first=true
-        while IFS= read -r f; do
-            [[ -z "$f" ]] && continue
+        for f in "${sorted_files[@]}"; do
             if [[ "$first" == "true" ]]; then first=false; else statuses_json+=","; fi
-            statuses_json+="\"$(json_escape "$f")\":\"${bucket_statuses["${bucket}:${f}"]:-M}\""
-        done <<< "${bucket_files[$bucket]}"
+            key="${bucket}${_CS_BUCKET_KEY_SEP}${f}"
+            statuses_json+="\"$(json_escape "$f")\":\"${_CS_BUCKET_STATUS[$key]:-M}\""
+        done
         statuses_json+="}"
 
         # Build reason_codes
@@ -24343,7 +24396,8 @@ cs_analyze_repo() {
         [[ -n "$task_id" ]] && reason_codes+=",\"task_id=${task_id}\""
         reason_codes+="]"
 
-        local gid="${repo_name}:${bucket}:${scope}:$(printf '%03d' $group_seq)"
+        local gid
+        gid="${repo_name}:${bucket}:${scope}:$(printf '%03d' "$group_seq")"
         local group_json
         group_json=$(cs_build_group_json "$gid" "$bucket" "$type" "$scope" "$message" \
             "$files_json" "$statuses_json" "$confidence" "$reason_codes")
@@ -24371,25 +24425,25 @@ cs_analyze_repo() {
 }
 
 # Execute a single commit group
-# Args: $1=repo_path $2=message, files on stdin (one per line)
+# Args: $1=repo_path $2=message, NUL-delimited files on stdin
 # Returns: 0 on success, 1 on failure (files are unstaged on failure)
 cs_execute_group() {
     local repo_path="$1"
     local message="$2"
-    local -a files=()
+    local -a group_files_arr=()
     local file
 
-    while IFS= read -r file || [[ -n "$file" ]]; do
+    while IFS= read -r -d '' file; do
         [[ -z "$file" ]] && continue
-        files+=("$file")
+        group_files_arr+=("$file")
     done
 
-    if [[ ${#files[@]} -eq 0 ]]; then
+    if [[ ${#group_files_arr[@]} -eq 0 ]]; then
         return 1
     fi
 
     # Stage files
-    if ! git -C "$repo_path" add -- "${files[@]}" 2>/dev/null; then
+    if ! git -C "$repo_path" add -- "${group_files_arr[@]}" 2>/dev/null; then
         log_error "Failed to stage files"
         return 1
     fi
@@ -24401,9 +24455,10 @@ cs_execute_group() {
     fi
 
     # Commit
-    if ! git -C "$repo_path" commit -m "$message" 2>/dev/null; then
+    # --only ensures unrelated staged entries are excluded from this group commit.
+    if ! git -C "$repo_path" commit -m "$message" --only -- "${group_files_arr[@]}" 2>/dev/null; then
         log_error "Commit failed, rolling back staging for this group"
-        git -C "$repo_path" reset HEAD -- "${files[@]}" 2>/dev/null
+        git -C "$repo_path" reset HEAD -- "${group_files_arr[@]}" 2>/dev/null
         return 1
     fi
 
@@ -24442,7 +24497,7 @@ cs_execute_plan() {
         fi
 
         log_step "Committing: $message"
-        if printf '%s\n' "${file_list[@]}" | cs_execute_group "$repo_path" "$message"; then
+        if printf '%s\0' "${file_list[@]}" | cs_execute_group "$repo_path" "$message"; then
             log_success "  Created commit: $message"
             ((successes++))
         else
@@ -24481,7 +24536,8 @@ cmd_commit_sweep() {
 
     local start_time
     start_time=$(date +%s)
-    local run_id="cs-$(date -u +%Y%m%d-%H%M%S)"
+    local run_id
+    run_id="cs-$(date -u +%Y%m%d-%H%M%S)"
 
     # Load repos — resolve specs to local paths
     local -a repo_paths=()
@@ -24603,7 +24659,7 @@ cmd_commit_sweep() {
             current_branch=$(git -C "$repo_path" symbolic-ref --short HEAD 2>/dev/null || true)
             if [[ "$allow_protected" != "true" ]]; then
                 case "$current_branch" in
-                    main|master|release/*)
+                    main|release/*)
                         log_error "Refusing to commit on protected branch '$current_branch'. Use --allow-protected-branch to override."
                         continue
                         ;;
@@ -24617,61 +24673,96 @@ cmd_commit_sweep() {
                 continue
             fi
 
-            # Re-analyze fresh (state may have changed)
-            local fresh_json
-            fresh_json=$(cs_analyze_repo "$repo_path" "$respect_staging")
+            # Re-collect fresh state (state may have changed after planning).
+            cs_collect_repo_changes "$repo_path" "$respect_staging"
+            if (( _CS_HAS_UNMERGED )); then
+                log_error "Skipping $repo_path: unmerged/conflicted entries detected"
+                dir_lock_release "$lock_dir" 2>/dev/null
+                continue
+            fi
 
-            if [[ -n "$fresh_json" ]]; then
-                # Extract and execute each group
-                # Parse groups from the JSON and execute sequentially
-                local bucket_order="pre-staged source test doc config"
-                for bucket in $bucket_order; do
-                    # Find files for this bucket in the fresh analysis
-                    local group_msg group_files_str
-                    # Extract the group matching this bucket
-                    local group_block
-                    group_block=$(printf '%s' "$fresh_json" | grep -o "{[^}]*\"bucket\":\"${bucket}\"[^}]*}" | head -1)
-                    [[ -z "$group_block" ]] && continue
+            local exec_task_id
+            exec_task_id=$(cs_extract_task_id "$current_branch")
 
-                    group_msg=$(printf '%s' "$group_block" | grep -o '"message":"[^"]*"' | head -1 | sed 's/"message":"//;s/"$//')
-                    group_files_str=$(printf '%s' "$group_block" | grep -o '"files":\[[^]]*\]' | head -1 | sed 's/"files":\[//;s/\]$//')
+            local -a sorted_group_files=()
+            local -a scope_files=()
+            local -a group_files=()
+            local file key st type scope group_msg
+            local dominant_status dominant_count
+            local -A status_counts=()
 
-                    local -a exec_files=()
-                    local ef remainder="$group_files_str"
-                    # Parse JSON array elements safely (handles commas in filenames)
-                    while [[ -n "$remainder" ]]; do
-                        # Strip leading whitespace/comma
-                        remainder="${remainder#,}"
-                        remainder="${remainder#"${remainder%%[! ]*}"}"
-                        [[ -z "$remainder" ]] && break
-                        if [[ "$remainder" == \"* ]]; then
-                            # Extract quoted string (handle escaped quotes)
-                            remainder="${remainder#\"}"
-                            ef=""
-                            while [[ -n "$remainder" ]]; do
-                                case "$remainder" in
-                                    \\\"*) ef+="\""; remainder="${remainder#\\\"}" ;;
-                                    \\\\*) ef+="\\"; remainder="${remainder#\\\\}" ;;
-                                    \"*)   remainder="${remainder#\"}"; break ;;
-                                    *)     ef+="${remainder:0:1}"; remainder="${remainder:1}" ;;
-                                esac
-                            done
-                            [[ -n "$ef" ]] && exec_files+=("$ef")
-                        fi
-                    done
+            # Pre-staged bucket first when requested.
+            if [[ "$respect_staging" == "1" && ${#_CS_PRESTAGED_FILES[@]} -gt 0 ]]; then
+                sorted_group_files=()
+                while IFS= read -r -d '' file; do
+                    sorted_group_files+=("$file")
+                done < <(cs_sort_files_nul "${_CS_PRESTAGED_FILES[@]}")
 
-                    if [[ ${#exec_files[@]} -gt 0 && -n "$group_msg" ]]; then
-                        log_step "Committing: $group_msg"
-                        if printf '%s\n' "${exec_files[@]}" | cs_execute_group "$repo_path" "$group_msg"; then
-                            log_success "  Created commit: $group_msg"
-                            ((commits_succeeded++))
-                        else
-                            log_error "  Failed: $group_msg"
-                            ((commits_failed++))
-                        fi
+                scope=$(printf '%s\0' "${sorted_group_files[@]}" | cs_detect_scope)
+                group_msg="chore(${scope}): pre-staged changes${exec_task_id:+ ($exec_task_id)}"
+
+                log_step "Committing: $group_msg"
+                if printf '%s\0' "${sorted_group_files[@]}" | cs_execute_group "$repo_path" "$group_msg"; then
+                    log_success "  Created commit: $group_msg"
+                    ((commits_succeeded++))
+                else
+                    log_error "  Failed: $group_msg"
+                    ((commits_failed++))
+                fi
+            fi
+
+            local bucket bucket_order_exec="source test doc config"
+            for bucket in $bucket_order_exec; do
+                group_files=()
+                case "$bucket" in
+                    source) group_files=("${_CS_SOURCE_FILES[@]}") ;;
+                    test)   group_files=("${_CS_TEST_FILES[@]}") ;;
+                    doc)    group_files=("${_CS_DOC_FILES[@]}") ;;
+                    config) group_files=("${_CS_CONFIG_FILES[@]}") ;;
+                esac
+                [[ ${#group_files[@]} -eq 0 ]] && continue
+
+                status_counts=()
+                for file in "${group_files[@]}"; do
+                    key="${bucket}${_CS_BUCKET_KEY_SEP}${file}"
+                    st="${_CS_BUCKET_STATUS[$key]:-M}"
+                    status_counts["$st"]=$(( ${status_counts["$st"]:-0} + 1 ))
+                done
+
+                dominant_status="M"
+                dominant_count=0
+                for st in "${!status_counts[@]}"; do
+                    if (( status_counts["$st"] > dominant_count )); then
+                        dominant_count="${status_counts["$st"]}"
+                        dominant_status="$st"
                     fi
                 done
-            fi
+
+                type=$(cs_detect_commit_type "$bucket" "$dominant_status")
+
+                sorted_group_files=()
+                while IFS= read -r -d '' file; do
+                    sorted_group_files+=("$file")
+                done < <(cs_sort_files_nul "${group_files[@]}")
+
+                scope_files=()
+                local i
+                for ((i=0; i<${#sorted_group_files[@]} && i<20; i++)); do
+                    scope_files+=("${sorted_group_files[$i]}")
+                done
+                scope=$(printf '%s\0' "${scope_files[@]}" | cs_detect_scope)
+                # Keep message generation consistent with planning mode.
+                group_msg=$(cs_build_message "$type" "$scope" "$exec_task_id")
+
+                log_step "Committing: $group_msg"
+                if printf '%s\0' "${sorted_group_files[@]}" | cs_execute_group "$repo_path" "$group_msg"; then
+                    log_success "  Created commit: $group_msg"
+                    ((commits_succeeded++))
+                else
+                    log_error "  Failed: $group_msg"
+                    ((commits_failed++))
+                fi
+            done
 
             # Always release lock
             dir_lock_release "$lock_dir" 2>/dev/null
@@ -24684,7 +24775,7 @@ cmd_commit_sweep() {
     duration=$(( end_time - start_time ))
 
     local exit_code=0
-    if [[ "$execute" == "true" && commits_failed -gt 0 ]]; then
+    if [[ "$execute" == "true" ]] && (( commits_failed > 0 )); then
         exit_code=1  # partial failure
     fi
 

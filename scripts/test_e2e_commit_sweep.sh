@@ -6,9 +6,13 @@
 # - dry-run on dirty repo shows plan
 # - json dry-run output validates envelope
 # - execute creates commits
+# - execute handles special filenames (comma/newline)
 # - protected branch guard
 # - protected branch override
 # - respect-staging option
+# - pre-staged denylist enforcement during execute
+# - non-zero exit on commit failures
+# - command-scoped flags before command name
 # - clean repo produces no output
 # - json envelope structure
 #
@@ -37,10 +41,10 @@ create_dirty_repo() {
     echo "print('hello')" > "$repo_dir/main.py"
     git -C "$repo_dir" add . >/dev/null 2>&1
     git -C "$repo_dir" commit -m "init" >/dev/null 2>&1
+    git -C "$repo_dir" branch -M main >/dev/null 2>&1
 
     git -C "$repo_dir" remote add origin "$remote_dir" >/dev/null 2>&1
-    git -C "$repo_dir" push -u origin main >/dev/null 2>&1 || \
-        git -C "$repo_dir" push -u origin master >/dev/null 2>&1
+    git -C "$repo_dir" push -u origin main >/dev/null 2>&1
 
     echo "$repo_dir"
 }
@@ -392,7 +396,43 @@ test_commit_sweep_comma_in_filename() {
 }
 
 # ---------------------------------------------------------------------------
-# Test 11: --respect-staging filters denylist (Finding #3)
+# Test 11: newline in filename handled correctly
+# ---------------------------------------------------------------------------
+test_commit_sweep_newline_in_filename() {
+    local test_name="commit-sweep: newline in filename"
+    log_test_start "$test_name"
+
+    e2e_setup
+    e2e_init_ru
+
+    local repo_dir
+    repo_dir=$(create_dirty_repo "testrepo")
+    e2e_add_repo "example/testrepo"
+
+    git -C "$repo_dir" checkout -b feature/newline-test >/dev/null 2>&1
+
+    local newline_name
+    newline_name=$'line\nbreak.py'
+    printf 'data\n' > "$repo_dir/$newline_name"
+
+    local stdout_file="$E2E_LOG_DIR/cs_newline_stdout.txt"
+    local stderr_file="$E2E_LOG_DIR/cs_newline_stderr.txt"
+    local actual_code=0
+    "$E2E_RU_SCRIPT" commit-sweep --execute \
+        >"$stdout_file" 2>"$stderr_file" || actual_code=$?
+
+    assert_true "[[ $actual_code -eq 0 ]]" "newline filename: exits 0"
+
+    local dirty_count
+    dirty_count=$(git -C "$repo_dir" status --porcelain 2>/dev/null | wc -l)
+    assert_true "[[ $dirty_count -eq 0 ]]" "newline filename: working dir clean after execute"
+
+    e2e_cleanup
+    log_test_pass "$test_name"
+}
+
+# ---------------------------------------------------------------------------
+# Test 12: --respect-staging filters denylist (Finding #3)
 # ---------------------------------------------------------------------------
 test_commit_sweep_prestaged_denylist() {
     local test_name="commit-sweep: pre-staged denylist filtering"
@@ -414,28 +454,32 @@ test_commit_sweep_prestaged_denylist() {
     # Also have a normal unstaged file
     echo "normal content" > "$repo_dir/app.py"
 
-    # Run with --respect-staging --json
-    local stdout_file="$E2E_LOG_DIR/cs_denylist_stdout.json"
+    # Run with --respect-staging --execute: safe files may commit, denied pre-staged must not.
+    local stdout_file="$E2E_LOG_DIR/cs_denylist_stdout.txt"
     local stderr_file="$E2E_LOG_DIR/cs_denylist_stderr.txt"
     local actual_code=0
-    "$E2E_RU_SCRIPT" commit-sweep --json --respect-staging \
+    "$E2E_RU_SCRIPT" commit-sweep --execute --respect-staging \
         >"$stdout_file" 2>"$stderr_file" || actual_code=$?
 
-    if command -v jq &>/dev/null; then
-        # .env should NOT appear in any group's files
-        local has_env
-        has_env=$(jq -r '[.data.repos[0].groups[].files[]] | any(. == ".env")' "$stdout_file" 2>/dev/null || echo "true")
-        assert_true "[[ \"$has_env\" == \"false\" ]]" ".env blocked by denylist in pre-staged group"
-    else
-        skip_test "jq not installed"
-    fi
+    assert_true "[[ $actual_code -eq 0 ]]" "pre-staged denylist execute exits 0"
+
+    # .env must not appear in latest commit.
+    local head_files
+    head_files=$(git -C "$repo_dir" show --name-only --pretty=format: HEAD 2>/dev/null)
+    assert_true "! grep -q '^\\.env$' <<< \"$head_files\"" ".env is not committed"
+
+    # .env should remain uncommitted after sweep.
+    assert_true "[[ -f \"$repo_dir/.env\" ]]" ".env file still exists"
+    local env_in_status
+    env_in_status=$(git -C "$repo_dir" status --porcelain 2>/dev/null | grep -c '\.env$' || true)
+    assert_true "[[ $env_in_status -ge 1 ]]" ".env remains uncommitted after execute"
 
     e2e_cleanup
     log_test_pass "$test_name"
 }
 
 # ---------------------------------------------------------------------------
-# Test 12: flags before command work (Finding #4)
+# Test 13: flags before command work (Finding #4)
 # ---------------------------------------------------------------------------
 test_commit_sweep_flags_before_command() {
     local test_name="commit-sweep: flags before command name"
@@ -486,6 +530,7 @@ run_test test_commit_sweep_json_envelope
 run_test test_commit_sweep_respects_staging
 run_test test_commit_sweep_exit_code_on_failure
 run_test test_commit_sweep_comma_in_filename
+run_test test_commit_sweep_newline_in_filename
 run_test test_commit_sweep_prestaged_denylist
 run_test test_commit_sweep_flags_before_command
 print_results

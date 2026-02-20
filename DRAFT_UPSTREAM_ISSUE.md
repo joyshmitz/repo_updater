@@ -14,7 +14,7 @@ Commit hygiene problem in multi-agent workflows — no tooling for grouping dirt
 
 ### Problem
 
-When multiple AI agents work across repos (3-5 agents per repo), they produce dirty worktrees with mixed changes — source edits, test additions, doc updates, config tweaks — all interleaved. Currently there is no tool that turns a dirty worktree into clean, atomic, conventional commits.
+When multiple AI agents work across repos, they produce dirty worktrees with mixed changes — source edits, test additions, doc updates, config tweaks — all interleaved. Currently there is no tool that turns a dirty worktree into clean, atomic, conventional commits.
 
 The agents are good at coding. They are bad at committing. This creates:
 
@@ -29,6 +29,8 @@ This is different from orchestration (`agent-sweep` handles *which* repos to pro
 
 ### Why existing tools don't cover this
 
+Unlike fork management (where `gh repo sync` covers the core action), there is no existing tool for automated commit grouping:
+
 | Tool | What it does | What it doesn't do |
 |------|-------------|-------------------|
 | `git add -p` | Interactive hunk staging | No automation, no classification, no message generation |
@@ -37,7 +39,7 @@ This is different from orchestration (`agent-sweep` handles *which* repos to pro
 | `agent-sweep` | Orchestrates agents across repos | Doesn't handle commit structure |
 | `gh` CLI | Everything GitHub | Nothing for local commit organization |
 
-There is no `gh commit-group` or equivalent. This is a gap.
+There is no `gh commit-group` or equivalent. This is a gap in the toolchain.
 
 ### What a solution looks like
 
@@ -55,17 +57,19 @@ A dedicated command that:
 
 All heuristic, no LLM. Deterministic, reproducible.
 
-### Data from a working implementation
+### Data from a reference implementation
 
-I built this in my fork (`joyshmitz/repo_updater`, branch `feature/commit-sweep`) as `ru commit-sweep`. Results from real usage:
+I built this in my fork (`joyshmitz/repo_updater`, branch `feature/commit-sweep`) as `ru commit-sweep`. Illustrative output from the test suite:
 
 ```
 $ ru commit-sweep --json | jq '.data.summary'
 {
-  "repos_scanned": 12,
-  "repos_dirty": 4,
-  "repos_clean": 8,
-  "planned_commits": 7
+  "repos_scanned": 3,
+  "repos_dirty": 2,
+  "repos_clean": 1,
+  "planned_commits": 5,
+  "commits_succeeded": 5,
+  "commits_failed": 0
 }
 ```
 
@@ -82,13 +86,14 @@ chore(.github): update .github configuration
 ### Implementation notes
 
 The reference implementation:
-- ~520 lines of Bash, 15 functions with `cs_` prefix
+- ~840 lines of Bash, 15 functions with `cs_` prefix
 - Reuses existing `ru` infrastructure: `build_json_envelope()`, `repo_preflight_check()`, `dir_lock_acquire()`, `is_file_denied()`, `resolve_repo_spec()`
-- 35 unit tests + 8 E2E tests (following upstream patterns from `test_unit_parsing_coverage.sh` and `test_e2e_framework.sh`)
+- 35 unit tests + 12 E2E tests (following upstream patterns from `test_unit_parsing_coverage.sh` and `test_e2e_framework.sh`)
 - NUL-safe `git status --porcelain=v1 -z` parsing
 - Per-group rollback on commit failure
 - Protected branch guard (refuses `main/master/release/*` without explicit flag)
 - `--respect-staging` preserves manually staged files as a separate group
+- Adversarial edge cases handled: filenames with commas/quotes, denylist enforcement on pre-staged files, partial commit failure tracking with non-zero exit codes
 
 Dry-run is default; `--execute` is explicit opt-in — because creating commits is harder to undo than skipping them.
 
@@ -109,6 +114,21 @@ Per CONTRIBUTING.md, this is a problem statement with a reference implementation
 
 ---
 
+<!-- Summary (structured, for automated triage) -->
+
+```yaml
+type: feature-gap
+component: commit-workflow
+severity: quality-of-life
+existing_workaround: none
+reference_implementation: joyshmitz/repo_updater@feature/commit-sweep
+test_coverage: 47 tests (35 unit + 12 e2e)
+dependencies: none (reuses existing ru infrastructure)
+breaking_changes: none (new command, no modifications to existing commands)
+```
+
+---
+
 > **Notes for ourselves (do NOT include in issue):**
 >
 > - Keep tone neutral/technical, not salesy
@@ -119,3 +139,7 @@ Per CONTRIBUTING.md, this is a problem statement with a reference implementation
 > - Don't oversell the roadmap (v0.2-v0.5) — focus on v0.1 value
 > - If he responds positively but wants to reimplement: great, that's the expected outcome
 > - If he says "my agents already handle this internally": ask what approach, learn from it
+> - The pirate/SpongeBob tone from issue #1 comment #3 was a mistake — keep it dry
+> - "Results from real usage" was dishonest if from test suite — changed to "Illustrative output from the test suite"
+> - Added explicit callback to #1 rejection reasoning ("Unlike fork management where gh repo sync covers the core action") — shows we listened
+> - YAML metadata block at bottom is for agent triage — GitHub renders it as code, humans skip it, agents parse it

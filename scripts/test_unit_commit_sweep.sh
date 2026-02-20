@@ -318,7 +318,7 @@ fi
 section "cs_detect_scope"
 
 # Test 25: most common directory wins
-result=$(printf 'src/a.py\nsrc/b.py\nlib/c.py' | cs_detect_scope)
+result=$(printf 'src/a.py\0src/b.py\0lib/c.py\0' | cs_detect_scope)
 if [[ "$result" == "src" ]]; then
     pass "src/a.py + src/b.py + lib/c.py → src (most common dir)"
 else
@@ -326,7 +326,7 @@ else
 fi
 
 # Test 26: root-level files → root
-result=$(printf 'a.py\nb.py' | cs_detect_scope)
+result=$(printf 'a.py\0b.py\0' | cs_detect_scope)
 if [[ "$result" == "root" ]]; then
     pass "a.py + b.py → root (no subdirs)"
 else
@@ -409,7 +409,7 @@ fi
 section "cs_files_to_json_array"
 
 # Test 34: two files → JSON array
-result=$(printf 'a.py\nb.py' | cs_files_to_json_array)
+result=$(printf 'a.py\0b.py\0' | cs_files_to_json_array)
 if [[ "$result" == '["a.py","b.py"]' ]]; then
     pass 'a.py + b.py → ["a.py","b.py"]'
 else

@@ -5489,6 +5489,7 @@ COMMANDS:
     fork-status     Show fork sync status against upstream
     fork-sync       Sync fork with upstream remote
     fork-clean      Clean main branch pollution (creates rescue branch)
+    commit-sweep    Group dirty worktrees into logical conventional commits
     robot-docs      Machine-readable CLI documentation (JSON)
 
 GLOBAL OPTIONS:
@@ -5551,6 +5552,13 @@ FORK OPTIONS (fork-status, fork-sync, fork-clean):
     --rebase             Rebase local work onto upstream
     --merge              Merge upstream into local branch
 
+COMMIT-SWEEP OPTIONS:
+    (no options)         Dry-run: show planned commits without executing
+    --execute            Execute the planned commits
+    --respect-staging    Preserve manually staged files as a separate group
+    --repos=PATTERN      Filter repos by glob pattern
+    --dry-run            Explicit dry-run (default behavior)
+
 IMPORT OPTIONS:
     --public             Force all repos to be added as public
     --private            Force all repos to be added as private
@@ -5601,6 +5609,8 @@ EXAMPLES:
     ru fork-sync --rebase Rebase local work onto upstream
     ru fork-clean         Clean main branch pollution (creates rescue branch)
     ru fork-clean --dry-run Preview what fork-clean would do
+    ru commit-sweep       Preview logical commit plan for dirty worktrees
+    ru commit-sweep --execute  Execute the planned commits
     ru robot-docs         Show all CLI docs as JSON (all topics)
     ru robot-docs commands Show command/flag documentation as JSON
 
@@ -5655,6 +5665,7 @@ show_quick_menu() {
         gum style "    $(gum style --foreground 82 'sync')           Clone missing repos and pull updates" >&2
         gum style "    $(gum style --foreground 82 'status')         Show repository status (read-only)" >&2
         gum style "    $(gum style --foreground 82 'review')         AI-assisted review of issues and PRs" >&2
+        gum style "    $(gum style --foreground 82 'commit-sweep')   Group dirty worktrees into logical commits" >&2
         printf '\n' >&2
 
         # Repository management
@@ -5721,6 +5732,7 @@ show_quick_menu() {
         printf '%b\n' "    ${GREEN}sync${RESET}           Clone missing repos and pull updates" >&2
         printf '%b\n' "    ${GREEN}status${RESET}         Show repository status (read-only)" >&2
         printf '%b\n' "    ${GREEN}review${RESET}         AI-assisted review of issues and PRs" >&2
+        printf '%b\n' "    ${GREEN}commit-sweep${RESET}   Group dirty worktrees into logical commits" >&2
         printf '\n' >&2
 
         # Repository management
@@ -7634,7 +7646,7 @@ parse_args() {
                 INIT_EXAMPLE="true"
                 shift
                 ;;
-            sync|status|init|add|remove|list|doctor|self-update|config|prune|import|review|agent-sweep|ai-sync|dep-update|robot-docs|fork-status|fork-sync|fork-clean)
+            sync|status|init|add|remove|list|doctor|self-update|config|prune|import|review|agent-sweep|ai-sync|dep-update|robot-docs|fork-status|fork-sync|fork-clean|commit-sweep)
                 COMMAND="$1"
                 shift
                 ;;
@@ -7643,12 +7655,27 @@ parse_args() {
                 ARGS+=("$1")
                 shift
                 ;;
+            --execute|--respect-staging)
+                # commit-sweep specific options
+                if [[ "$COMMAND" == "commit-sweep" ]]; then
+                    ARGS+=("$1")
+                    shift
+                else
+                    log_error "Unknown option: $1"
+                    show_help
+                    exit 4
+                fi
+                ;;
             --plan|--apply|--push|--analytics|--basic|--status|--mode=*|--repos=*|--skip-days=*|--priority=*|--max-repos=*|--max-runtime=*|--max-questions=*|--invalidate-cache=*|--auto-answer=*)
                 if [[ "$COMMAND" == "review" || "$COMMAND" == "agent-sweep" ]]; then
                     ARGS+=("$1")
                     shift
                 elif [[ "$COMMAND" == fork-status || "$COMMAND" == fork-sync || "$COMMAND" == fork-clean ]]; then
                     # fork commands accept --push and --repos=PATTERN
+                    ARGS+=("$1")
+                    shift
+                elif [[ "$COMMAND" == "commit-sweep" ]]; then
+                    # commit-sweep accepts --repos=PATTERN and --apply
                     ARGS+=("$1")
                     shift
                 elif [[ -z "$COMMAND" ]]; then
@@ -19651,6 +19678,369 @@ cmd_fork_clean() {
 }
 
 #==============================================================================
+# SECTION 13.6c: COMMIT-SWEEP COMMAND
+#==============================================================================
+
+# Classify a file path into a commit bucket: source, test, doc, config
+cs_classify_file() {
+    local filepath="$1"
+    local base
+    base=$(basename "$filepath")
+
+    # Test files
+    case "$filepath" in
+        test/*|tests/*|*_test.*|*_test/*|spec/*|*_spec.*|*.test.*|*.spec.*)
+            echo "test"; return ;;
+    esac
+    case "$base" in
+        test_*|*_test.rs|*_test.go|*_test.py|*_test.js|*_test.ts)
+            echo "test"; return ;;
+    esac
+
+    # Documentation
+    case "$base" in
+        *.md|*.rst|*.txt|*.adoc|CHANGELOG|CHANGES|AUTHORS|CONTRIBUTORS)
+            echo "doc"; return ;;
+    esac
+    case "$filepath" in
+        docs/*|doc/*|documentation/*)
+            echo "doc"; return ;;
+    esac
+
+    # Configuration / CI
+    case "$filepath" in
+        .github/*|.gitlab-ci*|.circleci/*|.travis*|Makefile|Justfile|Dockerfile*|docker-compose*|.dockerignore)
+            echo "config"; return ;;
+    esac
+    case "$base" in
+        *.toml|*.yaml|*.yml|*.json|*.lock|*.cfg|*.ini|*.conf|.gitignore|.editorconfig|.prettierrc*|.eslintrc*|Cargo.lock|package-lock.json|yarn.lock|flake.lock)
+            echo "config"; return ;;
+    esac
+
+    echo "source"
+}
+
+# Determine conventional commit prefix from bucket and git status code
+cs_commit_prefix() {
+    local bucket="$1"
+    local status_code="$2"
+
+    case "$bucket" in
+        test)   echo "test" ;;
+        doc)    echo "docs" ;;
+        config) echo "chore" ;;
+        source)
+            case "$status_code" in
+                A|"?")  echo "feat" ;;
+                R*)     echo "refactor" ;;
+                D)      echo "chore" ;;
+                *)      echo "fix" ;;
+            esac
+            ;;
+    esac
+}
+
+# Extract scope from file path (top-level directory or "root")
+cs_extract_scope() {
+    local filepath="$1"
+    local toplevel
+    toplevel="${filepath%%/*}"
+    if [[ "$toplevel" == "$filepath" ]]; then
+        echo "root"
+    else
+        echo "$toplevel"
+    fi
+}
+
+# Extract task ID from branch name (e.g. feature/bd-4f2a -> bd-4f2a)
+cs_extract_task_id() {
+    local branch="$1"
+    local task_id=""
+
+    # Common patterns: feature/BD-123, fix/bd-4f2a, task/PROJ-456
+    if [[ "$branch" =~ /(bd[-_][a-zA-Z0-9_]+) ]]; then
+        task_id="${BASH_REMATCH[1]}"
+    elif [[ "$branch" =~ /([A-Z]+-[0-9]+) ]]; then
+        task_id="${BASH_REMATCH[1]}"
+    fi
+
+    echo "$task_id"
+}
+
+# Process a single repository for commit-sweep
+# Args: repo_path repo_name execute_mode respect_staging
+# Outputs plan/results to stdout (JSON fragments) and logs to stderr
+cs_process_repo() {
+    local repo_path="$1"
+    local repo_name="$2"
+    local execute_mode="$3"
+    local respect_staging="$4"
+
+    if ! repo_is_dirty "$repo_path"; then
+        return 0
+    fi
+
+    # Get current branch
+    local branch
+    branch=$(git -C "$repo_path" symbolic-ref --short HEAD 2>/dev/null || echo "detached")
+
+    # Protected branch guard
+    case "$branch" in
+        main|master|release/*|production|staging)
+            log_warn "Skipping $repo_name: on protected branch '$branch' (use a feature branch)"
+            return 0
+            ;;
+    esac
+
+    local task_id
+    task_id=$(cs_extract_task_id "$branch")
+
+    # Parse git status into buckets
+    # Associative arrays: bucket -> file list (newline-separated)
+    local -A bucket_files
+    local -A bucket_statuses
+    local -A staged_files
+
+    # Handle pre-staged files
+    if [[ "$respect_staging" == "true" ]]; then
+        local staged_output
+        staged_output=$(git -C "$repo_path" diff --cached --name-status 2>/dev/null)
+        if [[ -n "$staged_output" ]]; then
+            staged_files["__has_staged"]="true"
+            while IFS=$'\t' read -r status_code filepath; do
+                [[ -z "$filepath" ]] && continue
+                staged_files["$filepath"]="$status_code"
+            done <<< "$staged_output"
+        fi
+    fi
+
+    # Parse porcelain status (NUL-safe)
+    # Format: XY filepath\0 for normal, XY old\0new\0 for renames/copies
+    while IFS= read -r -d '' entry; do
+        [[ -z "$entry" ]] && continue
+        local status_code="${entry:0:2}"
+        local filepath="${entry:3}"
+
+        # Clean up status code (trim spaces)
+        status_code="${status_code// /}"
+        [[ -z "$status_code" ]] && continue
+
+        # For renames (R) and copies (C), consume the second NUL-delimited path
+        # which is the destination; use the destination as the filepath
+        case "$status_code" in
+            R*|C*)
+                local new_path=""
+                IFS= read -r -d '' new_path || true
+                [[ -n "$new_path" ]] && filepath="$new_path"
+                ;;
+        esac
+
+        # Skip if already in staged group (when respecting staging)
+        if [[ "$respect_staging" == "true" && -n "${staged_files[$filepath]:-}" ]]; then
+            continue
+        fi
+
+        # Skip denied files
+        if is_file_denied "$filepath" 2>/dev/null; then
+            log_verbose "Skipping denied file: $filepath"
+            continue
+        fi
+
+        local bucket
+        bucket=$(cs_classify_file "$filepath")
+        bucket_files["$bucket"]+="$filepath"$'\n'
+        # Store the dominant status for this bucket
+        [[ -z "${bucket_statuses[$bucket]:-}" ]] && bucket_statuses["$bucket"]="$status_code"
+    done < <(git -C "$repo_path" status --porcelain=v1 -z 2>/dev/null)
+
+    # Build commit plan
+    local plan_entries=()
+    local commit_count=0
+
+    # If respecting staging and there are staged files, add them as first group
+    if [[ "$respect_staging" == "true" && "${staged_files[__has_staged]:-}" == "true" ]]; then
+        local staged_list=""
+        local staged_count=0
+        for f in "${!staged_files[@]}"; do
+            [[ "$f" == "__has_staged" ]] && continue
+            staged_list+="$f"$'\n'
+            ((staged_count++))
+        done
+        if [[ "$staged_count" -gt 0 ]]; then
+            plan_entries+=("staged|wip: manually staged changes|$staged_list")
+            ((commit_count++))
+        fi
+    fi
+
+    # Build a commit for each non-empty bucket
+    for bucket in source test doc config; do
+        local files="${bucket_files[$bucket]:-}"
+        [[ -z "$files" ]] && continue
+
+        # Remove trailing newline
+        files="${files%$'\n'}"
+
+        local status_code="${bucket_statuses[$bucket]:-M}"
+        local prefix
+        prefix=$(cs_commit_prefix "$bucket" "$status_code")
+
+        # Extract scope from first file
+        local first_file
+        first_file=$(head -1 <<< "$files")
+        local scope
+        scope=$(cs_extract_scope "$first_file")
+
+        # Build message
+        local msg="${prefix}(${scope}): update ${scope} ${bucket}"
+        if [[ -n "$task_id" ]]; then
+            msg+=" ($task_id)"
+        fi
+
+        plan_entries+=("$bucket|$msg|$files")
+        ((commit_count++))
+    done
+
+    if [[ "$commit_count" -eq 0 ]]; then
+        return 0
+    fi
+
+    # Output plan / execute
+    local succeeded=0
+    local failed=0
+
+    for entry in "${plan_entries[@]}"; do
+        local bucket_name msg file_list
+        IFS='|' read -r bucket_name msg file_list <<< "$entry"
+
+        local file_count
+        file_count=$(echo "$file_list" | grep -c .)
+
+        if [[ "$execute_mode" == "true" ]]; then
+            # Stage files
+            local add_failed="false"
+            while IFS= read -r f; do
+                [[ -z "$f" ]] && continue
+                if ! git -C "$repo_path" add -- "$f" 2>/dev/null; then
+                    add_failed="true"
+                fi
+            done <<< "$file_list"
+
+            # Commit
+            if [[ "$add_failed" != "true" ]] && git -C "$repo_path" commit -m "$msg" --no-verify 2>/dev/null; then
+                log_success "$repo_name: $msg ($file_count file(s))"
+                ((succeeded++))
+            else
+                # Rollback staging
+                git -C "$repo_path" reset HEAD -- 2>/dev/null
+                log_error "$repo_name: failed to commit '$msg'"
+                ((failed++))
+            fi
+        else
+            log_step "$repo_name: $msg ($file_count file(s))"
+            while IFS= read -r f; do
+                [[ -z "$f" ]] && continue
+                log_verbose "  $f"
+            done <<< "$file_list"
+            ((succeeded++))
+        fi
+    done
+
+    # Return counts via global accumulators
+    CS_TOTAL_COMMITS=$((CS_TOTAL_COMMITS + succeeded))
+    CS_FAILED_COMMITS=$((CS_FAILED_COMMITS + failed))
+    CS_DIRTY_REPOS=$((CS_DIRTY_REPOS + 1))
+    CS_PLANNED_COMMITS=$((CS_PLANNED_COMMITS + commit_count))
+}
+
+cmd_commit_sweep() {
+    local execute_mode="false"
+    local respect_staging="false"
+    local repos_pattern=""
+
+    # Parse arguments
+    for arg in "${ARGS[@]}"; do
+        case "$arg" in
+            --execute|--apply) execute_mode="true" ;;
+            --respect-staging) respect_staging="true" ;;
+            --repos=*) repos_pattern="${arg#--repos=}" ;;
+            --dry-run) execute_mode="false" ;;
+            -*)
+                log_error "Unknown commit-sweep option: $arg"
+                exit 4
+                ;;
+        esac
+    done
+
+    # Global accumulators
+    CS_TOTAL_COMMITS=0
+    CS_FAILED_COMMITS=0
+    CS_DIRTY_REPOS=0
+    CS_PLANNED_COMMITS=0
+    local repos_scanned=0
+
+    if [[ "$execute_mode" != "true" ]]; then
+        log_info "Commit-sweep (dry run — use --execute to apply)"
+    else
+        log_info "Commit-sweep (executing commits)"
+    fi
+
+    # Iterate repos
+    while IFS= read -r spec; do
+        [[ -z "$spec" ]] && continue
+
+        local url branch custom_name local_path repo_id
+        if ! resolve_repo_spec "$spec" "$PROJECTS_DIR" "$LAYOUT" url branch custom_name local_path repo_id; then
+            continue
+        fi
+
+        # Filter by pattern if specified
+        if [[ -n "$repos_pattern" ]]; then
+            local repo_name
+            repo_name=$(basename "$local_path")
+            # shellcheck disable=SC2254
+            case "$repo_name" in
+                $repos_pattern) ;;
+                *) continue ;;
+            esac
+        fi
+
+        # Skip if not a local git repo
+        [[ ! -d "$local_path/.git" ]] && continue
+
+        ((repos_scanned++))
+
+        local repo_name
+        repo_name=$(basename "$local_path")
+
+        cs_process_repo "$local_path" "$repo_name" "$execute_mode" "$respect_staging"
+    done < <(get_all_repos)
+
+    local clean_repos=$((repos_scanned - CS_DIRTY_REPOS))
+
+    # Summary
+    if [[ "$JSON_OUTPUT" == "true" ]]; then
+        local data_json
+        data_json=$(printf '{"summary":{"repos_scanned":%d,"repos_dirty":%d,"repos_clean":%d,"planned_commits":%d,"commits_succeeded":%d,"commits_failed":%d},"mode":"%s"}' \
+            "$repos_scanned" "$CS_DIRTY_REPOS" "$clean_repos" \
+            "$CS_PLANNED_COMMITS" "$CS_TOTAL_COMMITS" "$CS_FAILED_COMMITS" \
+            "$([ "$execute_mode" == "true" ] && echo "execute" || echo "dry-run")")
+        emit_structured "$(build_json_envelope "commit-sweep" "$data_json")"
+    else
+        printf '\n' >&2
+        log_info "Summary: $repos_scanned scanned, $CS_DIRTY_REPOS dirty, $clean_repos clean"
+        if [[ "$execute_mode" == "true" ]]; then
+            log_info "Commits: $CS_TOTAL_COMMITS succeeded, $CS_FAILED_COMMITS failed"
+        else
+            log_info "Planned: $CS_PLANNED_COMMITS commit(s) across $CS_DIRTY_REPOS repo(s)"
+            [[ "$CS_PLANNED_COMMITS" -gt 0 ]] && log_info "Run 'ru commit-sweep --execute' to apply"
+        fi
+    fi
+
+    [[ "$CS_FAILED_COMMITS" -gt 0 ]] && return 1
+    return 0
+}
+
+#==============================================================================
 # SECTION 13.7: QUALITY GATES FRAMEWORK
 #==============================================================================
 
@@ -21967,6 +22357,16 @@ _robot_docs_commands() {
       ]
     },
     {
+      "name": "commit-sweep",
+      "description": "Group dirty worktrees into logical conventional commits",
+      "flags": [
+        {"flag": "--execute", "description": "Execute the planned commits (default: dry-run)"},
+        {"flag": "--respect-staging", "description": "Preserve manually staged files as a separate group"},
+        {"flag": "--repos=PATTERN", "description": "Filter repos by glob pattern"},
+        {"flag": "--dry-run", "description": "Explicit dry-run (default behavior)"}
+      ]
+    },
+    {
       "name": "robot-docs",
       "description": "Machine-readable CLI documentation (JSON)",
       "args": ["[topic]"],
@@ -22295,6 +22695,7 @@ main() {
         fork-status) cmd_fork_status ;;
         fork-sync)   cmd_fork_sync ;;
         fork-clean)  cmd_fork_clean ;;
+        commit-sweep) cmd_commit_sweep ;;
         *)
             log_error "Unknown command: $COMMAND"
             show_help

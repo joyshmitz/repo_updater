@@ -5766,7 +5766,7 @@ COMMIT-SWEEP OPTIONS:
     --dry-run            Show commit plan without changes (default)
     --respect-staging    Keep manually staged files in a dedicated first group
     --allow-protected-branch
-                         Allow execute on protected branches (main, release/*)
+                         Allow execute on protected branches (main, production, staging, release/*)
 
 EXAMPLES:
     ru sync              Sync all configured repos
@@ -23420,7 +23420,7 @@ _robot_docs_commands() {
         {"flag": "--execute", "description": "Actually create commits (default: dry-run)"},
         {"flag": "--dry-run", "description": "Preview commit plan without changes (default)"},
         {"flag": "--respect-staging", "description": "Preserve pre-staged files as separate group"},
-        {"flag": "--allow-protected-branch", "description": "Allow commits on protected branches (main, release/*)"},
+        {"flag": "--allow-protected-branch", "description": "Allow commits on protected branches (main, production, staging, release/*)"},
         {"flag": "--json", "description": "Output plan as JSON to stdout"},
         {"flag": "--verbose", "description": "Show detailed classification info"}
       ]
@@ -23910,6 +23910,8 @@ SCJSON
 cs_extract_task_id() {
     local branch="$1"
     if [[ "$branch" =~ (bd-[a-z0-9]+) ]]; then
+        printf '%s' "${BASH_REMATCH[1]}"
+    elif [[ "$branch" =~ ([A-Z]+-[0-9]+) ]]; then
         printf '%s' "${BASH_REMATCH[1]}"
     fi
 }
@@ -24659,7 +24661,7 @@ cmd_commit_sweep() {
             current_branch=$(git -C "$repo_path" symbolic-ref --short HEAD 2>/dev/null || true)
             if [[ "$allow_protected" != "true" ]]; then
                 case "$current_branch" in
-                    main|release/*)
+                    main|production|staging|release/*)
                         log_error "Refusing to commit on protected branch '$current_branch'. Use --allow-protected-branch to override."
                         continue
                         ;;
